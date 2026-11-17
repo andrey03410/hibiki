@@ -1,3 +1,4 @@
+import { MAX_ARCHIVE_UPLOAD_BYTES } from "./upload-policy";
 import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, realpath, rm, lstat } from "node:fs/promises";
 import path from "node:path";
@@ -106,7 +107,7 @@ export class JobsService {
         "Архив должен быть загружен в storage",
       );
       invariant(
-        stat.size <= 20 * 1024 ** 3,
+        stat.size <= MAX_ARCHIVE_UPLOAD_BYTES,
         400,
         "import_size",
         "Архив больше допустимых 20 GiB",
@@ -235,9 +236,11 @@ export class JobsService {
     const now = new Date();
     await this.db.job.updateMany({
       where: {
-        state: "running",
         cancelRequested: false,
-        leaseUntil: { lte: now },
+        OR: [
+          { state: "queued" },
+          { state: "running", leaseUntil: { lte: now } },
+        ],
         attempt: { gte: MAX_ATTEMPTS },
       },
       data: {
@@ -291,6 +294,7 @@ export class JobsService {
     };
     const controller = new AbortController();
     this.active.set(job.id, controller);
+    if (this.stopping) controller.abort();
     let heartbeatBusy = false;
     let heartbeatPromise = Promise.resolve();
     const heartbeat = () => {
@@ -388,6 +392,9 @@ export class JobsService {
                 ? "queued"
                 : "failed",
             leaseUntil: null,
+            ...(!cancelled && this.stopping
+              ? { attempt: { decrement: 1 } }
+              : {}),
             error: cancelled
               ? null
               : this.stopping

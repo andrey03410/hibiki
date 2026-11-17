@@ -4,7 +4,7 @@ import multipart from "@fastify/multipart";
 import staticFiles from "@fastify/static";
 import { existsSync, createReadStream } from "node:fs";
 import { mkdir, rm, stat } from "node:fs/promises";
-import { resolve, join, extname } from "node:path";
+import { resolve, join, extname, basename } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -18,6 +18,7 @@ import { JobsService } from "./jobs";
 import { HttpError, invariant } from "./errors";
 import { allowedLocalPath, storagePath } from "./media";
 import { registerMcp } from "./mcp";
+import { uploadPolicy } from "./upload-policy";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -78,46 +79,38 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
   );
   app.decorateRequest("user", null);
   await app.register(cookie);
-  await app.register(multipart, {
-    limits: { files: 100, fileSize: 2 * 1024 ** 3, fields: 20 },
-  });
+  await app.register(multipart, uploadPolicy(false));
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof ZodError)
-      return reply
-        .code(400)
-        .send({
-          error: {
-            code: "validation",
-            message: error.issues
-              .map((i) => `${i.path.join(".")}: ${i.message}`)
-              .join("; "),
-          },
-        });
+      return reply.code(400).send({
+        error: {
+          code: "validation",
+          message: error.issues
+            .map((i) => `${i.path.join(".")}: ${i.message}`)
+            .join("; "),
+        },
+      });
     if (error instanceof HttpError)
       return reply
         .code(error.status)
         .send({ error: { code: error.code, message: error.message } });
     const e = error as { code?: string; statusCode?: number; message: string };
     if (e.code === "P2002")
-      return reply
-        .code(409)
-        .send({
-          error: { code: "conflict", message: "Такая запись уже существует" },
-        });
+      return reply.code(409).send({
+        error: { code: "conflict", message: "Такая запись уже существует" },
+      });
     const status =
       e.statusCode && e.statusCode >= 400 && e.statusCode < 500
         ? e.statusCode
         : /not found|не найден/i.test(e.message)
           ? 404
           : 400;
-    return reply
-      .code(status)
-      .send({
-        error: {
-          code: e.code ?? "operation_failed",
-          message: e.message.slice(0, 1000),
-        },
-      });
+    return reply.code(status).send({
+      error: {
+        code: e.code ?? "operation_failed",
+        message: e.message.slice(0, 1000),
+      },
+    });
   });
   app.addHook("onRequest", async (request) => {
     const origin = request.headers.origin;
@@ -283,23 +276,29 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     await mkdir(dir, { recursive: true });
     const items = [];
     let archiveJob;
-    for await (const part of request.parts()) {
+    for await (const part of request.parts(uploadPolicy(archive))) {
       if (part.type !== "file") continue;
-      const ext = extname(part.filename).toLowerCase();
+      const filename =
+        basename(part.filename.replaceAll("\\", "/"))
+          .replace(/[\x00-\x1f\x7f]/g, "_")
+          .slice(-240) || "upload";
+      const ext = extname(filename).toLowerCase();
       invariant(
         !archive || ext === ".zip",
         400,
         "archive_required",
         "Выберите архив .zip библиотеки Hibiki",
       );
-      const tmp = join(dir, `${randomUUID()}${ext}`);
+      const temporaryDir = join(dir, randomUUID());
+      await mkdir(temporaryDir);
+      const tmp = join(temporaryDir, filename);
       try {
         await pipeline(part.file, createWriteStream(tmp, { flags: "wx" }));
         invariant(
           !part.file.truncated,
           413,
           "file_too_large",
-          "Файл превышает 2 ГиБ",
+          archive ? "Архив превышает 20 ГиБ" : "Файл превышает 2 ГиБ",
         );
         if (archive) {
           invariant(!archiveJob, 400, "one_archive", "Загрузите один архив");
@@ -312,7 +311,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
               .item,
           );
       } finally {
-        await rm(tmp, { force: true });
+        await rm(temporaryDir, { recursive: true, force: true });
       }
     }
     invariant(

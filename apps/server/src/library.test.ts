@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import ffmpeg from "ffmpeg-static";
 import { testContext, wav } from "./test-utils";
 import { hashFile, inspectFile } from "./media";
+import { exportLibrary, inspectArchive } from "./portability";
 
 describe("personal library", () => {
   let ctx: Awaited<ReturnType<typeof testContext>>;
@@ -305,4 +306,223 @@ describe("personal library", () => {
       (await ctx.library.snapshot(ctx.userId)).tags.map((tag) => tag.name),
     ).toEqual(["Committed outside"]);
   });
+  it("cleans ordering and saved queues atomically when dynamic items are deleted", async () => {
+    const items = await Promise.all(
+      ["abcdefghijk", "lmnopqrstuv", "12345678901"].map((externalId) =>
+        ctx.library.upsertYoutube(ctx.userId, {
+          externalId,
+          title: externalId,
+        }),
+      ),
+    );
+    const [a, b, c] = items.map((result) => result.item.id);
+    const playlist = await ctx.library.savePlaylist(ctx.userId, {
+      title: "Dynamic",
+      definition: {
+        version: 1,
+        sort: "source",
+        rule: { type: "filter" },
+        manualOrder: [a, b, c],
+      },
+    });
+    await ctx.library.setSettings(ctx.userId, {
+      queue: [a, b, c],
+      originalQueue: [c, a, b],
+      queueIndex: 1,
+      position: 24,
+    });
+    await ctx.library.deleteItem(ctx.userId, a!);
+    expect(await ctx.library.getSettings(ctx.userId)).toMatchObject({
+      queue: [b, c],
+      originalQueue: [c, b],
+      queueIndex: 0,
+      position: 24,
+    });
+    expect(
+      (await ctx.library.resolve(ctx.userId, playlist.id)).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual([b, c]);
+    const destination = join(ctx.root, "after-delete.zip");
+    await exportLibrary(ctx.db, ctx.userId, ctx.root, destination, {
+      includeFiles: false,
+    });
+    expect(
+      (await inspectArchive(destination, join(ctx.root, "after-delete")))
+        .preview.canApply,
+    ).toBe(true);
+    await ctx.library.deleteItem(ctx.userId, b!);
+    expect(await ctx.library.getSettings(ctx.userId)).toMatchObject({
+      queue: [c],
+      originalQueue: [c],
+      queueIndex: 0,
+      position: 0,
+    });
+    const explicit = await ctx.library.savePlaylist(ctx.userId, {
+      title: "Explicit",
+      definition: {
+        version: 1,
+        sort: "source",
+        rule: { type: "items", ids: [c!] },
+      },
+    });
+    await expect(ctx.library.deleteItem(ctx.userId, c!)).rejects.toThrow(
+      /используется/,
+    );
+    expect(
+      (await ctx.library.resolve(ctx.userId, explicit.id)).items,
+    ).toHaveLength(1);
+  });
+  it("normalizes both queues, preserves the current retained item and clamps malformed playback values", async () => {
+    const a = (
+      await ctx.library.upsertYoutube(ctx.userId, { externalId: "abcdefghijk" })
+    ).item.id;
+    const b = (
+      await ctx.library.upsertYoutube(ctx.userId, { externalId: "lmnopqrstuv" })
+    ).item.id;
+    expect(
+      await ctx.library.setSettings(ctx.userId, {
+        queue: ["foreign", a, b],
+        originalQueue: ["foreign", b, a],
+        queueIndex: 2,
+        position: 17,
+      }),
+    ).toMatchObject({
+      queue: [a, b],
+      originalQueue: [b, a],
+      queueIndex: 1,
+      position: 17,
+    });
+    expect(
+      await ctx.library.setSettings(ctx.userId, {
+        queue: [null, a, b],
+        queueIndex: 1,
+        position: 19,
+      }),
+    ).toMatchObject({ queue: [a, b], queueIndex: 0, position: 19 });
+    expect(
+      await ctx.library.setSettings(ctx.userId, {
+        queueIndex: 999,
+        position: -5,
+      }),
+    ).toMatchObject({ queueIndex: 1, position: 0 });
+    expect(
+      await ctx.library.setSettings(ctx.userId, {
+        queueIndex: 0.5,
+        position: "garbage",
+        originalQueue: ["foreign", a],
+      }),
+    ).toMatchObject({ queueIndex: 0, position: 0, originalQueue: [a] });
+  });
+  it("atomically reuses the YouTube identity for concurrent imports and preserves custom titles", async () => {
+    const results = await Promise.all([
+      ctx.library.upsertYoutube(ctx.userId, {
+        externalId: "abcdefghijk",
+        title: "Original",
+      }),
+      ctx.library.upsertYoutube(ctx.userId, {
+        externalId: "abcdefghijk",
+        title: "Updated",
+      }),
+    ]);
+    expect(results[0]!.item.id).toBe(results[1]!.item.id);
+    expect(await ctx.db.item.count({ where: { ownerId: ctx.userId } })).toBe(1);
+    expect(await ctx.db.source.count({ where: { ownerId: ctx.userId } })).toBe(
+      1,
+    );
+    await ctx.library.updateItem(ctx.userId, results[0]!.item.id, {
+      title: "Mine",
+    });
+    await Promise.all([
+      ctx.library.upsertYoutube(ctx.userId, {
+        externalId: "abcdefghijk",
+        title: "New 1",
+      }),
+      ctx.library.upsertYoutube(ctx.userId, {
+        externalId: "abcdefghijk",
+        title: "New 2",
+      }),
+    ]);
+    expect(
+      (await ctx.library.getItem(ctx.userId, results[0]!.item.id)).title,
+    ).toBe("Mine");
+  });
+  it("rejects one of concurrent graph edits before they can introduce a cycle", async () => {
+    const definition = {
+      version: 1 as const,
+      sort: "source" as const,
+      rule: { type: "items" as const, ids: [] },
+    };
+    const a = await ctx.library.savePlaylist(ctx.userId, {
+      title: "A",
+      definition,
+    });
+    const b = await ctx.library.savePlaylist(ctx.userId, {
+      title: "B",
+      definition,
+    });
+    const results = await Promise.allSettled([
+      ctx.library.savePlaylist(
+        ctx.userId,
+        {
+          title: "A",
+          definition: { ...definition, rule: { type: "playlist", id: b.id } },
+        },
+        a.id,
+      ),
+      ctx.library.savePlaylist(
+        ctx.userId,
+        {
+          title: "B",
+          definition: { ...definition, rule: { type: "playlist", id: a.id } },
+        },
+        b.id,
+      ),
+    ]);
+    expect(
+      results.filter((result) => result.status === "rejected"),
+    ).toHaveLength(1);
+    expect((await ctx.library.resolve(ctx.userId, a.id)).items).toEqual([]);
+    expect((await ctx.library.resolve(ctx.userId, b.id)).items).toEqual([]);
+    await expect(
+      ctx.library.savePlaylist(
+        ctx.otherUserId,
+        { title: "Foreign", definition },
+        a.id,
+      ),
+    ).rejects.toThrow(/не найден/);
+  });
+
+  it.each(["missing", "corrupt"])(
+    "repairs a %s stored file before reusing an available source",
+    async (mode) => {
+      const input = join(ctx.root, "repair.wav");
+      await writeFile(input, wav());
+      const first = await ctx.library.importLocal(ctx.userId, input);
+      const file = await ctx.db.mediaFile.findUniqueOrThrow({
+        where: { id: first.item.sources[0]!.fileId! },
+      });
+      if (mode === "missing") await rm(join(ctx.root, file.path));
+      else {
+        const bytes = wav();
+        bytes[50] ^= 1;
+        await writeFile(join(ctx.root, file.path), bytes);
+      }
+      const second = await ctx.library.importLocal(ctx.userId, input);
+      expect(second.item.id).toBe(first.item.id);
+      expect(second.item.sources[0]!.fileId).toBe(file.id);
+      expect(
+        await readFile(
+          join(
+            ctx.root,
+            (
+              await ctx.db.mediaFile.findUniqueOrThrow({
+                where: { id: file.id },
+              })
+            ).path,
+          ),
+        ),
+      ).toEqual(wav());
+    },
+  );
 });

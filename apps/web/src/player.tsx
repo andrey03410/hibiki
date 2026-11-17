@@ -29,6 +29,7 @@ import {
   nextPlayableIndex,
   firstPlayableIndex,
   playbackSources,
+  sourceLoadPosition,
   restorePlayback,
   type PlaybackSettings,
 } from "./player-model.ts";
@@ -211,6 +212,19 @@ export function PlayerProvider({
   const sources = current ? playbackSources(current) : [],
     source = sources[sourceIndex];
   const isYoutube = source?.provider === "youtube";
+  const sourceIdentity = useRef<
+    { itemId?: string; sourceId?: string } | undefined
+  >(undefined);
+  const identity = { itemId: current?.id, sourceId: source?.id };
+  // Refreshing the library can add a preferred local source while this item is playing.
+  // Capture the live position before the new keyed media element mounts.
+  seekOnLoad.current = sourceLoadPosition(
+    sourceIdentity.current,
+    identity,
+    settings.position,
+    seekOnLoad.current,
+  );
+  sourceIdentity.current = identity;
   function patch(value: Partial<PlaybackSettings>) {
     setSettings((old) => ({ ...old, ...value }));
   }

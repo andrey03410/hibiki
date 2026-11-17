@@ -1,3 +1,7 @@
+import {
+  MAX_MEDIA_UPLOAD_BYTES,
+  MAX_ARCHIVE_UPLOAD_BYTES,
+} from "./upload-policy";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -49,11 +53,9 @@ export function registerMcp(app: FastifyInstance, services: Services) {
       method,
       url: "/mcp",
       handler: async (_request, reply) =>
-        reply
-          .code(405)
-          .send({
-            error: { code: "method", message: "Используйте POST /mcp" },
-          }),
+        reply.code(405).send({
+          error: { code: "method", message: "Используйте POST /mcp" },
+        }),
     });
 }
 
@@ -135,7 +137,8 @@ export function buildMcp(ownerId: string, s: Services) {
           "library_export → job_get → downloadUrl; library_import_begin → upload → job_get preview → library_import_apply",
         constraints: {
           platform: "desktop",
-          maxUploadBytes: 2 * 1024 ** 3,
+          maxUploadBytes: MAX_MEDIA_UPLOAD_BYTES,
+          maxArchiveUploadBytes: MAX_ARCHIVE_UPLOAD_BYTES,
           providers: ["local", "youtube"],
           backgroundYoutubeGuaranteed: false,
         },
@@ -233,6 +236,7 @@ export function buildMcp(ownerId: string, s: Services) {
     return {
       uploadUrl: `${process.env.PUBLIC_URL ?? "http://localhost:8790"}/api/uploads/${key}`,
       method: "POST",
+      maxBytes: archive ? MAX_ARCHIVE_UPLOAD_BYTES : MAX_MEDIA_UPLOAD_BYTES,
       field: "file",
       expiresAt: new Date(expires).toISOString(),
       purpose: archive ? "library import preview" : "media upload",

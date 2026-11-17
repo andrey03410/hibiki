@@ -172,4 +172,45 @@ describe("durable jobs", () => {
     await jobs.runOnce();
     expect((await jobs.get(ctx.otherUserId, apply.id)).state).toBe("done");
   });
+  it("returns a third claimed attempt on graceful shutdown so a fresh worker can finish", async () => {
+    const executable = join(ctx.root, "graceful-yt-dlp");
+    await writeFile(
+      executable,
+      "#!/usr/bin/env node\nsetInterval(()=>{},1000);\n",
+    );
+    await chmod(executable, 0o755);
+    process.env.YTDLP_PATH = executable;
+    const job = await jobs.create(ctx.userId, "youtube-import", {
+      url: "https://youtube.com/watch?v=abcdefghijk",
+    });
+    await ctx.db.job.update({ where: { id: job.id }, data: { attempt: 2 } });
+    const running = jobs.runOnce();
+    for (
+      let n = 0;
+      n < 100 && (await jobs.get(ctx.userId, job.id)).state !== "running";
+      n++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    expect((await jobs.get(ctx.userId, job.id)).attempt).toBe(3);
+    await jobs.stop();
+    await running;
+    expect(await jobs.get(ctx.userId, job.id)).toMatchObject({
+      state: "queued",
+      attempt: 2,
+    });
+    await writeFile(
+      executable,
+      '#!/usr/bin/env node\nconsole.log(JSON.stringify({id:"abcdefghijk",title:"Recovered",duration:1}));\n',
+    );
+    const restarted = new JobsService(ctx.db, ctx.library, ctx.root);
+    try {
+      expect(await restarted.runOnce()).toBe(true);
+      expect(await restarted.get(ctx.userId, job.id)).toMatchObject({
+        state: "done",
+        attempt: 3,
+      });
+    } finally {
+      await restarted.stop();
+    }
+  });
 });

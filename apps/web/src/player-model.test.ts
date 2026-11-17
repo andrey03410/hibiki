@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   playbackSources,
+  sourceLoadPosition,
   restorePlayback,
   nextPlayableIndex,
   firstPlayableIndex,
@@ -109,5 +110,29 @@ describe("browser playback model", () => {
     expect(
       nextPlayableIndex(["audio", "video"], 1, [audio, video], 1, true),
     ).toBe(0);
+  });
+  it("preserves live position when a preferred local copy appears during YouTube playback", () => {
+    const remote = {
+      ...audio,
+      sources: audio.sources.filter(
+        (source: any) => source.provider === "youtube",
+      ),
+    };
+    const before = {
+      itemId: remote.id,
+      sourceId: playbackSources(remote)[0]!.id,
+    };
+    const after = { itemId: audio.id, sourceId: playbackSources(audio)[0]!.id };
+    expect(sourceLoadPosition(before, after, 37, 0)).toBe(37);
+  });
+  it("preserves position on source failure, resets different items and respects restored starts", () => {
+    const local = { itemId: audio.id, sourceId: "local" };
+    const fallback = { itemId: audio.id, sourceId: "yt" };
+    expect(sourceLoadPosition(local, fallback, 28, 0)).toBe(28);
+    expect(
+      sourceLoadPosition(fallback, { itemId: video.id, sourceId: "v" }, 0, 0),
+    ).toBe(0);
+    expect(sourceLoadPosition(undefined, local, 42, 42)).toBe(42);
+    expect(sourceLoadPosition(local, local, 50, 42)).toBe(42);
   });
 });

@@ -89,3 +89,19 @@ export function firstPlayableIndex(
     ? selected
     : nextPlayableIndex(queue, selected, items, 1, true);
 }
+
+interface SourceIdentity {
+  itemId?: string;
+  sourceId?: string;
+}
+export function sourceLoadPosition(
+  previous: SourceIdentity | undefined,
+  current: SourceIdentity,
+  livePosition: number,
+  requestedPosition: number,
+) {
+  return previous?.itemId === current.itemId &&
+    previous?.sourceId !== current.sourceId
+    ? livePosition
+    : requestedPosition;
+}

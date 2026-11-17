@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Db } from "./db";
+import type { Prisma } from "@prisma/client";
 import { HttpError, invariant } from "./errors";
 import {
   copyMedia,
+  hashFile,
+  storagePath,
   inspectFile,
   preparePlayback,
   type MediaInspection,
@@ -109,18 +112,24 @@ export class LibraryService {
     public storageRoot: string,
   ) {}
   async snapshot(ownerId: string): Promise<LibraryDto> {
+    return this.snapshotWith(ownerId, this.db);
+  }
+  private async snapshotWith(
+    ownerId: string,
+    db: Prisma.TransactionClient,
+  ): Promise<LibraryDto> {
     const [items, tags, playlists, jobs] = await Promise.all([
-      this.db.item.findMany({
+      db.item.findMany({
         where: { ownerId },
         include: itemInclude,
         orderBy: { createdAt: "desc" },
       }),
-      this.db.tag.findMany({ where: { ownerId }, orderBy: { name: "asc" } }),
-      this.db.playlist.findMany({
+      db.tag.findMany({ where: { ownerId }, orderBy: { name: "asc" } }),
+      db.playlist.findMany({
         where: { ownerId },
         orderBy: { createdAt: "asc" },
       }),
-      this.db.job.findMany({
+      db.job.findMany({
         where: { ownerId },
         orderBy: { createdAt: "desc" },
         take: 50,
@@ -163,21 +172,50 @@ export class LibraryService {
             },
           })
         : canonical;
+    const fileIntact = async (
+      file: { path: string; hash: string; bytes: bigint } | null,
+    ) => {
+      if (!file) return false;
+      try {
+        const path = storagePath(this.storageRoot, file.path);
+        const info = await stat(path);
+        return (
+          info.isFile() &&
+          BigInt(info.size) === file.bytes &&
+          (await hashFile(path, options.signal)) === file.hash
+        );
+      } catch (error) {
+        options.signal?.throwIfAborted();
+        return false;
+      }
+    };
     if (prior) {
       const item = await this.getItem(ownerId, prior.itemId);
-      if (
-        (media.browserCompatible && prior.status === "available") ||
-        (!media.browserCompatible &&
-          prior.status === "unavailable" &&
-          prior.reason === "unsupported_codec" &&
-          item.sources.some(
-            (source) =>
-              source.provider === "local" &&
-              source.status === "available" &&
-              source.fileId,
-          ))
-      )
-        return { item, reused: true };
+      const original = prior.fileId
+        ? await this.db.mediaFile.findUnique({ where: { id: prior.fileId } })
+        : null;
+      if (await fileIntact(original)) {
+        if (media.browserCompatible && prior.status === "available")
+          return { item, reused: true };
+        if (!media.browserCompatible && prior.reason === "unsupported_codec") {
+          for (const source of item.sources) {
+            if (
+              source.provider !== "local" ||
+              source.status !== "available" ||
+              !source.fileId
+            )
+              continue;
+            if (
+              await fileIntact(
+                await this.db.mediaFile.findUnique({
+                  where: { id: source.fileId },
+                }),
+              )
+            )
+              return { item, reused: true };
+          }
+        }
+      }
     }
     const prepared = await preparePlayback(
       filePath,
@@ -190,7 +228,7 @@ export class LibraryService {
         let file = await this.db.mediaFile.findUnique({
           where: { ownerId_hash: { ownerId, hash: info.hash } },
         });
-        if (!file) {
+        if (!(await fileIntact(file))) {
           const path = await copyMedia(
             this.storageRoot,
             ownerId,
@@ -210,10 +248,16 @@ export class LibraryService {
               kind: info.kind,
               duration: info.duration,
             },
-            update: {},
+            update: {
+              path,
+              mime: info.mime,
+              bytes: info.bytes,
+              kind: info.kind,
+              duration: info.duration,
+            },
           });
         }
-        return file;
+        return file!;
       };
       options.signal?.throwIfAborted();
       const file = await store(filePath, media);
@@ -328,25 +372,25 @@ export class LibraryService {
       "Некорректный ID YouTube",
     );
     const key = `youtube:${metadata.externalId}`;
-    const prior = await this.db.source.findUnique({
-      where: { ownerId_key: { ownerId, key } },
-      include: { item: true },
-    });
-    const meaningful =
-      metadata.title?.trim() &&
-      !/^\[?(private|deleted|unavailable) video\]?$/i.test(
-        metadata.title.trim(),
-      );
-    const title = meaningful
-      ? metadata.title!.trim().slice(0, 500)
-      : prior?.item.originalTitle || `YouTube · ${metadata.externalId}`;
-    const state =
-      metadata.available === false
-        ? "unavailable"
-        : metadata.available === true
-          ? "available"
-          : (prior?.status ?? "unknown");
     const row = await this.db.$transaction(async (tx) => {
+      const prior = await tx.source.findUnique({
+        where: { ownerId_key: { ownerId, key } },
+        include: { item: true },
+      });
+      const meaningful =
+        metadata.title?.trim() &&
+        !/^\[?(private|deleted|unavailable) video\]?$/i.test(
+          metadata.title.trim(),
+        );
+      const title = meaningful
+        ? metadata.title!.trim().slice(0, 500)
+        : prior?.item.originalTitle || `YouTube · ${metadata.externalId}`;
+      const state =
+        metadata.available === false
+          ? "unavailable"
+          : metadata.available === true
+            ? "available"
+            : (prior?.status ?? "unknown");
       const item = prior
         ? await tx.item.update({
             where: { id: prior.itemId },
@@ -396,11 +440,11 @@ export class LibraryService {
           checkedAt: new Date(),
         },
       });
-      return item;
+      return { id: item.id, reused: Boolean(prior) };
     });
     return {
       item: await this.getItem(ownerId, row.id),
-      reused: Boolean(prior),
+      reused: row.reused,
     };
   }
   async updateItem(
@@ -441,18 +485,46 @@ export class LibraryService {
     return this.getItem(ownerId, id);
   }
   async deleteItem(ownerId: string, id: string) {
-    await this.getItem(ownerId, id);
-    const snapshot = await this.snapshot(ownerId);
-    const uses = snapshot.playlists.filter((p) =>
-      collectReferences(p.definition.rule).itemIds.includes(id),
-    );
-    invariant(
-      !uses.length,
-      409,
-      "item_in_use",
-      `Медиа используется в плейлистах: ${uses.map((p) => p.title).join(", ")}`,
-    );
-    await this.db.item.delete({ where: { id } });
+    await this.db.$transaction(async (tx) => {
+      const snapshot = await this.snapshotWith(ownerId, tx);
+      invariant(
+        snapshot.items.some((item) => item.id === id),
+        404,
+        "item_not_found",
+        "Медиа не найдено",
+      );
+      const uses = snapshot.playlists.filter((p) =>
+        collectReferences(p.definition.rule).itemIds.includes(id),
+      );
+      invariant(
+        !uses.length,
+        409,
+        "item_in_use",
+        `Медиа используется в плейлистах: ${uses.map((p) => p.title).join(", ")}`,
+      );
+      for (const playlist of snapshot.playlists) {
+        if (!playlist.definition.manualOrder?.includes(id)) continue;
+        const definition = {
+          ...playlist.definition,
+          manualOrder: playlist.definition.manualOrder.filter(
+            (itemId) => itemId !== id,
+          ),
+        };
+        await tx.playlist.update({
+          where: { id: playlist.id },
+          data: {
+            definitionJson: JSON.stringify(definition),
+            revision: { increment: 1 },
+          },
+        });
+      }
+      await tx.item.delete({ where: { id } });
+      const settings = await tx.setting.findUnique({
+        where: { userId: ownerId },
+      });
+      if (settings)
+        await this.writeSettings(ownerId, JSON.parse(settings.json), tx);
+    });
   }
   async createTag(
     ownerId: string,
@@ -543,33 +615,33 @@ export class LibraryService {
       "invalid_title",
       "Название плейлиста: от 1 до 200 символов",
     );
-    if (id)
-      invariant(
-        await this.db.playlist.findFirst({ where: { id, ownerId } }),
-        404,
-        "playlist_not_found",
-        "Плейлист не найден",
-      );
     const definition = playlistDefinitionSchema.parse(input.definition);
-    const snapshot = await this.snapshot(ownerId);
-    try {
-      resolvePlaylist(definition, snapshot, id);
-    } catch (error) {
-      throw new HttpError(422, "invalid_playlist", (error as Error).message);
-    }
-    const data = {
-      title: input.title.trim(),
-      description: input.description?.slice(0, 2000) ?? "",
-      definitionJson: JSON.stringify(definition),
-    };
-    const row = id
-      ? await this.db.playlist.update({
-          where: { id },
-          data: { ...data, revision: { increment: 1 } },
-        })
-      : await this.db.playlist.create({
-          data: { id: randomUUID(), ownerId, ...data },
-        });
+    const row = await this.db.$transaction(async (tx) => {
+      if (id)
+        invariant(
+          await tx.playlist.findFirst({ where: { id, ownerId } }),
+          404,
+          "playlist_not_found",
+          "Плейлист не найден",
+        );
+      const snapshot = await this.snapshotWith(ownerId, tx);
+      try {
+        resolvePlaylist(definition, snapshot, id);
+      } catch (error) {
+        throw new HttpError(422, "invalid_playlist", (error as Error).message);
+      }
+      const data = {
+        title: input.title.trim(),
+        description: input.description?.slice(0, 2000) ?? "",
+        definitionJson: JSON.stringify(definition),
+      };
+      return id
+        ? tx.playlist.update({
+            where: { id },
+            data: { ...data, revision: { increment: 1 } },
+          })
+        : tx.playlist.create({ data: { id: randomUUID(), ownerId, ...data } });
+    });
     return playlistDto(row);
   }
   async preview(ownerId: string, definition: PlaylistDefinition, id?: string) {
@@ -629,20 +701,69 @@ export class LibraryService {
       "settings_too_large",
       "Настройки слишком велики",
     );
-    const current = await this.getSettings(ownerId);
-    const next = { ...current, ...value };
-    if (Array.isArray(next.queue)) {
-      const ids = (next.queue as unknown[]).filter(
-        (id): id is string => typeof id === "string",
-      );
-      const owned = await this.db.item.findMany({
-        where: { id: { in: ids }, ownerId },
-        select: { id: true },
+    return this.db.$transaction(async (tx) => {
+      const current = await tx.setting.findUnique({
+        where: { userId: ownerId },
       });
-      const allowed = new Set(owned.map((i) => i.id));
-      next.queue = ids.filter((id) => allowed.has(id));
-    }
-    await this.db.setting.upsert({
+      return this.writeSettings(
+        ownerId,
+        { ...(current ? JSON.parse(current.json) : {}), ...value },
+        tx,
+      );
+    });
+  }
+  private async writeSettings(
+    ownerId: string,
+    next: Record<string, unknown>,
+    tx: Prisma.TransactionClient,
+  ) {
+    const owned = await tx.item.findMany({
+      where: { ownerId },
+      select: { id: true, duration: true },
+    });
+    const allowed = new Map(owned.map((item) => [item.id, item]));
+    const oldQueue: unknown[] = Array.isArray(next.queue) ? next.queue : [];
+    const oldIndex =
+      typeof next.queueIndex === "number" && Number.isFinite(next.queueIndex)
+        ? Math.max(
+            0,
+            Math.min(
+              Math.max(0, oldQueue.length - 1),
+              Math.floor(next.queueIndex),
+            ),
+          )
+        : 0;
+    const currentId = oldQueue[oldIndex];
+    const isRetained = (id: unknown): id is string =>
+      typeof id === "string" && allowed.has(id);
+    const queue = oldQueue.filter(isRetained);
+    const retained =
+      typeof currentId === "string" ? queue.indexOf(currentId) : -1;
+    // Prefer the next retained occurrence, then the preceding end of the queue.
+    const nextIndex =
+      retained >= 0
+        ? retained
+        : Math.min(
+            oldQueue.slice(0, oldIndex).filter(isRetained).length,
+            Math.max(0, queue.length - 1),
+          );
+    const duration = allowed.get(queue[nextIndex] ?? "")?.duration;
+    let position =
+      retained >= 0 &&
+      typeof next.position === "number" &&
+      Number.isFinite(next.position)
+        ? Math.max(0, next.position)
+        : 0;
+    if (duration != null && Number.isFinite(duration))
+      position = Math.min(position, duration);
+    Object.assign(next, { queue, queueIndex: nextIndex, position });
+    if (next.originalQueue !== undefined)
+      next.originalQueue = Array.isArray(next.originalQueue)
+        ? next.originalQueue.filter(
+            (id): id is string => typeof id === "string" && allowed.has(id),
+          )
+        : [];
+    await tx.setting.upsert({
       where: { userId: ownerId },
       create: { userId: ownerId, json: JSON.stringify(next) },
       update: { json: JSON.stringify(next) },

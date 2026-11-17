@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { copyFile, mkdir, stat, realpath, rm } from "node:fs/promises";
+import { copyFile, mkdir, stat, realpath, rm, rename } from "node:fs/promises";
 import {
   resolve,
   relative,
@@ -330,7 +330,13 @@ export async function copyMedia(
   const dir = resolve(root, "media", ownerId);
   await mkdir(dir, { recursive: true });
   const target = resolve(dir, `${hash}${ext}`);
-  await copyFile(source, target);
+  const temporary = resolve(dir, `.${hash}-${randomUUID()}.tmp`);
+  try {
+    await copyFile(source, temporary);
+    await rename(temporary, target);
+  } finally {
+    await rm(temporary, { force: true });
+  }
   return relative(root, target);
 }
 export async function allowedLocalPath(path: string) {
