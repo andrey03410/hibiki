@@ -2,7 +2,7 @@
 id: '02'
 title: YouTube-плейлисты и видео на первом плане
 track: product
-stage: product
+stage: tech
 branch: codex/02-watch-playlists
 pr:
 started: 2026-11-17
@@ -19,7 +19,7 @@ autonomous: true
 ## Стадии
 
 - [x] Бриф — [brief.md](brief.md).
-- [ ] Продукт — `product.md`.
+- [x] Продукт — [product.md](product.md).
 - [ ] Техника — `tech.md`.
 - [ ] План — `plan.md`.
 - [ ] Реализация и QG — `verify.md`.
