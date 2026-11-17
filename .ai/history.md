@@ -4,6 +4,7 @@
 |---|---|---|
 | 2026-11-17 | Инициализация публичного репозитория: документы, слой знаний, feature/verify, без кода приложения | Прямое поручение владельца; начальный коммит в main без PR |
 | 2026-11-17 | [01. Первая итерация Hibiki](features/01-mvp/README.md): медиатека, mixed player, правила плейлистов, MCP, worker и перенос | [PR #1](https://github.com/andrey03410/hibiki/pull/1); автономно, 90 тестов и живые проверки |
+| 2026-11-17 | [02. YouTube-плейлисты и большой плеер](features/02-watch-playlists/README.md): 136 OP + 73 ED ссылочно, 3 Key OST, watch layout, audio artwork, fullscreen с idle 3 с | [PR #2](https://github.com/andrey03410/hibiki/pull/2); автономно, 112 тестов, Node 22 CI и живой браузер/MCP |
 
 Первая продуктовая задача — [01-mvp](features/01-mvp/README.md).
 Начальная основа была создана без кода. Полная первая итерация выполнена после

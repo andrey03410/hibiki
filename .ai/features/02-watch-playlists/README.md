@@ -2,11 +2,11 @@
 id: '02'
 title: YouTube-плейлисты и видео на первом плане
 track: product
-stage: review
+stage: merged
 branch: codex/02-watch-playlists
 pr: https://github.com/andrey03410/hibiki/pull/2
 started: 2026-11-17
-merged:
+merged: 2026-11-17
 autonomous: true
 ---
 
@@ -24,12 +24,15 @@ autonomous: true
 - [x] План — [plan.md](plan.md).
 - [x] Реализация и QG — [verify.md](verify.md).
 - [x] Независимое ревью — P2 artwork исправлена и перепроверена, иных существенных замечаний нет.
-- [ ] PR, CI и автономный merge в main.
+- [x] [PR #2](https://github.com/andrey03410/hibiki/pull/2), CI и автономный merge в main.
 
-## Следующий шаг
+## Результат
 
-[PR #2](https://github.com/andrey03410/hibiki/pull/2) создан; дождаться CI и автономно влить. Локально 112 тестов/build/tsc и живой
-браузер/MCP зелёные; в библиотеке 136OP+73ED+3Key, без скачивания YouTube.
+136 опенингов + 73 эндинга ссылочно, 3 Key OST и смешанная очередь из 212 items.
+Большой watch-плеер, обложки аудио, fullscreen и controls с idle 3 с.
+Локальные 112 тестов/build/tsc, независимое ревью, живая проверка и Node 22 CI
+пройдены. Закрытие и вливание выполняются автономно через PR #2; финальный
+документационный commit также должен иметь зелёный CI до merge.
 
 ## Хвосты
 
