@@ -47,6 +47,7 @@ interface Position {
   error?: string;
 }
 interface YoutubeResult {
+  title?: string;
   entries: YoutubeMetadata[];
   positions: Position[];
   warnings: string[];
@@ -430,6 +431,7 @@ export class JobsService {
         if (job.kind === "youtube-import") {
           const discovered = await discoverYoutube(input.url, signal);
           result = {
+            title: discovered.title,
             entries: discovered.entries,
             positions: [],
             warnings: discovered.warnings,
@@ -459,6 +461,32 @@ export class JobsService {
         if (result.positions[index]?.status === "done") continue;
         try {
           let entry = result.entries[index];
+          // Flat playlists can return an ID with null title/availability for
+          // removed videos. Check these positions without downloading media.
+          if (
+            job.kind === "youtube-import" &&
+            !entry.title &&
+            entry.available !== false
+          ) {
+            try {
+              entry = {
+                ...entry,
+                ...(await refreshYoutube(
+                  entry.externalId,
+                  AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+                )),
+              };
+            } catch (error) {
+              signal.throwIfAborted();
+              if (error instanceof YoutubeProviderError && error.unavailable)
+                entry = { ...entry, available: false, reason: error.message };
+              else
+                result.warnings.push(
+                  `Не удалось уточнить ${entry.externalId}: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1500),
+                );
+            }
+            result.entries[index] = entry;
+          }
           if (job.kind === "youtube-refresh") {
             try {
               entry = await refreshYoutube(entry.externalId, signal);

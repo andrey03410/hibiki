@@ -32,6 +32,38 @@ describe("durable jobs", () => {
     await expect(jobs.exportPath(ctx.otherUserId, job.id)).rejects.toThrow();
     await second.stop();
   });
+  it("keeps the source playlist title in the import report", async () => {
+    const executable = join(ctx.root, "playlist-yt-dlp");
+    await writeFile(executable, '#!/usr/bin/env node\nconsole.log(JSON.stringify({title:"Anime openings",entries:[{id:"abcdefghijk",title:"Opening"}]}));\n');
+    await chmod(executable, 0o755);
+    process.env.YTDLP_PATH = executable;
+    const job = await jobs.create(ctx.userId, "youtube-import", {url:"https://youtube.com/playlist?list=PLtest123"});
+    await jobs.runOnce();
+    const finished = await jobs.get(ctx.userId, job.id);
+    expect(finished.state).toBe("done");
+    expect(finished.result).toMatchObject({title:"Anime openings",added:1,errors:0});
+  });
+  it("checks untitled playlist positions and preserves unavailable identities", async () => {
+    const executable = join(ctx.root, "untitled-yt-dlp");
+    await writeFile(executable, `#!/usr/bin/env node
+const url=process.argv.at(-1);
+if(url.includes('/playlist')) console.log(JSON.stringify({title:'Mixed',entries:[{id:'abcdefghijk',title:null},{id:'lmnopqrstuv',title:null},{id:'zzzzzzzzzzz',title:null}]}));
+else if(url.includes('abcdefghijk')) { console.error('ERROR: Video unavailable: This video is private'); process.exit(1); }
+else if(url.includes('lmnopqrstuv')) console.log(JSON.stringify({id:'lmnopqrstuv',title:'Recovered title'}));
+else { console.error('ERROR: Connection timed out'); process.exit(1); }
+`);
+    await chmod(executable, 0o755);
+    process.env.YTDLP_PATH = executable;
+    const job = await jobs.create(ctx.userId, "youtube-import", {url:"https://youtube.com/playlist?list=PLtest123"});
+    await jobs.runOnce();
+    const finished = await jobs.get(ctx.userId, job.id);
+    expect(finished.result).toMatchObject({added:3,unavailable:1,errors:0});
+    const items = (await ctx.library.snapshot(ctx.userId)).items;
+    expect(items.find(i=>i.sources[0].externalId==='abcdefghijk')?.sources[0].status).toBe('unavailable');
+    expect(items.find(i=>i.sources[0].externalId==='lmnopqrstuv')?.title).toBe('Recovered title');
+    expect(items.find(i=>i.sources[0].externalId==='zzzzzzzzzzz')?.sources[0].status).toBe('unknown');
+    expect((finished.result as any).warnings.join(' ')).toContain('Connection timed out');
+  });
   it("cancels queued work and recovers expired work with a bounded attempt count", async () => {
     const cancelled = await jobs.create(ctx.userId, "export", {
       includeFiles: false,
