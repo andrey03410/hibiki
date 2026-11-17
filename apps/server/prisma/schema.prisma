@@ -1,0 +1,142 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id String @id
+  login String @unique
+  passwordHash String
+  createdAt DateTime @default(now())
+  sessions Session[]
+  tokens ApiToken[]
+  items Item[]
+  tags Tag[]
+  playlists Playlist[]
+  jobs Job[]
+  setting Setting?
+}
+
+model Session {
+  tokenHash String @id
+  userId String
+  expiresAt DateTime
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ApiToken {
+  id String @id
+  name String
+  tokenHash String @unique
+  userId String
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Item {
+  id String @id
+  ownerId String
+  title String
+  originalTitle String
+  kind String
+  duration Float?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  sources Source[]
+  tags ItemTag[]
+  @@index([ownerId, createdAt])
+}
+
+model Source {
+  id String @id
+  ownerId String
+  itemId String
+  key String
+  provider String
+  externalId String?
+  url String?
+  status String @default("unknown")
+  reason String?
+  checkedAt DateTime?
+  fileId String?
+  thumbnail String?
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  file MediaFile? @relation(fields: [fileId], references: [id], onDelete: Restrict)
+  @@unique([ownerId, key])
+}
+
+model MediaFile {
+  id String @id
+  ownerId String
+  hash String
+  path String
+  mime String
+  bytes BigInt
+  kind String
+  duration Float?
+  createdAt DateTime @default(now())
+  sources Source[]
+  @@unique([ownerId, hash])
+}
+
+model Tag {
+  id String @id
+  ownerId String
+  name String
+  color String @default("#b8a5ff")
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  items ItemTag[]
+  @@unique([ownerId, name])
+}
+
+model ItemTag {
+  itemId String
+  tagId String
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  tag Tag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  @@id([itemId, tagId])
+}
+
+model Playlist {
+  id String @id
+  ownerId String
+  title String
+  description String @default("")
+  definitionJson String
+  revision Int @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  @@index([ownerId])
+}
+
+model Job {
+  id String @id
+  ownerId String
+  kind String
+  inputJson String
+  resultJson String?
+  state String @default("queued")
+  progress Float @default(0)
+  completed Int @default(0)
+  total Int @default(0)
+  attempt Int @default(0)
+  error String?
+  leaseUntil DateTime?
+  cancelRequested Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  @@index([state, leaseUntil])
+  @@index([ownerId, createdAt])
+}
+
+model Setting {
+  userId String @id
+  json String @default("{}")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}

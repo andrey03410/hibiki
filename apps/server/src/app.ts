@@ -1,0 +1,513 @@
+import Fastify, { type FastifyInstance } from "fastify";
+import cookie from "@fastify/cookie";
+import multipart from "@fastify/multipart";
+import staticFiles from "@fastify/static";
+import { existsSync, createReadStream } from "node:fs";
+import { mkdir, rm, stat } from "node:fs/promises";
+import { resolve, join, extname } from "node:path";
+import { pipeline } from "node:stream/promises";
+import { createWriteStream } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { z, ZodError } from "zod";
+import type { UserDto } from "@hibiki/contracts";
+import { itemPatchSchema, playlistDefinitionSchema } from "@hibiki/contracts";
+import type { Db } from "./db";
+import { AuthService } from "./auth";
+import { LibraryService } from "./library";
+import { JobsService } from "./jobs";
+import { HttpError, invariant } from "./errors";
+import { allowedLocalPath, storagePath } from "./media";
+import { registerMcp } from "./mcp";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    user: UserDto | null;
+  }
+  interface FastifyInstance {
+    auth: AuthService;
+    library: LibraryService;
+    jobs: JobsService;
+  }
+}
+export interface UploadGrant {
+  ownerId: string;
+  expires: number;
+  archive: boolean;
+}
+export interface Services {
+  db: Db;
+  auth: AuthService;
+  library: LibraryService;
+  jobs: JobsService;
+  storageRoot: string;
+  uploadGrants: Map<string, UploadGrant>;
+}
+const playlistInput = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    description: z.string().max(2000).optional(),
+    definition: playlistDefinitionSchema,
+  })
+  .strict();
+const tagInput = z.object({
+  name: z.string().trim().min(1).max(80),
+  color: z
+    .string()
+    .regex(/^#[a-f0-9]{6}$/i)
+    .optional(),
+});
+const idOf = (request: { params: unknown }) =>
+  z.object({ id: z.string() }).parse(request.params).id;
+
+export async function createApp(options: { db: Db; storageRoot: string }) {
+  const { db, storageRoot } = options;
+  const auth = new AuthService(db);
+  const library = new LibraryService(db, storageRoot);
+  const jobs = new JobsService(db, library, storageRoot);
+  const s: Services = {
+    db,
+    auth,
+    library,
+    jobs,
+    storageRoot,
+    uploadGrants: new Map(),
+  };
+  const app = Object.assign(
+    Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024, requestTimeout: 0 }),
+    { auth, library, jobs },
+  );
+  app.decorateRequest("user", null);
+  await app.register(cookie);
+  await app.register(multipart, {
+    limits: { files: 100, fileSize: 2 * 1024 ** 3, fields: 20 },
+  });
+  app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof ZodError)
+      return reply
+        .code(400)
+        .send({
+          error: {
+            code: "validation",
+            message: error.issues
+              .map((i) => `${i.path.join(".")}: ${i.message}`)
+              .join("; "),
+          },
+        });
+    if (error instanceof HttpError)
+      return reply
+        .code(error.status)
+        .send({ error: { code: error.code, message: error.message } });
+    const e = error as { code?: string; statusCode?: number; message: string };
+    if (e.code === "P2002")
+      return reply
+        .code(409)
+        .send({
+          error: { code: "conflict", message: "Такая запись уже существует" },
+        });
+    const status =
+      e.statusCode && e.statusCode >= 400 && e.statusCode < 500
+        ? e.statusCode
+        : /not found|не найден/i.test(e.message)
+          ? 404
+          : 400;
+    return reply
+      .code(status)
+      .send({
+        error: {
+          code: e.code ?? "operation_failed",
+          message: e.message.slice(0, 1000),
+        },
+      });
+  });
+  app.addHook("onRequest", async (request) => {
+    const origin = request.headers.origin;
+    if (
+      origin &&
+      (request.url.startsWith("/mcp") ||
+        !["GET", "HEAD", "OPTIONS"].includes(request.method))
+    ) {
+      const allowed = new Set([
+        process.env.PUBLIC_URL ?? "http://localhost:8790",
+        "http://localhost:5174",
+        "http://127.0.0.1:8790",
+        "http://127.0.0.1:5174",
+      ]);
+      invariant(
+        allowed.has(origin),
+        403,
+        "origin_forbidden",
+        "Запрос с этого сайта запрещён",
+      );
+    }
+    if (!request.url.startsWith("/api/") && !request.url.startsWith("/files/"))
+      return;
+    const header = request.headers.authorization;
+    request.user = header?.startsWith("Bearer ")
+      ? await auth.userByToken(header.slice(7))
+      : await auth.userBySession(request.cookies.hibiki_session);
+    const publicRoute =
+      request.url.split("?")[0] === "/api/me" ||
+      request.url.startsWith("/api/auth/") ||
+      request.url.startsWith("/api/uploads/");
+    if (!publicRoute)
+      invariant(request.user, 401, "unauthorized", "Войдите в Hibiki");
+  });
+  const setSession = async (reply: any, userId: string) => {
+    const secret = await auth.createSession(userId);
+    reply.setCookie("hibiki_session", secret, {
+      path: "/",
+      httpOnly: true,
+      sameSite: "lax",
+      secure: (process.env.PUBLIC_URL ?? "").startsWith("https:"),
+      maxAge: 30 * 86400,
+    });
+  };
+  app.get("/api/me", async (request) => ({
+    user: request.user,
+    setupRequired: (await db.user.count()) === 0,
+  }));
+  for (const action of ["register", "login"] as const)
+    app.post(`/api/auth/${action}`, async (request, reply) => {
+      const input = z
+        .object({ login: z.string().max(100), password: z.string().max(200) })
+        .parse(request.body);
+      const user = await auth[action](input.login, input.password);
+      await setSession(reply, user.id);
+      return { user };
+    });
+  app.post("/api/auth/logout", async (request, reply) => {
+    await auth.logout(request.cookies.hibiki_session);
+    reply.clearCookie("hibiki_session", { path: "/" });
+    return { ok: true };
+  });
+  app.get("/api/library", (request) => library.snapshot(request.user!.id));
+  app.get("/api/items", async (request) => {
+    const query = z
+      .object({
+        query: z.string().optional(),
+        tagId: z.string().optional(),
+        kind: z.enum(["audio", "video"]).optional(),
+        cursor: z.string().optional(),
+        limit: z.coerce.number().int().min(1).max(200).default(50),
+      })
+      .parse(request.query);
+    let items = (await library.snapshot(request.user!.id)).items.filter(
+      (i) =>
+        (!query.query ||
+          i.title.toLowerCase().includes(query.query.toLowerCase())) &&
+        (!query.kind || i.kind === query.kind) &&
+        (!query.tagId || i.tags.some((t) => t.id === query.tagId)),
+    );
+    if (query.cursor) {
+      const index = items.findIndex((i) => i.id === query.cursor);
+      invariant(index >= 0, 400, "cursor", "Курсор не найден");
+      items = items.slice(index + 1);
+    }
+    const page = items.slice(0, query.limit);
+    return {
+      items: page,
+      nextCursor: items.length > page.length ? page.at(-1)?.id : null,
+    };
+  });
+  app.get("/api/items/:id", (request) =>
+    library.getItem(request.user!.id, idOf(request)),
+  );
+  app.patch("/api/items/:id", (request) =>
+    library.updateItem(
+      request.user!.id,
+      idOf(request),
+      itemPatchSchema.parse(request.body),
+    ),
+  );
+  app.post("/api/items/batch", async (request) => {
+    const { changes } = z
+      .object({
+        changes: z
+          .array(
+            z.object({
+              id: z.string(),
+              title: z.string().trim().min(1).max(500).optional(),
+              tagIds: z.array(z.string()).optional(),
+            }),
+          )
+          .max(200),
+      })
+      .parse(request.body);
+    // Validate all ownership before the first write.
+    for (const change of changes) {
+      await library.getItem(request.user!.id, change.id);
+      if (change.tagIds)
+        invariant(
+          (await db.tag.count({
+            where: {
+              ownerId: request.user!.id,
+              id: { in: [...new Set(change.tagIds)] },
+            },
+          })) === new Set(change.tagIds).size,
+          404,
+          "tag_not_found",
+          "Один из тегов не найден",
+        );
+    }
+    const items = [];
+    for (const change of changes)
+      items.push(await library.updateItem(request.user!.id, change.id, change));
+    return { items };
+  });
+  app.delete("/api/items/:id", async (request) => {
+    await library.deleteItem(request.user!.id, idOf(request));
+    return { ok: true };
+  });
+  app.post("/api/items/import-local", async (request) => {
+    const { paths } = z
+      .object({ paths: z.array(z.string()).min(1).max(50) })
+      .parse(request.body);
+    const items = [];
+    for (const path of paths)
+      items.push(
+        (
+          await library.importLocal(
+            request.user!.id,
+            await allowedLocalPath(path),
+          )
+        ).item,
+      );
+    return { items };
+  });
+  const receiveUpload = async (
+    request: any,
+    ownerId: string,
+    archive = false,
+  ) => {
+    const dir = join(storageRoot, "uploads", ownerId);
+    await mkdir(dir, { recursive: true });
+    const items = [];
+    let archiveJob;
+    for await (const part of request.parts()) {
+      if (part.type !== "file") continue;
+      const ext = extname(part.filename).toLowerCase();
+      invariant(
+        !archive || ext === ".zip",
+        400,
+        "archive_required",
+        "Выберите архив .zip библиотеки Hibiki",
+      );
+      const tmp = join(dir, `${randomUUID()}${ext}`);
+      try {
+        await pipeline(part.file, createWriteStream(tmp, { flags: "wx" }));
+        invariant(
+          !part.file.truncated,
+          413,
+          "file_too_large",
+          "Файл превышает 2 ГиБ",
+        );
+        if (archive) {
+          invariant(!archiveJob, 400, "one_archive", "Загрузите один архив");
+          archiveJob = await jobs.create(ownerId, "import", {
+            archivePath: tmp,
+          });
+        } else
+          items.push(
+            (await library.importLocal(ownerId, tmp, { title: undefined }))
+              .item,
+          );
+      } finally {
+        await rm(tmp, { force: true });
+      }
+    }
+    invariant(
+      archive ? archiveJob : items.length,
+      400,
+      "file_required",
+      "Выберите файл",
+    );
+    return archive ? archiveJob : { items };
+  };
+  app.post("/api/items/upload", (request) =>
+    receiveUpload(request, request.user!.id),
+  );
+  app.post("/api/imports/upload", (request) =>
+    receiveUpload(request, request.user!.id, true),
+  );
+  app.post("/api/imports/:id/apply", (request) =>
+    jobs.applyImport(request.user!.id, idOf(request)),
+  );
+  app.post("/api/uploads/:id", async (request) => {
+    const id = idOf(request);
+    const grant = s.uploadGrants.get(id);
+    s.uploadGrants.delete(id);
+    invariant(
+      grant && grant.expires > Date.now(),
+      401,
+      "upload_expired",
+      "Ссылка загрузки истекла",
+    );
+    return receiveUpload(request, grant.ownerId, grant.archive);
+  });
+  app.get("/api/tags", async (request) => ({
+    tags: (await library.snapshot(request.user!.id)).tags,
+  }));
+  app.post("/api/tags", (request) =>
+    library.createTag(request.user!.id, tagInput.parse(request.body)),
+  );
+  app.patch("/api/tags/:id", (request) =>
+    library.updateTag(
+      request.user!.id,
+      idOf(request),
+      tagInput.partial().parse(request.body),
+    ),
+  );
+  app.delete("/api/tags/:id", async (request) => {
+    await library.deleteTag(request.user!.id, idOf(request));
+    return { ok: true };
+  });
+  app.get("/api/playlists", async (request) => ({
+    playlists: (await library.snapshot(request.user!.id)).playlists,
+  }));
+  app.post("/api/playlists/preview", (request) => {
+    const input = z
+      .object({
+        definition: playlistDefinitionSchema,
+        playlistId: z.string().optional(),
+      })
+      .parse(request.body);
+    return library.preview(
+      request.user!.id,
+      input.definition,
+      input.playlistId,
+    );
+  });
+  app.post("/api/playlists", (request) =>
+    library.savePlaylist(request.user!.id, playlistInput.parse(request.body)),
+  );
+  app.patch("/api/playlists/:id", (request) =>
+    library.savePlaylist(
+      request.user!.id,
+      playlistInput.parse(request.body),
+      idOf(request),
+    ),
+  );
+  app.get("/api/playlists/:id/resolve", (request) =>
+    library.resolve(request.user!.id, idOf(request)),
+  );
+  app.delete("/api/playlists/:id", async (request) => {
+    await library.deletePlaylist(request.user!.id, idOf(request));
+    return { ok: true };
+  });
+  app.get("/api/jobs", async (request) => ({
+    jobs: await jobs.list(request.user!.id),
+  }));
+  app.post("/api/jobs", (request) => {
+    const input = z
+      .object({
+        kind: z.enum([
+          "youtube-import",
+          "youtube-download",
+          "youtube-refresh",
+          "export",
+        ]),
+        input: z.record(z.string(), z.unknown()).default({}),
+      })
+      .parse(request.body);
+    return jobs.create(request.user!.id, input.kind, input.input);
+  });
+  app.get("/api/jobs/:id", (request) =>
+    jobs.get(request.user!.id, idOf(request)),
+  );
+  app.post("/api/jobs/:id/cancel", (request) =>
+    jobs.cancel(request.user!.id, idOf(request)),
+  );
+  app.post("/api/jobs/:id/retry", (request) =>
+    jobs.retry(request.user!.id, idOf(request)),
+  );
+  app.get("/api/jobs/:id/download", async (request, reply) => {
+    const path = await jobs.exportPath(request.user!.id, idOf(request));
+    reply
+      .header(
+        "content-disposition",
+        'attachment; filename="hibiki-library.zip"',
+      )
+      .type("application/zip");
+    return reply.send(createReadStream(path));
+  });
+  app.get("/api/settings", (request) => library.getSettings(request.user!.id));
+  app.put("/api/settings", (request) =>
+    library.setSettings(
+      request.user!.id,
+      z.record(z.string(), z.unknown()).parse(request.body),
+    ),
+  );
+  app.get("/api/tokens", async (request) => ({
+    tokens: await auth.listTokens(request.user!.id),
+  }));
+  app.post("/api/tokens", (request) =>
+    auth.createToken(
+      request.user!.id,
+      z
+        .object({ name: z.string().max(100).default("Агент") })
+        .parse(request.body).name,
+    ),
+  );
+  app.delete("/api/tokens/:id", async (request) => {
+    await auth.deleteToken(request.user!.id, idOf(request));
+    return { ok: true };
+  });
+  app.get("/files/:id", async (request, reply) => {
+    const file = await db.mediaFile.findFirst({
+      where: { id: idOf(request), ownerId: request.user!.id },
+    });
+    invariant(file, 404, "file_not_found", "Файл не найден");
+    const path = storagePath(storageRoot, file.path);
+    const size = (await stat(path)).size;
+    reply
+      .type(file.mime)
+      .header("accept-ranges", "bytes")
+      .header("cache-control", "private, max-age=3600")
+      .header("x-content-type-options", "nosniff");
+    const range = request.headers.range;
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (!match || (!match[1] && !match[2]))
+        return reply
+          .code(416)
+          .header("content-range", `bytes */${size}`)
+          .send();
+      const start = match[1]
+        ? Number(match[1])
+        : Math.max(0, size - Number(match[2]));
+      const end = match[1]
+        ? Math.min(match[2] ? Number(match[2]) : size - 1, size - 1)
+        : size - 1;
+      if (start >= size || start < 0 || end < start)
+        return reply
+          .code(416)
+          .header("content-range", `bytes */${size}`)
+          .send();
+      reply
+        .code(206)
+        .header("content-range", `bytes ${start}-${end}/${size}`)
+        .header("content-length", end - start + 1);
+      return reply.send(createReadStream(path, { start, end }));
+    }
+    reply.header("content-length", size);
+    return reply.send(createReadStream(path));
+  });
+  registerMcp(app, s);
+  const webRoot = resolve("apps/web/dist");
+  if (existsSync(join(webRoot, "index.html"))) {
+    await app.register(staticFiles, { root: webRoot, prefix: "/" });
+    app.setNotFoundHandler((request, reply) => {
+      if (
+        request.method === "GET" &&
+        !/^\/(api|files|mcp)(\/|$)/.test(request.url)
+      )
+        return reply
+          .type("text/html")
+          .send(createReadStream(join(webRoot, "index.html")));
+      return reply
+        .code(404)
+        .send({ error: { code: "not_found", message: "Не найдено" } });
+    });
+  }
+  return app;
+}

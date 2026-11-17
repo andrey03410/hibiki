@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "hibiki": {
+      "type": "http",
+      "url": "http://localhost:8790/mcp",
+      "headers": { "Authorization": "Bearer ${HIBIKI_MCP_TOKEN}" }
+    }
+  }
+}
