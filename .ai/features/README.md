@@ -1,7 +1,7 @@
 # Задачи
 
-| Задача | Стадия | Следующий шаг |
+| Задача | Стадия | Результат |
 |---|---|---|
-| [01. Первая итерация Hibiki](01-mvp/README.md) | `review` —90тестов, живые проверки и независимое ревью пройдены | PR/CI и автономный merge |
+| [01. Первая итерация Hibiki](01-mvp/README.md) | `merged` | [PR #1](https://github.com/andrey03410/hibiki/pull/1), автономный режим, 90 тестов и живые проверки |
 
-Процесс — [feature](../../.claude/skills/feature/SKILL.md).
+Незавершённых задач нет. Процесс — [feature](../../.claude/skills/feature/SKILL.md).
