@@ -12,7 +12,7 @@ MCP, worker и перенос. Проверки — в verify.md задачи. �
 новые изменения ведутся отдельной задачей, автономность на них не переносится.
 
 [02. Большой плеер и реальные плейлисты](.ai/features/02-watch-playlists/README.md):
-watch layout с очередью справа, audio artwork, fullscreen overlay с idle3с,
+watch layout с очередью справа, audio artwork, fullscreen overlay с idle3 с,
 проверка метаданных YouTube-позиций без названия. Статус и QG — в папке задачи.
 
 ## Стек и проверки

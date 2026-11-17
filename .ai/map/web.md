@@ -46,7 +46,7 @@ Fullscreen разворачивает общую сцену с controls; при 
 Пробел/K — pause, F — fullscreen, M — mute, стрелки/J/L — ±10s. Поля, кнопки,
 ссылки, contenteditable и открытый dialog защищены от глобальных hotkeys.
 Состояние кнопки синхронизируется также с play/pause внутри YouTube.
-В fullscreen controls — overlay, через3000мс без активности панель и курсор
+В fullscreen controls — overlay, через 3000 мс без активности панель и курсор
 скрываются; pointer/touch/key/focus возвращают управление. Клавиатурно
 сфокусированные controls остаются видимыми. Для cross-origin YouTube iframe
 первое движение на reveal-поверхности возвращает управление, затем iframe
