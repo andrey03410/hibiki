@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { readFile, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import ffmpeg from "ffmpeg-static";
+import { parseFile } from "music-metadata";
 import { createApp } from "./app";
 import { testContext } from "./test-utils";
 import { exportLibrary, inspectArchive, applyArchive } from "./portability";
@@ -180,13 +181,18 @@ describe("embedded audio artwork", () => {
   });
   it("retains an original cover after a large skipped MP4 box when the playback derivative has none", async () => {
     const path = join(ctx.root, "original.m4a");
+    const cover = join(ctx.root, "cover.png");
+    await writeFile(cover, png);
     await promisify(execFile)(String(ffmpeg), [
       "-hide_banner", "-loglevel", "error", "-y",
       "-f", "lavfi", "-i", "sine=duration=0.3",
-      "-f", "lavfi", "-i", "color=c=red:s=32x32:d=0.1",
+      "-i", cover,
       "-map", "0:a", "-map", "1:v", "-c:a", "alac",
-      "-c:v", "png", "-frames:v", "1", "-disposition:v", "attached_pic", path,
+      "-c:v", "copy", "-disposition:v", "attached_pic", path,
     ], { timeout: 10_000 });
+    const metadata = await parseFile(path, { duration: true, skipCovers: true });
+    expect(metadata.format.hasAudio).toBe(true);
+    expect(metadata.format.duration).toBeGreaterThan(0.2);
     const media = await readFile(path);
     let moov = 0;
     while (media.toString("ascii", moov + 4, moov + 8) !== "moov")
@@ -199,21 +205,7 @@ describe("embedded audio artwork", () => {
     await writeFile(path, Buffer.concat([
       media.subarray(0, moov), padding, media.subarray(moov),
     ]));
-    const { item } = await ctx.library.importLocal(ctx.userId, path).catch(async (error) => {
-      const probe = await promisify(execFile)(String(ffmpeg), ["-hide_banner", "-i", path], {
-        timeout: 10_000, maxBuffer: 1024 * 1024,
-      }).then((result) => result.stderr, (failure) => String(failure.stderr ?? failure));
-      const boxes: Array<{ type: string; offset: number; size: number }> = [];
-      const padded = await readFile(path);
-      for (let offset = 0; offset + 8 <= padded.length && boxes.length < 32;) {
-        const size = padded.readUInt32BE(offset);
-        boxes.push({ type: padded.toString("ascii", offset + 4, offset + 8), offset, size });
-        if (size < 8) break;
-        offset += size;
-      }
-      console.error("Artwork fixture diagnostic", { platform: process.platform, boxes, probe: probe.slice(0, 12_000) });
-      throw error;
-    });
+    const { item } = await ctx.library.importLocal(ctx.userId, path);
     expect(item.sources).toHaveLength(2);
     expect(
       item.sources.some((source) => source.reason === "unsupported_codec"),
