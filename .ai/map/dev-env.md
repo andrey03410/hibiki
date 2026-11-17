@@ -64,3 +64,12 @@ ROLLBACK после неуспешного COMMIT, чтобы следующие
 Тесты создают отдельные временные БД; реальные YouTube-сценарии и свёрнутое окно
 не заменяются тестовыми провайдерами. Ограничения и фактические результаты
 записываются в `verify.md` задачи.
+
+Общий TypeScript `moduleResolution=Bundler` использует `customConditions: ["node"]`
+для проверки серверных conditional exports (strtok3.fromFile). Runtime Node сам
+выбирает node entry; клиентский Vite build разрешает браузерные зависимости отдельно.
+
+В FFmpeg-fixture audio+attached cover не ограничивай весь вывод `-frames:v 1`:
+Linux-сборка может завершить muxing до аудио. Подавай готовый одиночный PNG
+отдельным input с `-c:v copy`, проверяй hasAudio/duration перед дальнейшими
+изменениями контейнера. Регрессия и большой MP4 free-box — artwork.test.ts.

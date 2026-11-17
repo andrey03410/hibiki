@@ -516,6 +516,7 @@ function Workspace({
           )
         }
       >
+        {(watchPlayer) => <>
         <div className="app-shell">
           <aside className="sidebar">
             <Link className="brand" to="/">
@@ -607,6 +608,8 @@ function Workspace({
             </div>
           </aside>
           <main className="main-content">
+            {watchPlayer}
+            <div id="browse-content" className="browse-content">
             <Routes>
               <Route path="/" element={<LibraryPage />} />
               <Route
@@ -632,6 +635,7 @@ function Workspace({
                 }
               />
             </Routes>
+            </div>
             <footer className="page-footer">
               <span>響き · Звучание, которое остаётся</span>
               <span>HIBIKI · ВАША ЛИЧНАЯ МЕДИАТЕКА</span>
@@ -665,6 +669,7 @@ function Workspace({
             </div>
           ))}
         </div>
+        </>}
       </PlayerProvider>
     </DataContext.Provider>
   );

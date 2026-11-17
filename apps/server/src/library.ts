@@ -51,7 +51,10 @@ export function itemDto(row: IncludedItem): ItemDto {
       url: source.url ?? undefined,
       status: source.status,
       reason: source.reason ?? undefined,
-      thumbnail: source.thumbnail ?? undefined,
+      thumbnail:
+        source.provider === "local" && source.file?.kind === "audio"
+          ? `/api/items/${encodeURIComponent(row.id)}/artwork`
+          : (source.thumbnail ?? undefined),
       fileId: source.fileId ?? undefined,
       mime: source.file?.mime,
       bytes: source.file ? Number(source.file.bytes) : undefined,
