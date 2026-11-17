@@ -64,3 +64,7 @@ ROLLBACK после неуспешного COMMIT, чтобы следующие
 Тесты создают отдельные временные БД; реальные YouTube-сценарии и свёрнутое окно
 не заменяются тестовыми провайдерами. Ограничения и фактические результаты
 записываются в `verify.md` задачи.
+
+Общий TypeScript `moduleResolution=Bundler` использует `customConditions: ["node"]`
+для проверки серверных conditional exports (strtok3.fromFile). Runtime Node сам
+выбирает node entry; клиентский Vite build разрешает браузерные зависимости отдельно.

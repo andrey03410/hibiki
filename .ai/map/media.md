@@ -8,6 +8,23 @@
 из Prisma переводится в JSON-число. Схема БД — `apps/server/prisma/schema.prisma`.
 Runtime-контракты — `packages/contracts/src/index.ts`.
 
+## Обложки аудио
+
+`artwork.ts`: авторизованный `/api/items/:id/artwork` извлекает embedded cover
+из локального audio source, в том числе аудиокопии YouTube/video item. DTO вычисляет
+source.thumbnail для такого источника; URL не записывается в БД/manifest. Если
+дериватив потерял cover, endpoint сначала проверяет сохранённый оригинал.
+Полный перенос оригиналов сохраняет обложки без новых моделей/миграций.
+
+JPEG/PNG/WebP распознаются по сигнатуре, результат до 5 МиБ. Общий бюджет чтения
+метаданных — 8 МиБ и 4096 операций tokenizer, отдельная allocation ограничена;
+большие audio/free boxes пропускаются через seek, не расходуя read budget.
+Это ограничивает также множество FLAC PICTURE blocks, не только одну обложку.
+Много метаданных, отсутствие/ошибка cover дают 404 и fallback в плеере.
+LRU до восьми результатов, проверка owner/item/file и наличия/mtime оригинала
+на каждом запросе. Ответ private,no-cache, Vary Cookie/Authorization, nosniff.
+`strtok3` — прямой dependency для ограниченного file tokenizer.
+
 Item сохраняет собственное `title`, `originalTitle`, kind audio/video и связи.
 Недоступность относится к source и не удаляет item. Обновление YouTube сохраняет
 переименованное пользователем название и теги. Начальные теги аккаунта —

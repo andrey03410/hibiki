@@ -70,6 +70,58 @@ describe("HTTP and MCP isolation", () => {
         .statusCode,
     ).toBe(404);
   });
+  it("serves embedded audio artwork only to its owner without persisting the derived URL", async () => {
+    const cookie = await session("artworkowner");
+    const owner = (await app.auth.userBySession(cookie))!;
+    const file = join(ctx.root, "cover.mp3");
+    await promisify(execFile)(String(ffmpeg), [
+      "-hide_banner", "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", "sine=duration=0.3",
+      "-f", "lavfi", "-i", "color=c=red:s=32x32:d=0.1",
+      "-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame",
+      "-c:v", "mjpeg", "-frames:v", "1", "-disposition:v", "attached_pic",
+      "-id3v2_version", "3", file,
+    ], { timeout: 10_000 });
+    const { item } = await ctx.library.importLocal(owner.id, file);
+    const url = `/api/items/${item.id}/artwork`;
+    expect(item.sources[0]!.thumbnail).toBe(url);
+    expect((await ctx.db.source.findUnique({
+      where: { id: item.sources[0]!.id },
+    }))!.thumbnail).toBeNull();
+    expect((await app.inject(url)).statusCode).toBe(401);
+    const response = await app.inject({
+      url, cookies: { hibiki_session: cookie },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toBe("image/jpeg");
+    expect(response.headers["x-content-type-options"]).toBe("nosniff");
+    expect(response.headers["cache-control"]).toBe("private, no-cache");
+    expect(response.rawPayload.subarray(0, 3)).toEqual(
+      Buffer.from([0xff, 0xd8, 0xff]),
+    );
+    expect(response.rawPayload.length).toBeGreaterThan(100);
+    const another = await session("artworkother");
+    expect(
+      (await app.inject({ url, cookies: { hibiki_session: another } })).statusCode,
+    ).toBe(404);
+    await ctx.library.deleteItem(owner.id, item.id);
+    expect(
+      (await app.inject({ url, cookies: { hibiki_session: cookie } })).statusCode,
+    ).toBe(404);
+  });
+  it("returns the artwork fallback response when audio has no cover", async () => {
+    const cookie = await session("nocover");
+    const owner = (await app.auth.userBySession(cookie))!;
+    const file = join(ctx.root, "plain.wav");
+    await writeFile(file, wav());
+    const { item } = await ctx.library.importLocal(owner.id, file);
+    const response = await app.inject({
+      url: `/api/items/${item.id}/artwork`,
+      cookies: { hibiki_session: cookie },
+    });
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error.code).toBe("artwork_not_found");
+  });
   it("exposes real MCP initialize/tools to a personal token and revokes it", async () => {
     const token = await app.auth.createToken(ctx.userId, "test-client");
     const response = await app.inject({

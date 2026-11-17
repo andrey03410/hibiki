@@ -19,6 +19,7 @@ import { HttpError, invariant } from "./errors";
 import { allowedLocalPath, storagePath } from "./media";
 import { registerMcp } from "./mcp";
 import { uploadPolicy } from "./upload-policy";
+import { ArtworkService } from "./artwork";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -64,6 +65,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
   const { db, storageRoot } = options;
   const auth = new AuthService(db);
   const library = new LibraryService(db, storageRoot);
+  const artwork = new ArtworkService(db, storageRoot);
   const jobs = new JobsService(db, library, storageRoot);
   const s: Services = {
     db,
@@ -205,6 +207,14 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
   app.get("/api/items/:id", (request) =>
     library.getItem(request.user!.id, idOf(request)),
   );
+  app.get("/api/items/:id/artwork", async (request, reply) => {
+    reply
+      .header("cache-control", "private, no-cache")
+      .header("vary", "Cookie, Authorization")
+      .header("x-content-type-options", "nosniff");
+    const cover = await artwork.get(request.user!.id, idOf(request));
+    return reply.type(cover.mime).send(cover.bytes);
+  });
   app.patch("/api/items/:id", (request) =>
     library.updateItem(
       request.user!.id,
