@@ -199,7 +199,21 @@ describe("embedded audio artwork", () => {
     await writeFile(path, Buffer.concat([
       media.subarray(0, moov), padding, media.subarray(moov),
     ]));
-    const { item } = await ctx.library.importLocal(ctx.userId, path);
+    const { item } = await ctx.library.importLocal(ctx.userId, path).catch(async (error) => {
+      const probe = await promisify(execFile)(String(ffmpeg), ["-hide_banner", "-i", path], {
+        timeout: 10_000, maxBuffer: 1024 * 1024,
+      }).then((result) => result.stderr, (failure) => String(failure.stderr ?? failure));
+      const boxes: Array<{ type: string; offset: number; size: number }> = [];
+      const padded = await readFile(path);
+      for (let offset = 0; offset + 8 <= padded.length && boxes.length < 32;) {
+        const size = padded.readUInt32BE(offset);
+        boxes.push({ type: padded.toString("ascii", offset + 4, offset + 8), offset, size });
+        if (size < 8) break;
+        offset += size;
+      }
+      console.error("Artwork fixture diagnostic", { platform: process.platform, boxes, probe: probe.slice(0, 12_000) });
+      throw error;
+    });
     expect(item.sources).toHaveLength(2);
     expect(
       item.sources.some((source) => source.reason === "unsupported_codec"),
