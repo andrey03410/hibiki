@@ -105,3 +105,87 @@ export function sourceLoadPosition(
     ? livePosition
     : requestedPosition;
 }
+
+interface ShortcutEvent {
+  key: string;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  altKey?: boolean;
+  repeat?: boolean;
+  target?: {
+    tagName?: string;
+    isContentEditable?: boolean;
+    closest?: (selectors: string) => unknown;
+  } | null;
+}
+export function playbackShortcut(event: ShortcutEvent):
+  | "toggle" | "fullscreen" | "mute" | "backward" | "forward" | null {
+  const target = event.target;
+  if (
+    event.ctrlKey || event.metaKey || event.altKey || event.repeat ||
+    target?.isContentEditable ||
+    /^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(target?.tagName ?? "") ||
+    target?.closest?.("input, textarea, select, button, a, [contenteditable]:not([contenteditable='false']), [role='textbox'], [role='slider']")
+  ) return null;
+  switch (event.key.toLowerCase()) {
+    case " ":
+    case "k": return "toggle";
+    case "f": return "fullscreen";
+    case "m": return "mute";
+    case "arrowleft":
+    case "j": return "backward";
+    case "arrowright":
+    case "l": return "forward";
+    default: return null;
+  }
+}
+export function playbackArtwork(
+  item?: { sources: { thumbnail?: string | null }[] },
+  source?: { thumbnail?: string | null },
+): string | undefined {
+  return source?.thumbnail || item?.sources.find((entry) => entry.thumbnail)?.thumbnail || undefined;
+}
+
+
+export function playbackKind(
+  item: { kind: "audio" | "video" },
+  source?: { provider: "local" | "youtube"; mime?: string },
+): "audio" | "video" {
+  if (source?.provider === "youtube") return "video";
+  if (source?.mime?.startsWith("audio/")) return "audio";
+  if (source?.mime?.startsWith("video/")) return "video";
+  return item.kind;
+}
+
+
+export async function enterPlayerFullscreen(
+  request?: () => Promise<void>,
+): Promise<"native" | "viewport"> {
+  if (!request) return "viewport";
+  try {
+    await request();
+    return "native";
+  } catch {
+    return "viewport";
+  }
+}
+
+
+export function createFullscreenIdleTimer(onIdle: (idle: boolean) => void) {
+  let timer: ReturnType<typeof setTimeout>;
+  let disposed = false;
+  function activity() {
+    if (disposed) return;
+    clearTimeout(timer);
+    onIdle(false);
+    timer = setTimeout(() => onIdle(true), 3000);
+  }
+  activity();
+  return {
+    activity,
+    dispose() {
+      disposed = true;
+      clearTimeout(timer);
+    },
+  };
+}

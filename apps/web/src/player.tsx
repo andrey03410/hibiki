@@ -2,6 +2,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
@@ -17,6 +18,10 @@ import {
   Volume2,
   VolumeX,
   ListMusic,
+  AudioLines,
+  Video,
+  ChevronDown,
+  Minimize2,
   X,
   Music2,
   Maximize2,
@@ -31,6 +36,11 @@ import {
   playbackSources,
   sourceLoadPosition,
   restorePlayback,
+  playbackShortcut,
+  playbackArtwork,
+  playbackKind,
+  enterPlayerFullscreen,
+  createFullscreenIdleTimer,
   type PlaybackSettings,
 } from "./player-model.ts";
 
@@ -80,6 +90,7 @@ function Youtube({
   onEnded,
   onError,
   onPaused,
+  onPlaying,
 }: {
   id: string;
   playing: boolean;
@@ -90,10 +101,11 @@ function Youtube({
   onEnded: () => void;
   onError: () => void;
   onPaused: () => void;
+  onPlaying: () => void;
 }) {
   const target = useRef<HTMLDivElement>(null),
-    callbacks = useRef({ onTime, onEnded, onError, onPaused });
-  callbacks.current = { onTime, onEnded, onError, onPaused };
+    callbacks = useRef({ onTime, onEnded, onError, onPaused, onPlaying });
+  callbacks.current = { onTime, onEnded, onError, onPaused, onPlaying };
   const active = useRef(playing);
   active.current = playing;
   const initial = useRef({ position, volume });
@@ -134,6 +146,7 @@ function Youtube({
             },
             onStateChange: (event: any) => {
               if (event.data === 0) callbacks.current.onEnded();
+              if (event.data === 1) callbacks.current.onPlaying();
               if (event.data === 2 && active.current)
                 callbacks.current.onPaused();
             },
@@ -171,7 +184,7 @@ export function PlayerProvider({
   items: ItemDto[];
   initialSettings: any;
   userId: string;
-  children: ReactNode;
+  children: (player: ReactNode) => ReactNode;
   suspendSaving?: boolean;
 }) {
   const [settings, setSettings] = useState<PlaybackSettings>(() => {
@@ -190,13 +203,20 @@ export function PlayerProvider({
     [duration, setDuration] = useState(0),
     [sourceIndex, setSourceIndex] = useState(0),
     [error, setError] = useState(""),
-    [queueOpen, setQueueOpen] = useState(false),
+    [nativeFullscreen, setNativeFullscreen] = useState(false),
+    [viewportFullscreen, setViewportFullscreen] = useState(false),
+    [controlsIdle, setControlsIdle] = useState(false),
+    [failedArtwork, setFailedArtwork] = useState<string>(),
     [saveError, setSaveError] = useState("");
   const baseSettings = useRef(initialSettings),
     savingSuspended = useRef(suspendSaving);
   baseSettings.current = initialSettings;
   savingSuspended.current = suspendSaving;
-  const native = useRef<HTMLMediaElement | null>(null),
+  const controlsIdleTimer = useRef<ReturnType<typeof createFullscreenIdleTimer> | null>(null);
+  const viewportRestore = useRef<{ x: number; y: number; focus: Element | null } | null>(null);
+  const stage = useRef<HTMLDivElement>(null),
+    watch = useRef<HTMLElement>(null),
+    native = useRef<HTMLMediaElement | null>(null),
     youtube = useRef<any>(null),
     seekOnLoad = useRef(settings.position),
     live = useRef(settings),
@@ -212,6 +232,7 @@ export function PlayerProvider({
   const sources = current ? playbackSources(current) : [],
     source = sources[sourceIndex];
   const isYoutube = source?.provider === "youtube";
+  const presentationKind = current ? playbackKind(current, source) : undefined;
   const sourceIdentity = useRef<
     { itemId?: string; sourceId?: string } | undefined
   >(undefined);
@@ -253,6 +274,7 @@ export function PlayerProvider({
   }
   function start(list: ItemDto[], index = 0) {
     if (!list.length) return;
+    requestAnimationFrame(() => watch.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
     failed.current.clear();
     const queue = list.map((i) => i.id);
     const selected = queue[index];
@@ -481,319 +503,280 @@ export function PlayerProvider({
       queueIndex: Math.max(0, queue.indexOf(id!)),
     });
   }
+  const fullscreen = nativeFullscreen || viewportFullscreen;
+  function showFullscreenControls() {
+    controlsIdleTimer.current?.activity();
+  }
+  useEffect(() => {
+    setControlsIdle(false);
+    if (!fullscreen || !current) return;
+    const timer = createFullscreenIdleTimer(setControlsIdle);
+    controlsIdleTimer.current = timer;
+    return () => {
+      timer.dispose();
+      if (controlsIdleTimer.current === timer) controlsIdleTimer.current = null;
+    };
+  }, [fullscreen, current?.id, sourceKey]);
+  async function toggleFullscreen() {
+    if (viewportFullscreen) {
+      setViewportFullscreen(false);
+      return;
+    }
+    if (document.fullscreenElement) {
+      await document.exitFullscreen().catch(() => {});
+      return;
+    }
+    const element = stage.current;
+    if (!element) return;
+    const mode = await enterPlayerFullscreen(
+      element.requestFullscreen ? () => element.requestFullscreen() : undefined,
+    );
+    // The queue may have been cleared while the browser handled the request.
+    if (stage.current !== element || !element.isConnected) return;
+    if (mode === "viewport") {
+      viewportRestore.current = { x: window.scrollX, y: window.scrollY, focus: document.activeElement };
+      setViewportFullscreen(true);
+    }
+  }
+  useEffect(() => {
+    const changed = () => setNativeFullscreen(!!stage.current && document.fullscreenElement === stage.current);
+    document.addEventListener("fullscreenchange", changed);
+    return () => document.removeEventListener("fullscreenchange", changed);
+  }, []);
+  useEffect(() => {
+    if (!current) {
+      setViewportFullscreen(false);
+      setNativeFullscreen(false);
+    }
+  }, [current?.id]);
+  useLayoutEffect(() => {
+    if (!viewportFullscreen || !current) return;
+    const restore = viewportRestore.current;
+    const bodyOverflow = document.body.style.overflow;
+    const rootOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    stage.current?.focus({ preventScroll: true });
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setViewportFullscreen(false);
+    };
+    window.addEventListener("keydown", keydown, true);
+    return () => {
+      window.removeEventListener("keydown", keydown, true);
+      document.body.style.overflow = bodyOverflow;
+      document.documentElement.style.overflow = rootOverflow;
+      if (restore?.focus instanceof HTMLElement && restore.focus.isConnected)
+        restore.focus.focus({ preventScroll: true });
+      if (restore) window.scrollTo({ left: restore.x, top: restore.y, behavior: "instant" });
+      viewportRestore.current = null;
+    };
+  }, [viewportFullscreen, !!current]);
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      showFullscreenControls();
+      if (!current || event.defaultPrevented || document.querySelector("dialog[open]")) return;
+      const action = playbackShortcut({
+        key: event.key,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        altKey: event.altKey,
+        repeat: event.repeat,
+        target: event.target instanceof HTMLElement ? event.target : null,
+      });
+      if (!action) return;
+      event.preventDefault();
+      if (action === "toggle") toggle();
+      if (action === "fullscreen") void toggleFullscreen();
+      if (action === "mute") patch({ volume: settings.volume ? 0 : 0.8 });
+      if (action === "backward") seek(live.current.position - 10);
+      if (action === "forward") seek(live.current.position + 10);
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, [current?.id, playing, duration, settings.volume, sourceKey, viewportFullscreen]);
   const total = duration || current?.duration || 0;
-  return (
-    <PlayerContext.Provider
-      value={{
-        current,
-        playing,
-        settings,
-        start,
-        enqueue: (item) =>
-          setSettings((old) => ({
-            ...old,
-            queue: [...old.queue, item.id],
-            originalQueue: [...(old.originalQueue ?? old.queue), item.id],
-          })),
-        toggle,
-      }}
-    >
-      {children}
-      {queueOpen && (
-        <aside
-          className={`queue-panel ${current && source && (isYoutube || current.kind === "video") ? "with-media" : ""}`}
-        >
-          <div className="panel-heading">
-            <div>
-              <span className="eyebrow">СЕЙЧАС ИГРАЕТ</span>
-              <h2>
-                Очередь <span>{settings.queue.length}</span>
-              </h2>
+  const artwork = playbackArtwork(current, source);
+  const showArtwork = artwork && failedArtwork !== artwork;
+  const sourceLabel = isYoutube ? "YouTube" : source ? "Локальный файл" : "Источник недоступен";
+  const player = (
+    <section ref={watch} className={`watch-player ${current ? "" : "is-empty"}`} aria-label="Плеер">
+      {!current ? (
+        <div className="watch-welcome">
+          <span className="watch-welcome-icon"><AudioLines size={25} /></span>
+          <div>
+            <strong>Ваше место в первом ряду</strong>
+            <p>Включите запись или плейлист — видео и музыка зазвучат здесь.</p>
+          </div>
+          <span className="watch-welcome-mark" aria-hidden="true">響</span>
+        </div>
+      ) : (
+        <>
+          <header className="watch-heading">
+            <span className="eyebrow"><span className={`watch-status-dot ${playing ? "playing" : ""}`} />{playing ? "СЕЙЧАС ИГРАЕТ" : "ГОТОВО К ПРОСМОТРУ"}</span>
+            <a href="#browse-content" className="watch-browse-link">Медиатека и плейлисты <ChevronDown size={14} /></a>
+          </header>
+          <div className="watch-layout">
+            <div className="watch-main">
+              <div
+                ref={stage}
+                className={`watch-stage ${viewportFullscreen ? "is-viewport-fullscreen" : ""} ${fullscreen && controlsIdle ? "is-controls-idle" : ""}`}
+                aria-label="Сцена воспроизведения"
+                tabIndex={-1}
+                onPointerMove={showFullscreenControls}
+                onPointerDownCapture={showFullscreenControls}
+                onTouchStart={showFullscreenControls}
+                onFocusCapture={showFullscreenControls}
+                onKeyDownCapture={showFullscreenControls}
+              >
+                <div className="watch-media">
+                  {source && isYoutube ? (
+                    <Youtube
+                      key={sourceKey}
+                      id={source.externalId || new URL(source.url!).searchParams.get("v") || source.url!.split("/").pop()!}
+                      playing={playing}
+                      volume={settings.volume}
+                      position={seekOnLoad.current}
+                      engine={youtube}
+                      onTime={(position, d) => { patch({ position }); setDuration(d); }}
+                      onEnded={() => next(1, true)}
+                      onError={sourceError}
+                      onPaused={() => { showFullscreenControls(); setPlaying(false); }}
+                      onPlaying={() => { showFullscreenControls(); setPlaying(true); }}
+                    />
+                  ) : source && presentationKind === "video" ? (
+                    <video
+                      key={sourceKey}
+                      ref={(element) => { native.current = element; }}
+                      src={source.streamUrl!}
+                      playsInline
+                      onLoadedMetadata={(event) => {
+                        event.currentTarget.currentTime = seekOnLoad.current;
+                        event.currentTarget.volume = live.current.volume;
+                        setDuration(event.currentTarget.duration);
+                        if (playingRef.current) event.currentTarget.play().catch(() => setPlaying(false));
+                      }}
+                      onTimeUpdate={(event) => patch({ position: event.currentTarget.currentTime })}
+                      onEnded={() => next(1, true)}
+                      onError={sourceError}
+                      onClick={toggle}
+                    />
+                  ) : (
+                    <div className={`audio-scene art-${current.title.length % 6}`}>
+                      {showArtwork && <img className="audio-backdrop" src={artwork} alt="" onError={() => setFailedArtwork(artwork)} />}
+                      <div className={`audio-cover art-${current.title.length % 6}`}>
+                        {showArtwork ? <img src={artwork} alt={`Обложка: ${current.title}`} onError={() => setFailedArtwork(artwork)} /> : (
+                          <div className="audio-cover-fallback" aria-label="Обложка отсутствует">
+                            <span className="audio-cover-orbit" /><span className="audio-cover-orbit second" />
+                            <span className="audio-cover-mark" aria-hidden="true">響</span>
+                            <span className="audio-cover-brand"><AudioLines size={16} /> HIBIKI</span>
+                          </div>
+                        )}
+                      </div>
+                      <span className="audio-scene-label"><Music2 size={12} /> {source ? "ТОЛЬКО ЗВУК · ПОЛНОЕ ПОГРУЖЕНИЕ" : "ИСТОЧНИК НЕДОСТУПЕН"}</span>
+                      {source && (
+                        <audio
+                          key={sourceKey}
+                          ref={(element) => { native.current = element; }}
+                          src={source.streamUrl!}
+                          onLoadedMetadata={(event) => {
+                            event.currentTarget.currentTime = seekOnLoad.current;
+                            event.currentTarget.volume = live.current.volume;
+                            setDuration(event.currentTarget.duration);
+                            if (playingRef.current) event.currentTarget.play().catch(() => setPlaying(false));
+                          }}
+                          onTimeUpdate={(event) => patch({ position: event.currentTarget.currentTime })}
+                          onEnded={() => next(1, true)}
+                          onError={sourceError}
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="watch-fullscreen-reveal" aria-hidden="true" />
+                <div className="watch-controls">
+                  <div className="watch-fullscreen-title">{current.title}</div>
+                  <div className="seek-row">
+                    <span>{formatDuration(settings.position)}</span>
+                    <input
+                      aria-label="Позиция воспроизведения"
+                      aria-valuetext={`${formatDuration(settings.position)} из ${formatDuration(total)}`}
+                      type="range" min="0" max={total || 1} step="0.1"
+                      value={Math.min(settings.position, total || 1)}
+                      onChange={(event) => seek(Number(event.target.value))}
+                      style={{ "--progress": `${total ? (settings.position / total) * 100 : 0}%` } as any}
+                      disabled={!total}
+                    />
+                    <span>{formatDuration(total)}</span>
+                  </div>
+                  <div className="watch-control-row">
+                    <div className="watch-transport">
+                      <button className="main-play" aria-label={playing ? "Приостановить" : "Воспроизвести"} title={playing ? "Приостановить (Пробел)" : "Воспроизвести (Пробел)"} onClick={toggle}>
+                        {playing ? <Pause size={23} fill="currentColor" /> : <Play size={23} fill="currentColor" />}
+                      </button>
+                      <button className="icon-button" aria-label="Предыдущая запись" title="Предыдущая запись" onClick={() => live.current.position > 3 ? seek(0) : next(-1)}><SkipBack size={19} fill="currentColor" /></button>
+                      <button className="icon-button" aria-label="Следующая запись" title="Следующая запись" onClick={() => next()}><SkipForward size={19} fill="currentColor" /></button>
+                      <span className="watch-control-divider" />
+                      <button className={`icon-button ${settings.shuffle ? "selected" : ""}`} aria-label="Перемешать" title="Перемешать очередь" aria-pressed={settings.shuffle} onClick={shuffleToggle}><Shuffle size={18} /></button>
+                      <button
+                        className={`icon-button ${settings.repeat !== "off" ? "selected" : ""}`}
+                        aria-label={`Повтор: ${settings.repeat === "off" ? "выключен" : settings.repeat === "all" ? "вся очередь" : "одна запись"}`}
+                        title={`Повтор: ${settings.repeat === "off" ? "выключен" : settings.repeat === "all" ? "вся очередь" : "одна запись"}`}
+                        onClick={() => patch({ repeat: settings.repeat === "off" ? "all" : settings.repeat === "all" ? "one" : "off" })}
+                      >{settings.repeat === "one" ? <Repeat1 size={18} /> : <Repeat size={18} />}</button>
+                    </div>
+                    <div className="watch-tools">
+                      <button className="icon-button" aria-label={settings.volume ? "Выключить звук" : "Включить звук"} title="Звук (M)" onClick={() => patch({ volume: settings.volume ? 0 : 0.8 })}>{settings.volume ? <Volume2 size={19} /> : <VolumeX size={19} />}</button>
+                      <input aria-label="Громкость" aria-valuetext={`${Math.round(settings.volume * 100)}%`} type="range" min="0" max="1" step="0.01" value={settings.volume} onChange={(e) => patch({ volume: Number(e.target.value) })} style={{ "--progress": `${settings.volume * 100}%` } as any} />
+                      <span className="watch-control-divider" />
+                      <button className="icon-button fullscreen-button" aria-label={fullscreen ? "Выйти из полноэкранного режима" : "Полный экран"} title="Полный экран (F)" onClick={() => void toggleFullscreen()}>{fullscreen ? <Minimize2 size={19} /> : <Maximize2 size={19} />}</button>
+                    </div>
+                  </div>
+                  {(error || saveError) && (
+                    <div className="watch-notice" role="status"><CircleAlert size={16} /><span>{error || saveError}</span><button className="icon-button" aria-label="Скрыть уведомление" onClick={() => { setError(""); setSaveError(""); }}><X size={15} /></button></div>
+                  )}
+                </div>
+              </div>
+              <div className="watch-metadata">
+                <span className="watch-kind-icon">{presentationKind === "video" ? <Video size={20} /> : <Music2 size={20} />}</span>
+                <div><h2>{current.title}</h2><p>{presentationKind === "video" ? "Видео" : "Аудио"}<span>·</span>{sourceLabel}{current.tags.slice(0, 2).map((tag) => <span className="watch-tag" key={tag.id}>{tag.name}</span>)}</p></div>
+              </div>
+              <p className="watch-shortcuts"><kbd>Пробел</kbd> пауза <span>·</span> <kbd>←</kbd> <kbd>→</kbd> 10 секунд <span>·</span> <kbd>F</kbd> полный экран</p>
             </div>
-            <button
-              className="icon-button"
-              aria-label="Закрыть очередь"
-              onClick={() => setQueueOpen(false)}
-            >
-              <X size={19} />
-            </button>
-          </div>
-          <p className="muted small">
-            Состав сохранён на момент запуска. Изменения плейлистов не прерывают
-            прослушивание.
-          </p>
-          <div className="queue-list">
-            {settings.queue.map((id, index) => {
-              const item = items.find((i) => i.id === id);
-              return (
-                <button
-                  key={`${id}-${index}`}
-                  className={`queue-row ${index === settings.queueIndex ? "active" : ""}`}
-                  onClick={() => switchTo(index)}
-                >
-                  <span className="queue-number">
-                    {index === settings.queueIndex && playing ? (
-                      <span className="equalizer">
-                        <i />
-                        <i />
-                        <i />
+            <aside className="watch-queue" aria-label="Очередь воспроизведения">
+              <div className="watch-queue-heading"><div><ListMusic size={18} /><h2>Далее в очереди</h2></div><span>{settings.queueIndex + 1} / {settings.queue.length}</span></div>
+              <p className="watch-queue-description">Ваша подборка, один непрерывный поток.</p>
+              <div className="watch-queue-list">
+                {settings.queue.map((id, index) => {
+                  const item = items.find((i) => i.id === id);
+                  const thumbnail = playbackArtwork(item);
+                  const active = index === settings.queueIndex;
+                  return (
+                    <button key={`${id}-${index}`} className={`watch-queue-row ${active ? "active" : ""}`} aria-current={active ? "true" : undefined} onClick={() => switchTo(index)}>
+                      <span className="watch-queue-number">{active && playing ? <span className="equalizer" aria-hidden="true"><i /><i /><i /></span> : index + 1}</span>
+                      <span className={`watch-queue-art art-${(item?.title.length ?? 0) % 6}`}>
+                        {item?.kind === "video" ? <Video size={18} /> : <Music2 size={18} />}
+                        {thumbnail && <img src={thumbnail} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />}
+                        <span className="watch-queue-duration">{formatDuration(item?.duration)}</span>
                       </span>
-                    ) : (
-                      index + 1
-                    )}
-                  </span>
-                  <span className="truncate">
-                    {item?.title ?? "Запись удалена"}
-                    <small>{item?.kind === "video" ? "Видео" : "Аудио"}</small>
-                  </span>
-                  <span>{formatDuration(item?.duration)}</span>
-                </button>
-              );
-            })}
+                      <span className="watch-queue-info"><strong>{item?.title ?? "Запись удалена"}</strong><small>{item ? playbackSources(item).length ? `${item.kind === "video" ? "Видео" : "Аудио"}${active ? " · Сейчас играет" : ""}` : "Источник недоступен" : "Нет в медиатеке"}</small></span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="watch-queue-footer"><span>Очередь сохранена при запуске</span><button className="text-button" onClick={() => { setPlaying(false); patch({ queue: [], queueIndex: 0, position: 0, originalQueue: [] }); }}>Очистить</button></div>
+            </aside>
           </div>
-          <button
-            className="button subtle full"
-            onClick={() => {
-              setPlaying(false);
-              patch({
-                queue: [],
-                queueIndex: 0,
-                position: 0,
-                originalQueue: [],
-              });
-            }}
-          >
-            Очистить очередь
-          </button>
-        </aside>
+        </>
       )}
-      {current && source && (isYoutube || current.kind === "video") && (
-        <aside className="media-view">
-          <div className="media-caption">
-            <span>{isYoutube ? "YouTube" : "Локальное видео"}</span>
-            <button
-              className="icon-button"
-              aria-label="Развернуть видео"
-              onClick={() => {
-                const element = document.querySelector(
-                  ".media-view video, .media-view iframe",
-                );
-                element?.requestFullscreen?.();
-              }}
-            >
-              <Maximize2 size={14} />
-            </button>
-          </div>
-          {isYoutube ? (
-            <Youtube
-              key={sourceKey}
-              id={
-                source.externalId ||
-                new URL(source.url!).searchParams.get("v") ||
-                source.url!.split("/").pop()!
-              }
-              playing={playing}
-              volume={settings.volume}
-              position={seekOnLoad.current}
-              engine={youtube}
-              onTime={(position, d) => {
-                patch({ position });
-                setDuration(d);
-              }}
-              onEnded={() => next(1, true)}
-              onError={sourceError}
-              onPaused={() => setPlaying(false)}
-            />
-          ) : (
-            <video
-              key={sourceKey}
-              ref={(element) => {
-                native.current = element;
-              }}
-              src={source.streamUrl!}
-              playsInline
-              onLoadedMetadata={(event) => {
-                event.currentTarget.currentTime = seekOnLoad.current;
-                event.currentTarget.volume = live.current.volume;
-                setDuration(event.currentTarget.duration);
-                if (playingRef.current)
-                  event.currentTarget.play().catch(() => setPlaying(false));
-              }}
-              onTimeUpdate={(event) =>
-                patch({ position: event.currentTarget.currentTime })
-              }
-              onEnded={() => next(1, true)}
-              onError={sourceError}
-              onClick={toggle}
-            />
-          )}
-        </aside>
-      )}
-      {current && source && !isYoutube && current.kind === "audio" && (
-        <audio
-          key={sourceKey}
-          ref={(element) => {
-            native.current = element;
-          }}
-          src={source.streamUrl!}
-          onLoadedMetadata={(event) => {
-            event.currentTarget.currentTime = seekOnLoad.current;
-            event.currentTarget.volume = live.current.volume;
-            setDuration(event.currentTarget.duration);
-            if (playingRef.current)
-              event.currentTarget.play().catch(() => setPlaying(false));
-          }}
-          onTimeUpdate={(event) =>
-            patch({ position: event.currentTarget.currentTime })
-          }
-          onEnded={() => next(1, true)}
-          onError={sourceError}
-        />
-      )}
-      {(error || saveError) && (
-        <div className="player-notice" role="status">
-          <CircleAlert size={15} />
-          {error || saveError}
-          <button
-            aria-label="Скрыть уведомление"
-            onClick={() => {
-              setError("");
-              setSaveError("");
-            }}
-          >
-            <X size={14} />
-          </button>
-        </div>
-      )}
-      <footer className="player-bar">
-        <div className="now-playing">
-          <div className={`mini-art art-${(current?.title.length ?? 0) % 6}`}>
-            {current?.sources.find((s) => s.thumbnail)?.thumbnail ? (
-              <img
-                src={current.sources.find((s) => s.thumbnail)!.thumbnail!}
-                alt=""
-              />
-            ) : (
-              <Music2 size={23} />
-            )}
-          </div>
-          <div className="truncate">
-            <strong>{current?.title ?? "Всё начинается со звука"}</strong>
-            <span>
-              {current
-                ? `${current.kind === "video" ? "Видео" : "Аудио"} · ${isYoutube ? "YouTube" : source ? "На этом устройстве" : "Источник недоступен"}`
-                : "Выберите запись в медиатеке"}
-            </span>
-          </div>
-        </div>
-        <div className="playback-controls">
-          <div className="playback-buttons">
-            <button
-              className={`icon-button ${settings.shuffle ? "selected" : ""}`}
-              aria-label="Перемешать"
-              aria-pressed={settings.shuffle}
-              onClick={shuffleToggle}
-            >
-              <Shuffle size={17} />
-            </button>
-            <button
-              className="icon-button"
-              aria-label="Предыдущая запись"
-              disabled={!current}
-              onClick={() => (live.current.position > 3 ? seek(0) : next(-1))}
-            >
-              <SkipBack size={18} fill="currentColor" />
-            </button>
-            <button
-              className="main-play"
-              aria-label={playing ? "Приостановить" : "Воспроизвести"}
-              disabled={!current}
-              onClick={toggle}
-            >
-              {playing ? (
-                <Pause size={20} fill="currentColor" />
-              ) : (
-                <Play size={20} fill="currentColor" />
-              )}
-            </button>
-            <button
-              className="icon-button"
-              aria-label="Следующая запись"
-              disabled={!current}
-              onClick={() => next()}
-            >
-              <SkipForward size={18} fill="currentColor" />
-            </button>
-            <button
-              className={`icon-button ${settings.repeat !== "off" ? "selected" : ""}`}
-              aria-label={`Повтор: ${settings.repeat === "off" ? "выключен" : settings.repeat === "all" ? "вся очередь" : "одна запись"}`}
-              onClick={() =>
-                patch({
-                  repeat:
-                    settings.repeat === "off"
-                      ? "all"
-                      : settings.repeat === "all"
-                        ? "one"
-                        : "off",
-                })
-              }
-            >
-              {settings.repeat === "one" ? (
-                <Repeat1 size={17} />
-              ) : (
-                <Repeat size={17} />
-              )}
-            </button>
-          </div>
-          <div className="seek-row">
-            <span>{formatDuration(settings.position)}</span>
-            <input
-              aria-label="Позиция воспроизведения"
-              type="range"
-              min="0"
-              max={total || 1}
-              step="0.1"
-              value={Math.min(settings.position, total || 1)}
-              onChange={(event) => seek(Number(event.target.value))}
-              style={
-                {
-                  "--progress": `${total ? (settings.position / total) * 100 : 0}%`,
-                } as any
-              }
-              disabled={!current || !total}
-            />
-            <span>{formatDuration(total)}</span>
-          </div>
-        </div>
-        <div className="player-tools">
-          <button
-            className={`icon-button ${queueOpen ? "selected" : ""}`}
-            aria-label="Показать очередь"
-            aria-expanded={queueOpen}
-            onClick={() => setQueueOpen(!queueOpen)}
-          >
-            <ListMusic size={20} />
-          </button>
-          <span className="tool-divider" />
-          <button
-            className="icon-button"
-            aria-label={settings.volume ? "Выключить звук" : "Включить звук"}
-            onClick={() => patch({ volume: settings.volume ? 0 : 0.8 })}
-          >
-            {settings.volume ? <Volume2 size={18} /> : <VolumeX size={18} />}
-          </button>
-          <input
-            aria-label="Громкость"
-            type="range"
-            min="0"
-            max="1"
-            step="0.01"
-            value={settings.volume}
-            onChange={(e) => patch({ volume: Number(e.target.value) })}
-            style={{ "--progress": `${settings.volume * 100}%` } as any}
-          />
-        </div>
-      </footer>
+      {!current && (error || saveError) && <p className="watch-empty-notice" role="status"><CircleAlert size={15} />{error || saveError}</p>}
+    </section>
+  );
+  return (
+    <PlayerContext.Provider value={{ current, playing, settings, start, enqueue: (item) => setSettings((old) => ({ ...old, queue: [...old.queue, item.id], originalQueue: [...(old.originalQueue ?? old.queue), item.id] })), toggle }}>
+      {children(player)}
     </PlayerContext.Provider>
   );
 }

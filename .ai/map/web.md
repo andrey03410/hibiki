@@ -23,6 +23,13 @@ YouTube single/playlist, редактирование названия/тего�
 shuffle/queue — в `packages/core/src/queue.ts`. Переходы по сайту не монтируют
 плеер заново. Native audio/video и видимый YouTube IFrame работают в одной очереди.
 
+Provider передаёт постоянную watch-поверхность render-slot в main над Routes.
+Большая сцена 16:9 и очередь справа при ширине >1100px; в узком desktop-окне
+очередь ниже. Тип native-сцены определяется MIME выбранного source, поэтому
+аудиокопия YouTube/video item также показывает cover вместо пустого video.
+Для аудио используется source.thumbnail от [artwork endpoint](media.md), при
+404/ошибке — графический fallback. Плейлисты и медиатека остаются ниже плеера.
+
 Локальные источники с streamUrl приоритетны; явно unavailable пропускаются.
 Несовместимый оригинал недоступен для плеера, доступная копия того же item
 подготовлена сервером — [media](media.md). При ошибке source плеер пробует следующий,
@@ -31,8 +38,19 @@ shuffle/queue — в `packages/core/src/queue.ts`. Переходы по сай�
 Очередь — снимок ID при старте, а не живая подписка на правила плейлиста.
 Shuffle один раз переставляет очередь с сохранением текущего item; originalQueue
 позволяет вернуться к исходному порядку. Есть next/previous, seek, громкость,
-повтор off/all/one, список очереди и fullscreen видео. Previous после нескольких
+повтор off/all/one, список очереди и fullscreen video/audio. Previous после нескольких
 секунд сначала возвращает текущий item в начало. Локальный seek использует HTTP Range.
+
+Fullscreen разворачивает общую сцену с controls; при отказе браузера — на всё окно.
+В резервном режиме сохраняются scroll/focus/overflow, выход по кнопке, F или Esc.
+Пробел/K — pause, F — fullscreen, M — mute, стрелки/J/L — ±10s. Поля, кнопки,
+ссылки, contenteditable и открытый dialog защищены от глобальных hotkeys.
+Состояние кнопки синхронизируется также с play/pause внутри YouTube.
+В fullscreen controls — overlay, через3000мс без активности панель и курсор
+скрываются; pointer/touch/key/focus возвращают управление. Клавиатурно
+сфокусированные controls остаются видимыми. Для cross-origin YouTube iframe
+первое движение на reveal-поверхности возвращает управление, затем iframe
+снова интерактивен. В обычном режиме controls всегда видимы.
 
 Queue/index/position/volume/repeat/shuffle сохраняются в localStorage на аккаунт
 и через `/api/settings` раз в 5 с/при уходе со страницы. Удалённые IDs фильтруются
