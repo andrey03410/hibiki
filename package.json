@@ -1,0 +1,61 @@
+{
+  "name": "hibiki",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.16"
+  },
+  "scripts": {
+    "dev": "npm run db:deploy && concurrently -k -n server,worker,web \"tsx watch --env-file-if-exists=.env apps/server/src/main.ts\" \"tsx watch --env-file-if-exists=.env apps/worker/src/main.ts\" \"vite --config apps/web/vite.config.ts\"",
+    "build": "vite build --config apps/web/vite.config.ts",
+    "start": "npm run db:deploy && concurrently -k -n server,worker \"tsx --env-file-if-exists=.env apps/server/src/main.ts\" \"tsx --env-file-if-exists=.env apps/worker/src/main.ts\"",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "prisma generate",
+    "db:deploy": "node scripts/prisma.mjs migrate deploy",
+    "db:migrate": "node scripts/prisma.mjs migrate dev",
+    "account": "tsx --env-file-if-exists=.env scripts/account.ts",
+    "postinstall": "prisma generate"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.5",
+    "@fastify/multipart": "^9.3.0",
+    "@fastify/static": "^10.1.10",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@prisma/adapter-better-sqlite3": "7.10.1",
+    "@prisma/client": "7.10.1",
+    "@prisma/driver-adapter-utils": "^7.10.1",
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.4.1",
+    "fastify": "^5.12.8",
+    "ffmpeg-static": "^5.2.0",
+    "lucide-react": "^0.468.0",
+    "music-metadata": "^12.4.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-router": "^7.18.5",
+    "yauzl": "^3.2.0",
+    "yazl": "^3.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.19.0",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@types/yauzl": "^2.10.3",
+    "@types/yazl": "^2.4.5",
+    "@vitejs/plugin-react": "^6.2.1",
+    "concurrently": "^10.0.6",
+    "prisma": "7.10.1",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.6",
+    "vitest": "^5.1.0"
+  }
+}
