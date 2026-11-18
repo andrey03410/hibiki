@@ -2,11 +2,11 @@
 id: '03'
 title: Личная медиатека, очередь и история прослушивания
 track: product
-stage: review
+stage: merged
 branch: codex/03-library-workspace
 pr: https://github.com/andrey03410/hibiki/pull/3
 started: 2026-11-18
-merged:
+merged: 2026-11-18
 autonomous: true
 ---
 
@@ -24,8 +24,8 @@ autonomous: true
 - [x] План — [plan.md](plan.md).
 - [x] Реализация и QG — [verify.md](verify.md).
 - [x] [PR #3](https://github.com/andrey03410/hibiki/pull/3) открыт.
-- [ ] Проверка владельцем.
-- [ ] Влито.
+- [x] Проверка — автономная живая приёмка и независимое ревью по разрешению владельца.
+- [x] Вливание — [PR #3](https://github.com/andrey03410/hibiki/pull/3) после CI.
 
 > Продукт ок. Переходи к технической постановке по всем пяти пунктам в рамках одной фичи Hibiki. Полностью реализуй автономно все фичи с обязательной живой приемкой убедись что все работает и коррктно и сразу вливай в main
 
