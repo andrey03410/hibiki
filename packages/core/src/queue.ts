@@ -1,7 +1,9 @@
 import type { RepeatMode } from "@hibiki/contracts";
-export interface QueueState {
+export interface QueueOrder {
   queue: string[];
   queueIndex: number;
+}
+export interface QueueState extends QueueOrder {
   repeat: RepeatMode;
 }
 
@@ -34,6 +36,67 @@ export function normalizeQueue(
     ? Math.min(Math.max(0, Math.trunc(queueIndex)), queue.length - 1)
     : 0;
   return { queue: unique, queueIndex: unique.indexOf(queue[safeIndex]!) };
+}
+
+export function moveQueueItem(
+  state: QueueOrder,
+  id: string,
+  destination: "next" | "last" | number,
+): QueueOrder {
+  const from = state.queue.indexOf(id);
+  const active = state.queue[state.queueIndex];
+  if (id === active) return state;
+  if (typeof destination === "number" && (
+    from <= state.queueIndex || !Number.isInteger(destination) ||
+    destination <= state.queueIndex || destination >= state.queue.length ||
+    destination === from
+  )) return state;
+
+  const queue = state.queue.filter((entry) => entry !== id);
+  const to = destination === "next"
+    ? queue.indexOf(active!) + 1
+    : destination === "last" ? queue.length : destination;
+  if (to === from) return state;
+  queue.splice(to, 0, id);
+  return { queue, queueIndex: Math.max(0, queue.indexOf(active!)) };
+}
+
+export interface QueueRemoval {
+  id: string;
+  before?: string;
+  after?: string;
+}
+
+export function removeUpcomingItem(
+  state: QueueOrder,
+  id: string,
+): { queue: QueueOrder; removal: QueueRemoval } | undefined {
+  const index = state.queue.indexOf(id);
+  if (index < 0 || index <= state.queueIndex) return;
+  return {
+    queue: { queue: state.queue.filter((entry) => entry !== id), queueIndex: state.queueIndex },
+    removal: { id, before: state.queue[index - 1], after: state.queue[index + 1] },
+  };
+}
+
+export function undoQueueRemoval(state: QueueOrder, removal: QueueRemoval): QueueOrder {
+  if (state.queue.includes(removal.id)) return state;
+  const after = state.queue.indexOf(removal.after!);
+  const before = state.queue.indexOf(removal.before!);
+  const index = after > state.queueIndex
+    ? after
+    : before >= state.queueIndex ? before + 1 : state.queueIndex + 1;
+  const queue = [...state.queue];
+  queue.splice(index, 0, removal.id);
+  return { queue, queueIndex: Math.max(0, state.queueIndex) };
+}
+
+export function shuffleUpcoming(state: QueueOrder, seed?: number | string): QueueOrder {
+  const boundary = state.queueIndex + 1;
+  return {
+    queue: [...state.queue.slice(0, boundary), ...shuffle(state.queue.slice(boundary), seed)],
+    queueIndex: state.queueIndex,
+  };
 }
 
 /** `ended` distinguishes natural completion from an explicit next/previous click. */

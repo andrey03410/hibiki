@@ -5,6 +5,7 @@ import ffmpegStatic from "ffmpeg-static";
 
 const VIDEO_ID = /^[a-zA-Z0-9_-]{11}$/;
 const LIST_ID = /^[a-zA-Z0-9_-]{2,200}$/;
+export const YOUTUBE_PLAYLIST_LIMIT = 10_000;
 const HOSTS = new Set([
   "youtube.com",
   "www.youtube.com",
@@ -59,6 +60,13 @@ export function normalizeYoutubeUrl(value: string): string {
   if (!id || !VIDEO_ID.test(id))
     throw new Error("Ссылка не содержит поддерживаемое видео или плейлист");
   return `https://www.youtube.com/watch?v=${id}`;
+}
+
+export function normalizeYoutubePlaylistUrl(value: string): string {
+  const canonical = normalizeYoutubeUrl(value);
+  if (new URL(canonical).pathname !== "/playlist")
+    throw new Error("Нужна ссылка на плейлист YouTube");
+  return canonical;
 }
 
 export function parseYoutubeEntry(value: unknown): YoutubeMetadata | null {
@@ -280,7 +288,7 @@ export async function discoverYoutube(
         "--skip-download",
         "--dump-single-json",
         "--playlist-end",
-        "10000",
+        String(YOUTUBE_PLAYLIST_LIMIT),
         "--",
         canonical,
       ],
@@ -343,6 +351,73 @@ export async function discoverYoutube(
     }
   }
 }
+
+export async function discoverYoutubePlaylist(
+  url: string,
+  signal?: AbortSignal,
+): Promise<YoutubeCollection> {
+  const canonical = normalizeYoutubePlaylistUrl(url);
+  const playlistId = new URL(canonical).searchParams.get("list");
+  const { stdout, stderr } = await runTool(
+    binary(),
+    [
+      ...baseArgs(),
+      "--flat-playlist",
+      "--no-ignore-errors",
+      "--skip-download",
+      "--dump-single-json",
+      "--playlist-end",
+      String(YOUTUBE_PLAYLIST_LIMIT + 1),
+      "--",
+      canonical,
+    ],
+    { signal },
+  );
+  if (stderr.trim()) throw new YoutubeProviderError(stderr);
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(stdout);
+  } catch {
+    throw new YoutubeProviderError("YouTube не вернул состав плейлиста");
+  }
+  const incomplete = () =>
+    new YoutubeProviderError("YouTube вернул неполный состав плейлиста");
+  if (
+    raw?._type !== "playlist" ||
+    raw.id !== playlistId ||
+    !Array.isArray(raw.entries)
+  )
+    throw incomplete();
+  if (raw.entries.length > YOUTUBE_PLAYLIST_LIMIT)
+    throw new YoutubeProviderError("Плейлист YouTube превышает 10 000 позиций");
+  if (raw.playlist_count != null && raw.playlist_count !== raw.entries.length)
+    throw incomplete();
+  const positions = raw.requested_entries;
+  if (
+    positions != null &&
+    (!Array.isArray(positions) ||
+      positions.length !== raw.entries.length ||
+      positions.some((index, offset) => index !== offset + 1))
+  )
+    throw incomplete();
+  const entries = raw.entries.map((entry, index) => {
+    if (
+      entry?._type === "playlist" ||
+      entry?._type === "multi_video" ||
+      (entry?.playlist_index != null && entry.playlist_index !== index + 1)
+    )
+      throw incomplete();
+    const metadata = parseYoutubeEntry(entry);
+    if (!metadata) throw incomplete();
+    return metadata;
+  });
+  return {
+    title: typeof raw.title === "string" ? raw.title : undefined,
+    entries,
+    warnings: [],
+  };
+}
+
 export async function refreshYoutube(
   externalId: string,
   signal?: AbortSignal,

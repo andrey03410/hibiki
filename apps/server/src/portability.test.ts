@@ -27,6 +27,35 @@ describe("portable library", () => {
   afterEach(async () => {
     await ctx.close();
   });
+  it("exports private notes and summary only on opt-in and preserves populated targets", async () => {
+    const { item } = await ctx.library.upsertYoutube(ctx.userId, {
+      externalId: "abcdefghijk", title: "Song",
+    });
+    await ctx.db.item.update({ where: { id: item.id }, data: {
+      note: "my private note", favorite: true, preferredSourceId: item.sources[0].id,
+    } });
+    await ctx.db.source.update({ where: { id: item.sources[0].id }, data: { note: "source note" } });
+    await ctx.db.listeningSummary.create({ data: { ownerId: ctx.userId, itemId: item.id, launches: 3 } });
+    for (const includePrivate of [false, true]) {
+      const archive = join(ctx.root, `summary-${includePrivate}.zip`);
+      await exportLibrary(ctx.db, ctx.userId, ctx.root, archive, {
+        includeFiles: false, includeNotes: includePrivate, includeHistorySummary: includePrivate,
+      });
+      const checked = await inspectArchive(archive, join(ctx.root, `check-${includePrivate}`));
+      expect(checked.manifest.items[0].note).toBe(includePrivate ? "my private note" : undefined);
+      expect(checked.manifest.items[0].listeningSummary?.launches).toBe(includePrivate ? 3 : undefined);
+      if (!includePrivate) continue;
+      await applyArchive(ctx.db, ctx.otherUserId, ctx.root, checked);
+      const target = await ctx.db.item.findFirstOrThrow({ where: { ownerId: ctx.otherUserId }, include: { sources: true } });
+      expect(target).toMatchObject({ note: "my private note", favorite: true, preferredSourceId: target.sources[0].id });
+      expect(target.sources[0].note).toBe("source note");
+      expect((await ctx.db.listeningSummary.findUniqueOrThrow({ where: { itemId: target.id } })).launches).toBe(3);
+      await ctx.db.item.update({ where: { id: target.id }, data: { note: "my newer note" } });
+      await applyArchive(ctx.db, ctx.otherUserId, ctx.root, checked);
+      expect((await ctx.db.item.findUniqueOrThrow({ where: { id: target.id } })).note).toBe("my newer note");
+      expect((await ctx.db.listeningSummary.findUniqueOrThrow({ where: { itemId: target.id } })).launches).toBe(3);
+    }
+  });
   it("copies files and rewrites every item/tag/playlist/queue reference for the new owner", async () => {
     const input = join(ctx.root, "tone.wav");
     await writeFile(input, wav());

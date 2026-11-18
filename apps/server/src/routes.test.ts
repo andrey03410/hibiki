@@ -36,6 +36,81 @@ describe("HTTP and MCP isolation", () => {
     expect(response.statusCode).toBe(200);
     return response.cookies[0].value;
   }
+  it("does not turn an API token into an ad-hoc private history query", async () => {
+    const item = (await ctx.library.upsertYoutube(ctx.userId, { externalId: "abcdefghijk" })).item;
+    await ctx.db.listeningSummary.create({
+      data: { itemId: item.id, ownerId: ctx.userId, launches: 2, skipped: 2 },
+    });
+    const cookie = await app.auth.createSession(ctx.userId);
+    const { token } = await app.auth.createToken(ctx.userId, "limited");
+    const definition = {
+      version: 1, sort: "source",
+      rule: { type: "intersection", rules: [
+        { type: "items", ids: [item.id] },
+        { type: "history", condition: "skipped-at-least", count: 2 },
+      ] },
+    };
+    const headers = { authorization: `Bearer ${token}`, accept: "application/json, text/event-stream" };
+    const browser = { cookies: { hibiki_session: cookie } };
+    for (const [url, payload] of [
+      ["/api/playlists/preview", { definition }],
+      ["/api/playlists", { definition, title: "Private" }],
+      ["/api/playlists/preview", { definition: {
+        ...definition, rule: { type: "items", ids: [item.id] }, sort: "last-started",
+      } }],
+    ] as const)
+      expect((await app.inject({ method: "POST", url, headers, payload })).statusCode).toBe(403);
+    const mcp = await app.inject({
+      method: "POST", url: "/mcp", headers,
+      payload: { jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+        name: "playlist_preview", arguments: { definition },
+      } },
+    });
+    expect(mcp.json().result.isError).toBe(true);
+    const saved = await app.inject({
+      ...browser, method: "POST", url: "/api/playlists", payload: { definition, title: "Private" },
+    });
+    expect(saved.statusCode).toBe(200);
+    const resolved = await app.inject({ url: `/api/playlists/${saved.json().id}/resolve`, headers });
+    expect(resolved.json().items.map((entry: { id: string }) => entry.id)).toEqual([item.id]);
+    expect(resolved.json().items[0]).not.toHaveProperty("history");
+  });
+  it("exposes only selected membership of stored private playlists, including in compositions", async () => {
+    const included = (await ctx.library.upsertYoutube(ctx.userId, { externalId: "abcdefghijk" })).item;
+    const outside = (await ctx.library.upsertYoutube(ctx.userId, { externalId: "lmnopqrstuv" })).item;
+    await ctx.db.listeningSummary.create({
+      data: { itemId: outside.id, ownerId: ctx.userId, launches: 2, skipped: 2 },
+    });
+    const saved = await ctx.library.savePlaylist(ctx.userId, {
+      title: "Private difference",
+      definition: { version: 1, sort: "source", rule: {
+        type: "difference", include: { type: "items", ids: [included.id] },
+        exclude: { type: "history", condition: "skipped-at-least", count: 2 },
+      } },
+    });
+    const { token } = await app.auth.createToken(ctx.userId, "limited");
+    const headers = { authorization: `Bearer ${token}`, accept: "application/json, text/event-stream" };
+    const resolved = await app.inject({ url: `/api/playlists/${saved.id}/resolve`, headers });
+    expect(resolved.json()).toMatchObject({ items: [{ id: included.id }], excluded: [], reasons: {} });
+    expect(resolved.json().reasons).toEqual({});
+    const composed = await app.inject({
+      method: "POST", url: "/api/playlists/preview", headers,
+      payload: { definition: { version: 1, sort: "source", rule: { type: "union", rules: [
+        { type: "playlist", id: saved.id }, { type: "items", ids: [outside.id] },
+      ] } } },
+    });
+    expect(composed.json()).toMatchObject({ items: [{ id: included.id }, { id: outside.id }], excluded: [], reasons: {} });
+    expect(composed.json().reasons).toEqual({});
+    const explanation = await app.inject({
+      method: "POST", url: "/mcp", headers,
+      payload: { jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+        name: "playlist_explain", arguments: { playlistId: saved.id, itemId: outside.id },
+      } },
+    });
+    expect(JSON.parse(explanation.json().result.content[0].text)).toEqual({
+      included: false, reasons: [], excluded: null,
+    });
+  });
   it("requires authentication, rejects cross-origin writes and guards file Range access", async () => {
     expect((await app.inject("/api/library")).statusCode).toBe(401);
     const cookie = await session("listener");

@@ -1,0 +1,146 @@
+.watch-queue .watch-queue-heading {
+  padding-bottom: 12px;
+}
+
+.queue-section-heading,
+.queue-past summary {
+  color: #baa7c5;
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin: 0;
+  padding: 9px 8px 4px;
+}
+
+.queue-past summary {
+  cursor: pointer;
+  padding-bottom: 9px;
+}
+
+.queue-past summary span {
+  margin-inline-start: 4px;
+  color: #a88db8;
+}
+
+.queue-entry {
+  display: flex;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  min-width: 0;
+}
+
+.queue-entry.is-drop-target {
+  border-color: #b995d7;
+  background: #bd94df13;
+}
+
+.queue-entry .watch-queue-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.queue-entry .watch-queue-row.active::before {
+  left: -1px;
+}
+
+.queue-entry:has(.queue-drag) .watch-queue-art {
+  width: clamp(46px, 5vw, 79px);
+  min-width: clamp(46px, 5vw, 79px);
+}
+
+.queue-drag {
+  display: flex;
+  flex: none;
+  align-items: center;
+  color: #a88db8;
+  cursor: grab;
+  padding-inline: 2px;
+}
+
+.queue-drag:active {
+  cursor: grabbing;
+}
+
+.queue-entry-actions {
+  display: flex;
+  flex: none;
+  gap: 0;
+}
+
+.queue-entry-actions .icon-button {
+  width: 26px;
+  height: 30px;
+  min-width: 0;
+  padding: 0;
+}
+
+.queue-entry-actions [aria-disabled="true"] {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.queue-entry button:focus-visible,
+.queue-past summary:focus-visible {
+  outline: 2px solid #d4a6f7;
+  outline-offset: -2px;
+}
+
+.queue-empty {
+  margin: 4px 8px 12px;
+  font-size: 0.75rem;
+  color: #a88db8;
+}
+
+.watch-queue .watch-queue-footer {
+  flex-wrap: wrap;
+}
+
+.watch-queue .watch-queue-footer .text-button,
+.queue-notice {
+  font-size: 0.75rem;
+}
+
+.queue-notice {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 15px;
+  color: #d4c1e0;
+  border-top: 1px solid #c0a9f41a;
+}
+
+.queue-notice button,
+.queue-notice a {
+  flex: none;
+}
+
+.queue-playlist-dialog {
+  width: min(420px, calc(100vw - 32px));
+  border: 1px solid #c0a9f44d;
+  border-radius: 12px;
+  color: #ede3f5;
+  background: #1a161f;
+  padding: 24px;
+}
+
+.queue-playlist-dialog::backdrop {
+  background: #0b0812b3;
+}
+
+.queue-playlist-dialog form,
+.queue-playlist-dialog label {
+  display: grid;
+  gap: 12px;
+}
+
+.queue-playlist-dialog h2,
+.queue-playlist-dialog p {
+  margin: 0;
+}
+
+.queue-playlist-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}

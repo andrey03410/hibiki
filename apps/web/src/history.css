@@ -1,0 +1,141 @@
+.history-settings {
+  scroll-margin-top: 24px;
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.history-settings .settings-card-heading,
+.history-settings > p {
+  margin: 0;
+}
+
+.history-overview,
+.history-actions,
+.history-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.history-overview {
+  justify-content: space-between;
+}
+
+.history-settings .history-check {
+  margin: 0;
+  color: var(--text);
+}
+
+.history-journal,
+.history-cleanup {
+  display: grid;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  scroll-margin-top: 24px;
+}
+
+.history-actions > h3 {
+  margin-right: auto;
+}
+
+.history-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+}
+
+.history-filters label {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  max-width: 100%;
+}
+
+.history-filters select,
+.history-filters input {
+  max-width: 14rem;
+}
+
+.history-table-scroll {
+  overflow-x: auto;
+}
+
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.history-table caption {
+  color: var(--muted);
+  text-align: start;
+  padding-bottom: 5px;
+}
+
+.history-table :is(td, th) {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: start;
+  font-size: 12px;
+}
+
+.history-table :is(time, th) {
+  white-space: nowrap;
+}
+
+.history-filter-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  text-decoration: underline;
+  text-decoration-color: var(--muted);
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.history-confirm,
+.history-notice {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  width: 100%;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.history-confirm p,
+.history-notice p {
+  margin: 0;
+}
+
+.history-notice {
+  background: #cc935710;
+  border-color: #cc93574d;
+}
+
+.history-agent {
+  width: 100%;
+}
+
+.history-agent textarea {
+  display: block;
+  width: 100%;
+  margin-block: 5px;
+  resize: vertical;
+}
+
+.history-preview-list {
+  margin-block: 6px;
+  padding-inline-start: 20px;
+}
+
+.history-settings .history-danger {
+  color: #ffc2cb;
+}

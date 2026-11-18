@@ -4,7 +4,7 @@
 
 `packages/contracts/src/index.ts` экспортирует `Rule`, `PlaylistDefinition`,
 `ruleSchema`, `playlistDefinitionSchema`. Документ:
-`{version:1, rule, sort:'source'|'title'|'newest'|'duration', manualOrder?:string[]}`.
+`{version:1, rule, sort:'source'|'title'|'newest'|'duration'|'last-started', manualOrder?:string[]}`.
 
 | Правило | Значение |
 |---|---|
@@ -12,6 +12,8 @@
 | `{type:'playlist', id}` | Текущий результат другого плейлиста |
 | `{type:'tag', id}` | Все items с тегом |
 | `{type:'filter', kind?, local?, minDuration?, maxDuration?}` | Фильтр библиотеки |
+| `{type:'favorite'}` | Избранные записи |
+| `{type:'history', condition, count?, days?}` | Ещё не слушал/не дослушал, минимум быстрых пропусков, давно не включал |
 | `{type:'union', rules:[…]}` | Объединение |
 | `{type:'intersection', rules:[…]}` | Пересечение |
 | `{type:'difference', include, exclude}` | Явные исключения |
@@ -51,6 +53,14 @@ manualOrder, прямые и косвенные циклы при замене �
 Состав пересчитывается по свежей библиотеке при resolve/preview. Начатая очередь —
 снимок ID; изменения правил не переставляют текущие треки. Очередь и shuffle —
 в `packages/core/src/queue.ts` и [web](web.md).
+
+`history` получает закрытую сводку владельца, не возвращает счётчики в составе
+результата. `last-started-before` не включает записи без запусков; сортировка
+`last-started` ставит такие записи последними. Связь с YouTube материализует состав
+в обычный список ID; базу меняет сервис синхронизации, не общий редактор правил.
+При вложении подборка с личными правилами передаёт только свой итоговый набор,
+не исключения за его пределами. Для Bearer/MCP у такого графа также скрываются
+причины и списки исключённых записей.
 
 ## Как проверить
 

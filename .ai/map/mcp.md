@@ -18,7 +18,7 @@ SDK. Транспорт без серверной MCP-сессии, с JSON-от
 | Группа | Имена |
 |---|---|
 | Возможности | `capabilities` |
-| Медиатека | `media_list`, `media_get`, `media_import_youtube`, `media_download`, `media_refresh`, `media_import_local`, `media_upload_begin`, `media_update_many`, `media_delete` |
+| Медиатека | `media_list`, `media_get`, `media_import_youtube`, `media_download`, `media_refresh`, `media_propose_replacement`, `media_import_local`, `media_upload_begin`, `media_update_many`, `media_delete` |
 | Теги | `tags_list`, `tag_save`, `tag_delete` |
 | Плейлисты | `playlists_list`, `playlist_get`, `playlist_validate`, `playlist_preview`, `playlist_explain`, `playlist_save`, `playlist_delete` |
 | Задания | `jobs_list`, `job_get`, `job_cancel`, `job_retry` |
@@ -33,6 +33,13 @@ SDK. Транспорт без серверной MCP-сессии, с JSON-от
 Долгая работа возвращает JobDto. Прогресс проверяется через `job_get`, повторный
 импорт не используется как опрос. Готовый export возвращает downloadUrl;
 скачивание требует Bearer-токен или сессию браузера.
+
+`media_propose_replacement` сохраняет URL одного ролика и объяснение к своей
+записи. Предпросмотр, отклонение и подтверждение доступны в браузерной карточке.
+Заметки, попытки, сводка истории и браузерные задания с личным архивом
+не выдаются обычному MCP-клиенту. Произвольное условие или сортировку по истории
+нельзя применить, сохранить или импортировать через MCP/Bearer; состав уже
+заданного владельцем плейлиста остаётся доступен.
 
 Файлы передаются обычным multipart, не base64 в MCP. `media_upload_begin` и
 `library_import_begin` выдают одноразовый URL на 15 минут, привязанный к owner;

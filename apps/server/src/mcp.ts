@@ -12,6 +12,8 @@ import { validatePlaylist } from "@hibiki/core";
 import type { Services } from "./app";
 import { allowedLocalPath } from "./media";
 import { HttpError, invariant } from "./errors";
+import { proposeReplacement } from "./replacement";
+import { requireHistoryAccess } from "./library";
 
 const id = z.string().min(1).max(256);
 const doc = z.record(z.string(), z.unknown());
@@ -133,6 +135,10 @@ export function buildMcp(ownerId: string, s: Services) {
         upload: "media_upload_begin → multipart POST на uploadUrl",
         youtube:
           "media_import_youtube → job_get; импорт не скачивает файлы автоматически",
+        replacement:
+          "media_propose_replacement предлагает ролик; владелец проверяет и подтверждает в карточке",
+        historyRules:
+          "Условия и сортировку по личной истории задаёт владелец в браузере. MCP читает состав уже сохранённых плейлистов.",
         portability:
           "library_export → job_get → downloadUrl; library_import_begin → upload → job_get preview → library_import_apply",
         constraints: {
@@ -195,6 +201,12 @@ export function buildMcp(ownerId: string, s: Services) {
     "Скачать YouTube-источник в локальный файл того же item",
     { itemId: id, mode: z.enum(["audio", "video"]).default("video") },
     (args) => s.jobs.create(ownerId, "youtube-download", args),
+  );
+  tool(
+    "media_propose_replacement",
+    "Предложить ссылку на один ролик YouTube для своей записи, без автоматического применения",
+    { itemId: id, url: z.string().max(4000).url(), reason: z.string().trim().min(1).max(1000) },
+    (args) => proposeReplacement(s.db, ownerId, args.itemId, args.url, args.reason),
   );
   tool(
     "media_refresh",
@@ -337,7 +349,7 @@ export function buildMcp(ownerId: string, s: Services) {
       invariant(playlist, 404, "playlist_not_found", "Плейлист не найден");
       return {
         playlist,
-        resolved: await s.library.resolve(ownerId, args.playlistId),
+        resolved: await s.library.resolve(ownerId, args.playlistId, false),
       };
     },
     true,
@@ -353,6 +365,7 @@ export function buildMcp(ownerId: string, s: Services) {
           valid: false,
           issues: parsed.error.issues.map((i) => i.message),
         };
+      requireHistoryAccess(parsed.data, false);
       if (args.playlistId)
         invariant(
           await s.db.playlist.findFirst({
@@ -379,6 +392,7 @@ export function buildMcp(ownerId: string, s: Services) {
         ownerId,
         playlistDefinitionSchema.parse(args.definition),
         args.playlistId,
+        false,
       ),
     true,
   );
@@ -387,7 +401,7 @@ export function buildMcp(ownerId: string, s: Services) {
     "Почему item входит или не входит в свой плейлист",
     { playlistId: id, itemId: id.optional() },
     async (args) => {
-      const result = await s.library.resolve(ownerId, args.playlistId);
+      const result = await s.library.resolve(ownerId, args.playlistId, false);
       if (!args.itemId) return result;
       await s.library.getItem(ownerId, args.itemId);
       return {
@@ -415,6 +429,7 @@ export function buildMcp(ownerId: string, s: Services) {
           definition: playlistDefinitionSchema.parse(args.definition),
         },
         args.playlistId,
+        false,
       ),
   );
   tool(

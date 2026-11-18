@@ -17,6 +17,38 @@ describe("durable jobs", () => {
     await jobs.stop();
     await ctx.close();
   });
+  it("does not expose private browser jobs through ordinary job access", async () => {
+    await expect(jobs.create(ctx.userId, "export", { includeNotes: true })).rejects.toThrow();
+    const privateJob = await jobs.create(ctx.userId, "export", { includeNotes: true }, true);
+    expect(await jobs.list(ctx.userId)).toEqual([]);
+    expect((await ctx.library.snapshot(ctx.userId)).jobs).toEqual([]);
+    expect((await jobs.list(ctx.userId, true))[0].id).toBe(privateJob.id);
+    await expect(jobs.get(ctx.userId, privateJob.id)).rejects.toThrow();
+    await expect(jobs.cancel(ctx.userId, privateJob.id)).rejects.toThrow();
+    await jobs.runOnce();
+    await expect(jobs.exportPath(ctx.userId, privateJob.id)).rejects.toThrow();
+    await expect(jobs.exportPath(ctx.otherUserId, privateJob.id, true)).rejects.toThrow();
+    expect(await jobs.exportPath(ctx.userId, privateJob.id, true)).toMatch(/library\.hibiki\.zip$/);
+  });
+  it("requires a browser to import rules that query private history", async () => {
+    await ctx.library.savePlaylist(ctx.userId, {
+      title: "Browser history rule",
+      definition: { version: 1, sort: "source", rule: { type: "history", condition: "never-started" } },
+    });
+    const exported = await jobs.create(ctx.userId, "export", {});
+    await jobs.runOnce();
+    const archivePath = await jobs.exportPath(ctx.userId, exported.id);
+    const publicImport = await jobs.create(ctx.otherUserId, "import", { archivePath });
+    await jobs.runOnce();
+    expect(await jobs.get(ctx.otherUserId, publicImport.id)).toMatchObject({
+      state: "failed", error: expect.stringContaining("только из браузера"),
+    });
+    const browserImport = await jobs.create(ctx.otherUserId, "import", { archivePath }, true);
+    await jobs.runOnce();
+    expect(await jobs.get(ctx.otherUserId, browserImport.id, true)).toMatchObject({
+      state: "done", result: { preview: { canApply: true } },
+    });
+  });
   it("claims an export only once across workers and enforces ownership", async () => {
     const job = await jobs.create(ctx.userId, "export", {
       includeFiles: false,

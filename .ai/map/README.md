@@ -11,6 +11,7 @@
 | Архитектура и доступ | [architecture](architecture.md) | `apps/server/src/`, `packages/` |
 | Медиатека и файлы | [media](media.md) | `library.ts`, `media.ts` |
 | Правила плейлистов | [playlists](playlists.md) | `packages/contracts/`, `packages/core/` |
+| История прослушивания | [history](history.md) | `history.ts`, `listening-client.ts` |
 | YouTube | [youtube](youtube.md) | `youtube.ts` |
 | Фоновые задания | [jobs](jobs.md) | `jobs.ts`, `apps/worker/` |
 | Сайт и плеер | [web](web.md) | `apps/web/src/` |

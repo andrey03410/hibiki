@@ -66,6 +66,39 @@ const ids = (result: ReturnType<typeof resolvePlaylist>) =>
   result.items.map((entry) => entry.id);
 
 describe("playlist resolution", () => {
+  it("composes favorite/history rules using private summaries without leaking them", () => {
+    const listeningLibrary = {
+      ...library,
+      items: library.items.map((entry) => ({ ...entry, favorite: true })),
+      history: new Map([
+        ["a", { launches: 1, completed: 1, skipped: 0, lastStartedAt: new Date(1) }],
+        ["b", { launches: 5, completed: 0, skipped: 3, lastStartedAt: new Date(2) }],
+      ]),
+      now: new Date("2026-11-18T12:00:00Z"),
+    };
+    const neverStarted = resolvePlaylist(
+      definition({ type: "intersection", rules: [
+        { type: "tag", id: "ending" },
+        { type: "history", condition: "never-started" },
+      ] }),
+      listeningLibrary,
+    );
+    expect(ids(neverStarted)).toEqual(["c"]);
+    const oldFavorites = resolvePlaylist(
+      definition({ type: "intersection", rules: [
+        { type: "favorite" },
+        { type: "history", condition: "last-started-before", days: 30 },
+      ] }, "last-started"),
+      listeningLibrary,
+    );
+    expect(ids(oldFavorites)).toEqual(["a", "b"]);
+    expect(oldFavorites.items[0]).not.toHaveProperty("history");
+    expect(ids(resolvePlaylist(
+      definition({ type: "history", condition: "skipped-at-least", count: 3 }),
+      listeningLibrary,
+    ))).toEqual(["b"]);
+  });
+
   it("combines dynamic playlists, tags and manual items in stable mixed-media order", () => {
     const input = definition({
       type: "union",

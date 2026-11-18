@@ -18,6 +18,7 @@ import {
 } from "./youtube.js";
 import {
   applyArchive,
+  archiveRequiresBrowser,
   exportLibrary,
   fileChecksum,
   inspectArchive,
@@ -33,7 +34,11 @@ const schemas = {
   "youtube-refresh": z
     .object({ itemId: z.string().min(1).optional() })
     .strict(),
-  export: z.object({ includeFiles: z.boolean().default(false) }).strict(),
+  export: z.object({
+    includeFiles: z.boolean().default(false),
+    includeNotes: z.boolean().optional(),
+    includeHistorySummary: z.boolean().optional(),
+  }).strict(),
   import: z
     .object({ archivePath: z.string().min(1), apply: z.boolean().optional() })
     .strict(),
@@ -67,14 +72,19 @@ export class JobsService {
     public library: LibraryService,
     public storageRoot: string,
   ) {}
-  private async owned(ownerId: string, id: string): Promise<Job> {
-    const row = await this.db.job.findFirst({ where: { id, ownerId } });
+  private async owned(ownerId: string, id: string, browser = false): Promise<Job> {
+    const row = await this.db.job.findFirst({
+      where: { id, ownerId, ...(browser ? {} : { browserOnly: false }) },
+    });
     invariant(row, 404, "job_not_found", "Задание не найдено");
     return row;
   }
-  async create(ownerId: string, kind: string, input: unknown): Promise<JobDto> {
-    invariant(kind in schemas, 400, "job_kind", "Неизвестный тип задания");
+  async create(ownerId: string, kind: string, input: unknown, browser = false): Promise<JobDto> {
+    invariant(Object.hasOwn(schemas, kind), 400, "job_kind", "Неизвестный тип задания");
     const parsed = schemas[kind as Kind].parse(input) as Record<string, any>;
+    const privateExport = kind === "export" && Boolean(parsed.includeNotes || parsed.includeHistorySummary);
+    invariant(!privateExport || browser, 403, "browser_only", "Личные данные экспортируются только из браузера");
+    const browserOnly = privateExport || (browser && kind === "import");
     if (kind === "youtube-import") parsed.url = normalizeYoutubeUrl(parsed.url);
     if (
       (kind === "youtube-download" || kind === "youtube-refresh") &&
@@ -123,7 +133,7 @@ export class JobsService {
     try {
       return jobDto(
         await this.db.job.create({
-          data: { id, ownerId, kind, inputJson: JSON.stringify(parsed) },
+          data: { id, ownerId, kind, browserOnly, inputJson: JSON.stringify(parsed) },
         }),
       );
     } catch (error) {
@@ -132,20 +142,20 @@ export class JobsService {
       throw error;
     }
   }
-  async list(ownerId: string): Promise<JobDto[]> {
+  async list(ownerId: string, browser = false): Promise<JobDto[]> {
     return (
       await this.db.job.findMany({
-        where: { ownerId },
+        where: { ownerId, ...(browser ? {} : { browserOnly: false }) },
         orderBy: { createdAt: "desc" },
         take: 100,
       })
     ).map(jobDto);
   }
-  async get(ownerId: string, id: string): Promise<JobDto> {
-    return jobDto(await this.owned(ownerId, id));
+  async get(ownerId: string, id: string, browser = false): Promise<JobDto> {
+    return jobDto(await this.owned(ownerId, id, browser));
   }
-  async cancel(ownerId: string, id: string): Promise<JobDto> {
-    const job = await this.owned(ownerId, id);
+  async cancel(ownerId: string, id: string, browser = false): Promise<JobDto> {
+    const job = await this.owned(ownerId, id, browser);
     if (!["queued", "running"].includes(job.state)) return jobDto(job);
     await this.db.job.updateMany({
       where: { id, ownerId, state: { in: ["queued", "running"] } },
@@ -157,10 +167,10 @@ export class JobsService {
       },
     });
     this.active.get(id)?.abort();
-    return this.get(ownerId, id);
+    return this.get(ownerId, id, browser);
   }
-  async retry(ownerId: string, id: string): Promise<JobDto> {
-    const job = await this.owned(ownerId, id);
+  async retry(ownerId: string, id: string, browser = false): Promise<JobDto> {
+    const job = await this.owned(ownerId, id, browser);
     invariant(
       ["failed", "cancelled"].includes(job.state),
       409,
@@ -182,10 +192,10 @@ export class JobsService {
         error: null,
       },
     });
-    return this.get(ownerId, id);
+    return this.get(ownerId, id, browser);
   }
-  async applyImport(ownerId: string, previewJobId: string): Promise<JobDto> {
-    const preview = await this.owned(ownerId, previewJobId);
+  async applyImport(ownerId: string, previewJobId: string, browser = false): Promise<JobDto> {
+    const preview = await this.owned(ownerId, previewJobId, browser);
     const input = asObject(preview.inputJson);
     const result = asObject(preview.resultJson);
     invariant(
@@ -205,6 +215,7 @@ export class JobsService {
           id,
           ownerId,
           kind: "import",
+          browserOnly: preview.browserOnly,
           inputJson: JSON.stringify({
             archivePath: input.archivePath,
             apply: true,
@@ -215,8 +226,8 @@ export class JobsService {
       }),
     );
   }
-  async exportPath(ownerId: string, id: string): Promise<string> {
-    const job = await this.owned(ownerId, id);
+  async exportPath(ownerId: string, id: string, browser = false): Promise<string> {
+    const job = await this.owned(ownerId, id, browser);
     invariant(
       job.kind === "export" && job.state === "done",
       409,
@@ -600,14 +611,19 @@ export class JobsService {
         job.ownerId,
         this.storageRoot,
         path.join(this.directory(job.id), "library.hibiki.zip"),
-        { includeFiles: input.includeFiles, signal },
+        {
+          includeFiles: input.includeFiles,
+          includeNotes: job.browserOnly && input.includeNotes,
+          includeHistorySummary: job.browserOnly && input.includeHistorySummary,
+          signal,
+        },
       );
       await save(output, 1, 1);
       return output;
     }
     if (job.kind === "import") {
       if (input.apply) {
-        const preview = await this.owned(job.ownerId, input.previewJobId);
+        const preview = await this.owned(job.ownerId, input.previewJobId, job.browserOnly);
         invariant(
           preview.state === "done" &&
             preview.kind === "import" &&
@@ -633,6 +649,8 @@ export class JobsService {
           workDir,
           signal,
         );
+        invariant(job.browserOnly || !archiveRequiresBrowser(checked.manifest),
+          403, "browser_only", "Архив с личными данными или правилами истории импортируется только из браузера");
         if (!input.apply) {
           const existing = await this.library.snapshot(job.ownerId);
           const identities = new Map<string, (typeof existing.items)[number]>();
