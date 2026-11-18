@@ -29,11 +29,20 @@ export interface ItemDto {
   updatedAt: string;
   tags: TagDto[];
   sources: SourceDto[];
+  favorite?: boolean;
+  preferredSourceId?: string;
 }
 export type Rule =
   | { type: "items"; ids: string[] }
   | { type: "playlist"; id: string }
   | { type: "tag"; id: string }
+  | { type: "favorite" }
+  | {
+      type: "history";
+      condition: "never-started" | "never-completed" | "skipped-at-least" | "last-started-before";
+      count?: number;
+      days?: number;
+    }
   | {
       type: "filter";
       kind?: "audio" | "video";
@@ -46,7 +55,7 @@ export type Rule =
 export interface PlaylistDefinition {
   version: 1;
   rule: Rule;
-  sort: "source" | "title" | "newest" | "duration";
+  sort: "source" | "title" | "newest" | "duration" | "last-started";
   manualOrder?: string[];
 }
 export interface PlaylistDto {
@@ -57,6 +66,7 @@ export interface PlaylistDto {
   revision: number;
   createdAt: string;
   updatedAt: string;
+  youtubeLinked?: boolean;
 }
 export interface JobDto {
   id: string;
@@ -121,6 +131,17 @@ const recursiveRuleSchema: z.ZodType<Rule> = z.lazy(() =>
       .strict(),
     z.object({ type: z.literal("playlist"), id: idSchema }).strict(),
     z.object({ type: z.literal("tag"), id: idSchema }).strict(),
+    z.object({ type: z.literal("favorite") }).strict(),
+    z.object({
+      type: z.literal("history"),
+      condition: z.enum(["never-started", "never-completed", "skipped-at-least", "last-started-before"]),
+      count: z.number().int().min(1).max(1_000_000).optional(),
+      days: z.number().int().min(1).max(36_500).optional(),
+    }).strict().refine((rule) =>
+      (rule.condition === "skipped-at-least") === (rule.count !== undefined) &&
+      (rule.condition === "last-started-before") === (rule.days !== undefined),
+      { message: "Укажите число пропусков или дней для выбранного условия" },
+    ),
     z
       .object({
         type: z.literal("filter"),
@@ -210,7 +231,7 @@ export const playlistDefinitionSchema = z
   .object({
     version: z.literal(1),
     rule: ruleSchema,
-    sort: z.enum(["source", "title", "newest", "duration"]),
+    sort: z.enum(["source", "title", "newest", "duration", "last-started"]),
     manualOrder: z.array(idSchema).max(RULE_LIMITS.ids).optional(),
   })
   .strict() satisfies z.ZodType<PlaylistDefinition>;
@@ -249,6 +270,8 @@ export const itemSchema = z
     updatedAt: z.string(),
     tags: z.array(tagSchema),
     sources: z.array(sourceSchema),
+    favorite: z.boolean().optional(),
+    preferredSourceId: idSchema.optional(),
   })
   .strict() satisfies z.ZodType<ItemDto>;
 export const playlistSchema = z
@@ -260,6 +283,7 @@ export const playlistSchema = z
     revision: z.number().int().nonnegative(),
     createdAt: z.string(),
     updatedAt: z.string(),
+    youtubeLinked: z.boolean().optional(),
   })
   .strict() satisfies z.ZodType<PlaylistDto>;
 export const jobSchema = z

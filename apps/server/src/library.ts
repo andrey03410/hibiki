@@ -21,12 +21,19 @@ import type {
   TagDto,
 } from "@hibiki/contracts";
 import { playlistDefinitionSchema } from "@hibiki/contracts";
-import { collectReferences, resolvePlaylist } from "@hibiki/core";
+import { collectReferences, resolvePlaylist, usesPrivateHistory } from "@hibiki/core";
 
 const itemInclude = {
   sources: { include: { file: true } },
   tags: { include: { tag: true } },
 } as const;
+
+export function requireHistoryAccess(definition: PlaylistDefinition, browser: boolean) {
+  invariant(
+    browser || !usesPrivateHistory(definition),
+    403, "browser_only", "Создавайте правила по личной истории в браузере",
+  );
+}
 type IncludedItem = NonNullable<
   Awaited<ReturnType<Db["item"]["findFirst"]>>
 > & { sources: Array<any>; tags: Array<any> };
@@ -37,6 +44,8 @@ export function itemDto(row: IncludedItem): ItemDto {
     originalTitle: row.originalTitle,
     kind: row.kind as "audio" | "video",
     duration: row.duration,
+    favorite: row.favorite,
+    preferredSourceId: row.preferredSourceId ?? undefined,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     tags: row.tags.map(({ tag }) => ({
@@ -71,6 +80,7 @@ export function playlistDto(row: {
   revision: number;
   createdAt: Date;
   updatedAt: Date;
+  youtubeLink?: { playlistId: string } | null;
 }): PlaylistDto {
   return {
     id: row.id,
@@ -80,6 +90,7 @@ export function playlistDto(row: {
     revision: row.revision,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    ...(row.youtubeLink ? { youtubeLinked: true } : {}),
   };
 }
 export function jobDto(row: {
@@ -114,12 +125,13 @@ export class LibraryService {
     public db: Db,
     public storageRoot: string,
   ) {}
-  async snapshot(ownerId: string): Promise<LibraryDto> {
-    return this.snapshotWith(ownerId, this.db);
+  async snapshot(ownerId: string, browserJobs = false): Promise<LibraryDto> {
+    return this.snapshotWith(ownerId, this.db, browserJobs);
   }
   private async snapshotWith(
     ownerId: string,
     db: Prisma.TransactionClient,
+    browserJobs = false,
   ): Promise<LibraryDto> {
     const [items, tags, playlists, jobs] = await Promise.all([
       db.item.findMany({
@@ -130,10 +142,11 @@ export class LibraryService {
       db.tag.findMany({ where: { ownerId }, orderBy: { name: "asc" } }),
       db.playlist.findMany({
         where: { ownerId },
+        include: { youtubeLink: { select: { playlistId: true } } },
         orderBy: { createdAt: "asc" },
       }),
       db.job.findMany({
-        where: { ownerId },
+        where: { ownerId, ...(browserJobs ? {} : { browserOnly: false }) },
         orderBy: { createdAt: "desc" },
         take: 50,
       }),
@@ -156,7 +169,12 @@ export class LibraryService {
   async importLocal(
     ownerId: string,
     filePath: string,
-    options: { title?: string; itemId?: string; signal?: AbortSignal } = {},
+    options: {
+      title?: string;
+      itemId?: string;
+      signal?: AbortSignal;
+      applyReplacement?: (tx: Prisma.TransactionClient, sourceId: string) => Promise<void>;
+    } = {},
   ): Promise<{ item: ItemDto; reused: boolean }> {
     if (options.itemId) await this.getItem(ownerId, options.itemId);
     const media = await inspectFile(filePath, { signal: options.signal });
@@ -198,9 +216,19 @@ export class LibraryService {
         ? await this.db.mediaFile.findUnique({ where: { id: prior.fileId } })
         : null;
       if (await fileIntact(original)) {
-        if (media.browserCompatible && prior.status === "available")
-          return { item, reused: true };
-        if (!media.browserCompatible && prior.reason === "unsupported_codec") {
+        if (media.browserCompatible && prior.status === "available") {
+          if (options.applyReplacement) {
+            const applyReplacement = options.applyReplacement;
+            await this.db.$transaction(async (tx) => {
+              invariant(await tx.source.findFirst({
+                where: { id: prior.id, ownerId, itemId: options.itemId, status: "available" },
+              }), 409, "source_changed", "Источник изменился, проверьте файл снова");
+              await applyReplacement(tx, prior.id);
+            });
+          }
+          return { item: options.applyReplacement ? await this.getItem(ownerId, item.id) : item, reused: true };
+        }
+        if (!options.applyReplacement && !media.browserCompatible && prior.reason === "unsupported_codec") {
           for (const source of item.sources) {
             if (
               source.provider !== "local" ||
@@ -227,6 +255,8 @@ export class LibraryService {
       { signal: options.signal },
     );
     try {
+      invariant(!options.applyReplacement || prepared || media.browserCompatible,
+        422, "no_playable_source", "Не удалось подготовить файл к воспроизведению");
       const store = async (source: string, info: MediaInspection) => {
         let file = await this.db.mediaFile.findUnique({
           where: { ownerId_hash: { ownerId, hash: info.hash } },
@@ -294,7 +324,7 @@ export class LibraryService {
               duration: media.duration,
             },
           });
-        else
+        else if (!options.applyReplacement)
           await tx.item.update({
             where: { id: itemId },
             data: { duration: media.duration ?? undefined },
@@ -305,7 +335,7 @@ export class LibraryService {
           fileId: file.id,
           checkedAt: new Date(),
         };
-        await tx.source.upsert({
+        const originalSource = await tx.source.upsert({
           where: { ownerId_key: { ownerId, key } },
           create: {
             id: randomUUID(),
@@ -317,6 +347,7 @@ export class LibraryService {
           },
           update: originalState,
         });
+        let preferredSource = originalSource;
         if (playback) {
           const playbackKey = `local:${playback.hash}`;
           const existing = await tx.source.findUnique({
@@ -326,7 +357,7 @@ export class LibraryService {
             existing && existing.itemId !== itemId
               ? `${playbackKey}:${itemId}`
               : playbackKey;
-          await tx.source.upsert({
+          preferredSource = await tx.source.upsert({
             where: { ownerId_key: { ownerId, key } },
             create: {
               id: randomUUID(),
@@ -346,6 +377,7 @@ export class LibraryService {
             },
           });
         }
+        if (options.applyReplacement) await options.applyReplacement(tx, preferredSource.id);
         options.signal?.throwIfAborted();
         return { itemId, reused };
       });
@@ -398,7 +430,7 @@ export class LibraryService {
         ? await tx.item.update({
             where: { id: prior.itemId },
             data: {
-              ...(meaningful
+                ...(meaningful && !prior.item.preferredSourceId
                 ? {
                     originalTitle: title,
                     ...(prior.item.title === prior.item.originalTitle
@@ -406,7 +438,7 @@ export class LibraryService {
                       : {}),
                   }
                 : {}),
-              duration: metadata.duration ?? undefined,
+              duration: prior.item.preferredSourceId ? undefined : metadata.duration ?? undefined,
             },
           })
         : await tx.item.create({
@@ -611,6 +643,7 @@ export class LibraryService {
       definition: PlaylistDefinition;
     },
     id?: string,
+    browser = true,
   ) {
     invariant(
       input.title.trim() && input.title.length <= 200,
@@ -619,14 +652,24 @@ export class LibraryService {
       "Название плейлиста: от 1 до 200 символов",
     );
     const definition = playlistDefinitionSchema.parse(input.definition);
+    requireHistoryAccess(definition, browser);
     const row = await this.db.$transaction(async (tx) => {
-      if (id)
+      if (id) {
+        const existing = await tx.playlist.findFirst({ where: { id, ownerId } });
         invariant(
-          await tx.playlist.findFirst({ where: { id, ownerId } }),
+          existing,
           404,
           "playlist_not_found",
           "Плейлист не найден",
         );
+        if (await tx.youtubeLink.findUnique({ where: { playlistId: id }, select: { playlistId: true } }))
+          invariant(
+            existing.definitionJson === JSON.stringify(definition),
+            409,
+            "linked_playlist",
+            "Состав связанного плейлиста меняется на вкладке YouTube",
+          );
+      }
       const snapshot = await this.snapshotWith(ownerId, tx);
       try {
         resolvePlaylist(definition, snapshot, id);
@@ -642,12 +685,15 @@ export class LibraryService {
         ? tx.playlist.update({
             where: { id },
             data: { ...data, revision: { increment: 1 } },
+            include: { youtubeLink: { select: { playlistId: true } } },
           })
         : tx.playlist.create({ data: { id: randomUUID(), ownerId, ...data } });
     });
     return playlistDto(row);
   }
-  async preview(ownerId: string, definition: PlaylistDefinition, id?: string) {
+  async preview(ownerId: string, definition: PlaylistDefinition, id?: string, browser = true) {
+    const checked = playlistDefinitionSchema.parse(definition);
+    requireHistoryAccess(checked, browser);
     if (id)
       invariant(
         await this.db.playlist.findFirst({ where: { id, ownerId } }),
@@ -655,20 +701,39 @@ export class LibraryService {
         "playlist_not_found",
         "Плейлист не найден",
       );
+    return this.evaluatePlaylist(ownerId, checked, id, browser);
+  }
+  private async evaluatePlaylist(
+    ownerId: string,
+    definition: PlaylistDefinition,
+    id: string | undefined,
+    browser: boolean,
+  ) {
     try {
-      return resolvePlaylist(
-        playlistDefinitionSchema.parse(definition),
-        await this.snapshot(ownerId),
+      const [snapshot, history] = await Promise.all([
+        this.snapshot(ownerId),
+        this.db.listeningSummary.findMany({
+          where: { ownerId },
+          select: { itemId: true, launches: true, completed: true, skipped: true, lastStartedAt: true },
+        }),
+      ]);
+      const result = resolvePlaylist(
+        definition,
+        { ...snapshot, history: new Map(history.map((entry) => [entry.itemId, entry])) },
         id,
       );
+      if (!browser && usesPrivateHistory(
+        definition, new Map(snapshot.playlists.map((playlist) => [playlist.id, playlist])),
+      )) return { ...result, reasons: {}, excluded: [] };
+      return result;
     } catch (error) {
       throw new HttpError(422, "invalid_playlist", (error as Error).message);
     }
   }
-  async resolve(ownerId: string, id: string) {
+  async resolve(ownerId: string, id: string, browser = true) {
     const row = await this.db.playlist.findFirst({ where: { id, ownerId } });
     invariant(row, 404, "playlist_not_found", "Плейлист не найден");
-    return this.preview(ownerId, playlistDto(row).definition, id);
+    return this.evaluatePlaylist(ownerId, playlistDto(row).definition, id, browser);
   }
   async deletePlaylist(ownerId: string, id: string) {
     const snapshot = await this.snapshot(ownerId);
@@ -766,6 +831,19 @@ export class LibraryService {
             (id): id is string => typeof id === "string" && allowed.has(id),
           )
         : [];
+    if (next.queuePlaylistIds !== undefined) {
+      const ownersPlaylists = new Set((await tx.playlist.findMany({ where: { ownerId }, select: { id: true } }))
+        .map((playlist) => playlist.id));
+      const queueIds = new Set(queue);
+      const contexts = next.queuePlaylistIds;
+      next.queuePlaylistIds = Object.fromEntries(
+        contexts && typeof contexts === "object" && !Array.isArray(contexts)
+          ? Object.entries(contexts).filter(([itemId, playlistId]) =>
+              queueIds.has(itemId) && typeof playlistId === "string" && ownersPlaylists.has(playlistId),
+            )
+          : [],
+      );
+    }
     await tx.setting.upsert({
       where: { userId: ownerId },
       create: { userId: ownerId, json: JSON.stringify(next) },

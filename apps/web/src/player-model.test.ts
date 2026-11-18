@@ -10,6 +10,21 @@ import {
   playbackKind,
   enterPlayerFullscreen,
   createFullscreenIdleTimer,
+  startPlaybackQueue,
+  queuePlaylistInput,
+  togglePlaybackShuffle,
+  addToPlaybackQueue,
+  playbackSourceForAttempt,
+  createPlaybackAttempt,
+  restoreCachedPlayback,
+  playbackSettingsSignature,
+  nativePlaybackReading,
+  youtubePlaybackReading,
+  prepareYoutubePlayback,
+  nativeRestartHasProgress,
+  createYoutubeRestartConfirmation,
+  recoverDeletedQueueEntry,
+  reconcileQueuePlaylistIds,
 } from "./player-model.ts";
 
 const audio = {
@@ -59,10 +74,271 @@ const lost = {
   ],
 } as any;
 
+describe("player listening lifecycle", () => {
+  it("requires playback beyond the completed seek before counting a restarted native item", () => {
+    const media = { paused: false, ended: false, seeking: true, currentTime: 1 };
+    expect(nativeRestartHasProgress(media, 0)).toBe(false);
+    media.seeking = false;
+    expect(nativeRestartHasProgress(media, 1)).toBe(false);
+    media.currentTime = 1.2;
+    expect(nativeRestartHasProgress(media, 1)).toBe(true);
+    media.paused = true;
+    expect(nativeRestartHasProgress(media, 1)).toBe(false);
+  });
+
+  it("waits for the YouTube seek before confirming progress on a restarted item", () => {
+    const confirm = createYoutubeRestartConfirmation(8, 0);
+    expect(confirm(8.5, 2)).toBe(false);
+    expect(confirm(0, 2)).toBe(false);
+    expect(confirm(8.6, 2)).toBe(false);
+    expect(confirm(0.3, 2)).toBe(false);
+    expect(confirm(0.3, 2)).toBe(false);
+    expect(confirm(0.8, 2)).toBe(true);
+  });
+
+  it("accepts YouTube progress from an already verified seek target", () => {
+    const confirm = createYoutubeRestartConfirmation(0, 0);
+    expect(confirm(0, 1)).toBe(false);
+    expect(confirm(0.4, 1)).toBe(true);
+  });
+
+  it("ignores backward jitter on the old YouTube clock near the seek target", () => {
+    const confirm = createYoutubeRestartConfirmation(0.65, 0);
+    expect(confirm(0.64, 1)).toBe(false);
+    expect(confirm(0.72, 1)).toBe(false);
+  });
+
+  it("forwards the current native and YouTube playback rates to history with each sample", () => {
+    const samples: { event: string; position: number; duration?: number; rate?: number }[] = [];
+    const attempt = createPlaybackAttempt({
+      select() {},
+      playing: (position, duration, rate) => samples.push({ event: "playing", position, duration, rate }),
+      progress: (position, duration, rate) => samples.push({ event: "progress", position, duration, rate }),
+      paused() {},
+      seek() {},
+      finish() {},
+    });
+    const media = { currentTime: 4, duration: 60, playbackRate: 2 };
+    let iframeRate = 1.5;
+    const iframe = {
+      getCurrentTime: () => 7,
+      getDuration: () => 60,
+      getPlaybackRate: () => iframeRate,
+    };
+    attempt.select(audio);
+    attempt.playing(...nativePlaybackReading(media));
+    media.currentTime = 6;
+    attempt.progress(...nativePlaybackReading(media));
+    attempt.paused();
+    attempt.playing(...youtubePlaybackReading(iframe));
+    iframeRate = 2;
+    attempt.progress(...youtubePlaybackReading(iframe));
+    expect(samples).toEqual([
+      { event: "playing", position: 4, duration: 60, rate: 2 },
+      { event: "progress", position: 6, duration: 60, rate: 2 },
+      { event: "playing", position: 7, duration: 60, rate: 1.5 },
+      { event: "progress", position: 7, duration: 60, rate: 2 },
+    ]);
+  });
+
+  it("uses normalized context for a pending start and preserves the active attempt", () => {
+    const { attempt, events } = capturePlayback();
+    attempt.select(audio, "deleted", "advance");
+    attempt.updatePlaylistId("video", undefined);
+    attempt.updatePlaylistId("audio", undefined);
+    attempt.playing(0);
+    attempt.updatePlaylistId("audio", "new");
+    attempt.finish("ended");
+    expect(events).toEqual([
+      ["select", "audio", "deleted", "advance"],
+      ["select", "audio", undefined, "advance"],
+      ["playing", 0],
+      ["finish", "ended"],
+    ]);
+  });
+
+  function capturePlayback() {
+    const events: unknown[][] = [];
+    const attempt = createPlaybackAttempt({
+      select: (item, playlistId, trigger) => events.push(["select", item?.id, playlistId, trigger]),
+      playing: (position) => events.push(["playing", position]),
+      progress: (position) => events.push(["progress", position]),
+      paused: () => events.push(["paused"]),
+      seek: (position) => events.push(["seek", position]),
+      finish: (reason) => events.push(["finish", reason]),
+    });
+    return { attempt, events };
+  }
+
+  it("ignores ticks and final errors before the first confirmed playback", () => {
+    const { attempt, events } = capturePlayback();
+    attempt.select(lost, "playlist", "advance");
+    attempt.progress(15);
+    attempt.finish("error");
+    expect(events).toEqual([["select", "lost", "playlist", "advance"]]);
+  });
+
+  it("keeps one attempt through buffering and fallback, then records a post-start error", () => {
+    const { attempt, events } = capturePlayback();
+    attempt.select(audio, undefined, "manual");
+    attempt.playing(0);
+    attempt.progress(3);
+    attempt.paused();
+    attempt.progress(15);
+    attempt.playing(3);
+    attempt.progress(8);
+    attempt.finish("error");
+    expect(events).toEqual([
+      ["select", "audio", undefined, "manual"], ["playing", 0], ["progress", 3],
+      ["paused"], ["playing", 3], ["progress", 8], ["finish", "error"],
+    ]);
+  });
+
+  it("records a repeated cycle as a separate attempt", () => {
+    const { attempt, events } = capturePlayback();
+    attempt.select(audio, "playlist", "manual");
+    attempt.playing(0);
+    attempt.progress(60);
+    attempt.finish("ended");
+    attempt.select(audio, "playlist", "repeat");
+    attempt.playing(0);
+    attempt.finish("manual");
+    expect(events).toEqual([
+      ["select", "audio", "playlist", "manual"], ["playing", 0],
+      ["progress", 60], ["finish", "ended"], ["select", "audio", "playlist", "repeat"],
+      ["playing", 0], ["finish", "manual"],
+    ]);
+  });
+});
+
 describe("browser playback model", () => {
+  it("cues a paused YouTube restore at its saved position and loads an active one", () => {
+    const operations: unknown[][] = [];
+    const iframe = {
+      cueVideoById: (value: unknown) => operations.push(["cue", value]),
+      loadVideoById: (value: unknown) => operations.push(["load", value]),
+      playVideo: () => operations.push(["play"]),
+    };
+    prepareYoutubePlayback(iframe, "a-video", 12, false);
+    prepareYoutubePlayback(iframe, "a-video", 20, true);
+    prepareYoutubePlayback(iframe, "a-video", 0, true);
+    expect(operations).toEqual([
+      ["cue", { videoId: "a-video", startSeconds: 12 }],
+      ["load", { videoId: "a-video", startSeconds: 20 }],
+      ["play"],
+    ]);
+  });
+
+  it("selects the previous surviving item after deletion at the end with repeat off", () => {
+    const state = restorePlayback({
+      queue: ["audio", "video"], queueIndex: 1, position: 16,
+      queuePlaylistIds: { audio: "playlist", video: "other" },
+    }, [audio, video]);
+    expect(recoverDeletedQueueEntry(state, [audio])).toMatchObject({
+      queue: ["audio"], queueIndex: 0, position: 0, queuePlaylistIds: { audio: "playlist" },
+    });
+  });
+
+  it("prefers an available later entry and retains unavailable survivors", () => {
+    const state = restorePlayback({
+      queue: ["audio", "video", "lost"], queueIndex: 0, position: 16,
+    }, [audio, video, lost]);
+    expect(recoverDeletedQueueEntry(state, [video, lost])).toMatchObject({
+      queue: ["video", "lost"], queueIndex: 0, position: 0,
+    });
+    expect(recoverDeletedQueueEntry(state, [lost])).toMatchObject({
+      queue: ["lost"], queueIndex: 0, position: 0,
+    });
+    expect(recoverDeletedQueueEntry(state, [])).toMatchObject({
+      queue: [], queueIndex: 0, position: 0,
+    });
+  });
+
   it("prefers the local source while keeping YouTube as a fallback", () => {
     expect(playbackSources(audio).map((s) => s.id)).toEqual(["local", "yt"]);
     expect(playbackSources(lost)).toEqual([]);
+  });
+  it("tries an available preferred source before the usual local default", () => {
+    expect(playbackSources({ ...audio, preferredSourceId: "yt" }).map((s) => s.id)).toEqual(["yt", "local"]);
+    expect(playbackSources({ ...audio, preferredSourceId: "gone" }).map((s) => s.id)).toEqual(["local", "yt"]);
+  });
+  it("keeps the active source when a new preference arrives and applies it at the next start", () => {
+    const updated = { ...audio, preferredSourceId: "yt" };
+    expect(playbackSourceForAttempt(updated, new Set(), { sourceId: "local" })?.id).toBe("local");
+    expect(playbackSourceForAttempt(updated, new Set(["local"]), { sourceId: "local" })?.id).toBe("yt");
+    expect(playbackSourceForAttempt(updated, new Set())?.id).toBe("yt");
+  });
+  it("keeps launch scope per entry and clears it for a manually moved entry", () => {
+    const queue = startPlaybackQueue([audio, video, lost], 1, false, "playlist");
+    expect(queue).toEqual({
+      queue: ["audio", "video", "lost"], queueIndex: 1, position: 0,
+      queuePlaylistIds: { audio: "playlist", video: "playlist", lost: "playlist" },
+    });
+    const state = { ...restorePlayback({}, [audio, video, lost]), ...queue, position: 24 };
+    expect(addToPlaybackQueue(state, "audio", "next")).toMatchObject({
+      queue: ["video", "audio", "lost"], queueIndex: 0, position: 24,
+      queuePlaylistIds: { video: "playlist", lost: "playlist" },
+    });
+    expect(addToPlaybackQueue(state, "audio", "next", "other")).toMatchObject({
+      queue: ["video", "audio", "lost"], queueIndex: 0, position: 24,
+      queuePlaylistIds: { audio: "other", video: "playlist", lost: "playlist" },
+    });
+    expect(addToPlaybackQueue(state, "new", "last", "other")).toMatchObject({
+      queue: ["audio", "video", "lost", "new"], queuePlaylistIds: { new: "other" },
+    });
+    expect(addToPlaybackQueue(state, "video", "next", "other")).toBe(state);
+  });
+  it("deduplicates playback starts and pins the selection when starting shuffled", () => {
+    expect(startPlaybackQueue([audio, video, audio], 2, false).queue).toEqual(["audio", "video"]);
+    expect(startPlaybackQueue([audio, video, lost], 1, true)).toMatchObject({
+      queue: ["video", expect.any(String), expect.any(String)], queueIndex: 0,
+    });
+  });
+  it("retains legacy effective order and per-entry context after reload", () => {
+    const restored = restorePlayback({
+      queue: ["video", "audio", "lost"], queueIndex: 1, position: 21, shuffle: true,
+      originalQueue: ["audio", "lost", "video"],
+      queuePlaylistIds: { audio: "playlist", lost: "", missing: "other" },
+    }, [video, audio, lost]);
+    expect(restored).toMatchObject({
+      queue: ["video", "audio", "lost"], queueIndex: 1, position: 21,
+      queuePlaylistIds: { audio: "playlist" },
+    });
+    expect(togglePlaybackShuffle(restored)).toMatchObject({
+      shuffle: false, queue: ["video", "audio", "lost"], queueIndex: 1, position: 21,
+    });
+  });
+  it("saves the complete visible order as a new manual playlist", () => {
+    const queue = ["past", "playing", "unavailable", "next"];
+    const input = queuePlaylistInput("  Моя очередь  ", queue);
+    queue.reverse();
+    expect(input).toEqual({
+      title: "Моя очередь",
+      definition: { version: 1, rule: { type: "items", ids: ["past", "playing", "unavailable", "next"] }, sort: "source" },
+    });
+  });
+  it("restores an unsynced queue edit after immediate reload", () => {
+    const items = [audio, video, lost];
+    const server = restorePlayback({ queue: ["audio", "video", "lost"], position: 5 }, items);
+    const cache = {
+      ...server, queue: ["audio", "lost"], position: 18,
+      serverSignature: playbackSettingsSignature(server),
+    };
+    expect(restoreCachedPlayback(server, cache, items)).toMatchObject({
+      queue: ["audio", "lost"], position: 18,
+    });
+    const imported = { ...server, queue: ["video", "audio"], position: 0 };
+    expect(restoreCachedPlayback(imported, cache, items)).toMatchObject({
+      queue: ["video", "audio"], position: 0,
+    });
+  });
+  it("drops playlist contexts rejected by the server without reverting later queue edits", () => {
+    const submitted = { audio: "deleted", video: "old", lost: "deleted" };
+    const latest = { audio: "deleted", video: "new", fresh: "another" };
+    expect(reconcileQueuePlaylistIds(latest, submitted, {})).toEqual({
+      video: "new", fresh: "another",
+    });
+    expect(reconcileQueuePlaylistIds(latest, submitted, undefined)).toBe(latest);
   });
   it("restores the current mixed item and its position after stale ids are removed", () => {
     expect(

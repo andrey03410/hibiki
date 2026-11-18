@@ -1,0 +1,58 @@
+.source-replacement {
+  display: grid;
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.source-replacement h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.source-replacement-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.source-replacement-input input {
+  min-width: 0;
+  width: 100%;
+}
+
+.source-replacement-proposal {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #ac83c829;
+  border-radius: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.source-replacement p {
+  margin: 0;
+}
+
+.source-replacement-preview,
+.source-replacement-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.source-replacement-preview {
+  justify-content: space-between;
+}
+
+@media (max-width: 480px) {
+  .source-replacement-input {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: start;
+  }
+
+  .source-replacement-input label {
+    width: 100%;
+  }
+}

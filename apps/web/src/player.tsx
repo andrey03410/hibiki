@@ -5,8 +5,11 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type FormEvent,
   type ReactNode,
+  type SyntheticEvent,
 } from "react";
+import { Link } from "react-router";
 import {
   Play,
   Pause,
@@ -26,10 +29,15 @@ import {
   Music2,
   Maximize2,
   CircleAlert,
+  ArrowDown,
+  ArrowUp,
+  GripVertical,
 } from "lucide-react";
-import { shuffle as shuffleIds } from "@hibiki/core";
-import type { ItemDto } from "@hibiki/contracts";
-import { api, formatDuration } from "./api.ts";
+import { moveQueueItem, removeUpcomingItem, undoQueueRemoval, type QueueRemoval } from "@hibiki/core";
+import type { ItemDto, PlaylistDto } from "@hibiki/contracts";
+import { api, formatDuration, mediaWord } from "./api.ts";
+import { useListeningAttempt } from "./listening-client";
+import "./queue.css";
 import {
   nextPlayableIndex,
   firstPlayableIndex,
@@ -41,15 +49,34 @@ import {
   playbackKind,
   enterPlayerFullscreen,
   createFullscreenIdleTimer,
+  addToPlaybackQueue,
+  createPlaybackAttempt,
+  playbackSourceForAttempt,
+  queuePlaylistInput,
+  startPlaybackQueue,
+  togglePlaybackShuffle,
+  playbackSettingsSignature,
+  restoreCachedPlayback,
+  nativePlaybackReading,
+  youtubePlaybackReading,
+  prepareYoutubePlayback,
+  nativeRestartHasProgress,
+  createYoutubeRestartConfirmation,
+  recoverDeletedQueueEntry,
+  reconcileQueuePlaylistIds,
+  type PlaybackFinish,
+  type PlaybackReading,
   type PlaybackSettings,
+  type PlaybackTrigger,
 } from "./player-model.ts";
 
 interface Controller {
   current?: ItemDto;
   playing: boolean;
   settings: PlaybackSettings;
-  start: (items: ItemDto[], index?: number) => void;
-  enqueue: (item: ItemDto) => void;
+  start: (items: ItemDto[], index?: number, playlistId?: string) => void;
+  enqueue: (item: ItemDto, playlistId?: string) => void;
+  playNext: (item: ItemDto, playlistId?: string) => void;
   toggle: () => void;
 }
 const PlayerContext = createContext<Controller | null>(null);
@@ -90,6 +117,7 @@ function Youtube({
   onEnded,
   onError,
   onPaused,
+  onBuffering,
   onPlaying,
 }: {
   id: string;
@@ -97,22 +125,27 @@ function Youtube({
   volume: number;
   position: number;
   engine: React.RefObject<any>;
-  onTime: (p: number, d: number) => void;
+  onTime: (...reading: PlaybackReading) => void;
   onEnded: () => void;
   onError: () => void;
   onPaused: () => void;
-  onPlaying: () => void;
+  onBuffering: () => void;
+  onPlaying: (...reading: PlaybackReading) => void;
 }) {
   const target = useRef<HTMLDivElement>(null),
-    callbacks = useRef({ onTime, onEnded, onError, onPaused, onPlaying });
-  callbacks.current = { onTime, onEnded, onError, onPaused, onPlaying };
-  const active = useRef(playing);
-  active.current = playing;
-  const initial = useRef({ position, volume });
+    callbacks = useRef({ onTime, onEnded, onError, onPaused, onBuffering, onPlaying });
+  callbacks.current = { onTime, onEnded, onError, onPaused, onBuffering, onPlaying };
+  const pending = useRef({ position, volume, playing });
+  pending.current = { position, volume, playing };
   useEffect(() => {
     let disposed = false,
       timer: ReturnType<typeof setInterval>,
       player: any;
+    const reportTime = () => {
+      const state = player?.getPlayerState?.();
+      if (!disposed && (state === 1 || state === 2))
+        callbacks.current.onTime(...youtubePlaybackReading(player));
+    };
     const host = document.createElement("div");
     target.current?.append(host);
     loadYoutube()
@@ -130,32 +163,27 @@ function Youtube({
           },
           events: {
             onReady: () => {
+              if (disposed) return;
               engine.current = player;
-              player.setVolume(initial.current.volume * 100);
-              if (initial.current.position)
-                player.seekTo(initial.current.position, true);
-              if (active.current) player.playVideo();
-              timer = setInterval(
-                () =>
-                  callbacks.current.onTime(
-                    player.getCurrentTime?.() || 0,
-                    player.getDuration?.() || 0,
-                  ),
-                500,
-              );
+              const { volume, position, playing } = pending.current;
+              player.setVolume(volume * 100);
+              prepareYoutubePlayback(player, id, position, playing);
+              timer = setInterval(reportTime, 500);
             },
             onStateChange: (event: any) => {
+              if (disposed) return;
               if (event.data === 0) callbacks.current.onEnded();
-              if (event.data === 1) callbacks.current.onPlaying();
-              if (event.data === 2 && active.current)
-                callbacks.current.onPaused();
+              if (event.data === 1) callbacks.current.onPlaying(...youtubePlaybackReading(player));
+              if (event.data === 2) callbacks.current.onPaused();
+              if (event.data === 3) callbacks.current.onBuffering();
             },
-            onError: () => callbacks.current.onError(),
-            onAutoplayBlocked: () => callbacks.current.onPaused(),
+            onPlaybackRateChange: reportTime,
+            onError: () => { if (!disposed) callbacks.current.onError(); },
+            onAutoplayBlocked: () => { if (!disposed) callbacks.current.onPaused(); },
           },
         });
       })
-      .catch(() => callbacks.current.onError());
+      .catch(() => { if (!disposed) callbacks.current.onError(); });
     return () => {
       disposed = true;
       clearInterval(timer);
@@ -174,43 +202,102 @@ function Youtube({
   return <div ref={target} className="youtube-frame" />;
 }
 
+function QueuePlaylistDialog({
+  ids, close, saved,
+}: {
+  ids: string[];
+  close: () => void;
+  saved: (playlist: PlaylistDto) => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [title, setTitle] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useLayoutEffect(() => {
+    const element = dialog.current;
+    element?.showModal();
+    return () => element?.close();
+  }, []);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || !title.trim() || !ids.length) return;
+    setSaving(true);
+    setError("");
+    try {
+      const playlist = await api<PlaylistDto>("/playlists", "POST", queuePlaylistInput(title, ids));
+      saved(playlist);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Не удалось сохранить плейлист.");
+      setSaving(false);
+    }
+  }
+  return (
+    <dialog
+      className="queue-playlist-dialog"
+      ref={dialog}
+      aria-labelledby="queue-playlist-title"
+      onCancel={(event) => { event.preventDefault(); if (!saving) close(); }}
+    >
+      <form onSubmit={submit}>
+        <h2 id="queue-playlist-title">Сохранить очередь как плейлист</h2>
+        <p>{ids.length} {mediaWord(ids.length)}</p>
+        <label>
+          Название
+          <input required maxLength={200} autoFocus value={title} onChange={(event) => setTitle(event.target.value)} />
+        </label>
+        {error && <p role="alert">{error}</p>}
+        <div className="queue-playlist-actions">
+          <button type="button" className="button" disabled={saving} onClick={close}>Отмена</button>
+          <button className="button primary" disabled={saving || !title.trim() || !ids.length}>
+            {saving ? "Сохраняем…" : "Сохранить"}
+          </button>
+        </div>
+      </form>
+    </dialog>
+  );
+}
+
 export function PlayerProvider({
   items,
   initialSettings,
   userId,
   children,
   suspendSaving = false,
+  onPlaylistSaved,
 }: {
   items: ItemDto[];
   initialSettings: any;
   userId: string;
   children: (player: ReactNode) => ReactNode;
   suspendSaving?: boolean;
+  onPlaylistSaved?: (playlist: PlaylistDto) => void;
 }) {
+  const history = useListeningAttempt(userId);
+  const [attempt] = useState(() => createPlaybackAttempt(history));
+  const serverSignature = useRef<string | undefined>(undefined);
+  const storageKey = `hibiki.player.${userId}`;
   const [settings, setSettings] = useState<PlaybackSettings>(() => {
-    let cached;
+    let cached = null;
     try {
-      cached = JSON.parse(
-        localStorage.getItem(`hibiki.player.${userId}`) || "null",
-      );
+      cached = JSON.parse(localStorage.getItem(storageKey) || "null");
     } catch {}
-    return restorePlayback(
-      initialSettings?.queue ? initialSettings : (cached ?? initialSettings),
-      items,
-    );
+    serverSignature.current = playbackSettingsSignature(restorePlayback(initialSettings ?? {}, items));
+    return restoreCachedPlayback(initialSettings, cached, items);
   });
   const [playing, setPlaying] = useState(false),
     [duration, setDuration] = useState(0),
-    [sourceIndex, setSourceIndex] = useState(0),
+    [failedSources, setFailedSources] = useState<ReadonlySet<string>>(() => new Set()),
     [error, setError] = useState(""),
     [nativeFullscreen, setNativeFullscreen] = useState(false),
     [viewportFullscreen, setViewportFullscreen] = useState(false),
     [controlsIdle, setControlsIdle] = useState(false),
     [failedArtwork, setFailedArtwork] = useState<string>(),
-    [saveError, setSaveError] = useState("");
-  const baseSettings = useRef(initialSettings),
-    savingSuspended = useRef(suspendSaving);
-  baseSettings.current = initialSettings;
+    [saveError, setSaveError] = useState(""),
+    [removal, setRemoval] = useState<(QueueRemoval & { title: string; playlistId?: string })>(),
+    [dragOver, setDragOver] = useState<string>(),
+    [showSavePlaylist, setShowSavePlaylist] = useState(false),
+    [createdPlaylist, setCreatedPlaylist] = useState<PlaylistDto>();
+  const savingSuspended = useRef(suspendSaving);
   savingSuspended.current = suspendSaving;
   const controlsIdleTimer = useRef<ReturnType<typeof createFullscreenIdleTimer> | null>(null);
   const viewportRestore = useRef<{ x: number; y: number; focus: Element | null } | null>(null);
@@ -222,213 +309,433 @@ export function PlayerProvider({
     live = useRef(settings),
     playingRef = useRef(playing),
     itemsRef = useRef(items),
-    failed = useRef(new Set<string>());
-  live.current = settings;
-  playingRef.current = playing;
+    failed = useRef(new Set<string>()),
+    nativeStarted = useRef(new WeakSet<HTMLMediaElement>()),
+    nativeRestart = useRef<{ element: HTMLMediaElement; position: number } | null>(null),
+    youtubeRestart = useRef<ReturnType<typeof createYoutubeRestartConfirmation> | null>(null),
+    draggingId = useRef<string | undefined>(undefined),
+    scrub = useRef<{ target?: number } | null>(null);
   itemsRef.current = items;
-  const current = items.find(
-    (i) => i.id === settings.queue[settings.queueIndex],
-  );
-  const sources = current ? playbackSources(current) : [],
-    source = sources[sourceIndex];
+  const itemsById = new Map(items.map((item) => [item.id, item]));
+  const current = itemsById.get(settings.queue[settings.queueIndex]!);
+  const sourceIdentity = useRef<{ itemId?: string; sourceId?: string; preferredSourceId?: string }>(undefined);
+  const previousSource = sourceIdentity.current;
+  const source = current ? playbackSourceForAttempt(
+    current,
+    failedSources,
+    previousSource?.itemId === current.id && previousSource.sourceId
+      ? { sourceId: previousSource.sourceId, preferredSourceId: previousSource.preferredSourceId }
+      : undefined,
+  ) : undefined;
   const isYoutube = source?.provider === "youtube";
+  const youtubeId = isYoutube
+    ? source.externalId || new URL(source.url!).searchParams.get("v") || source.url!.split("/").pop()
+    : undefined;
   const presentationKind = current ? playbackKind(current, source) : undefined;
-  const sourceIdentity = useRef<
-    { itemId?: string; sourceId?: string } | undefined
-  >(undefined);
   const identity = { itemId: current?.id, sourceId: source?.id };
-  // Refreshing the library can add a preferred local source while this item is playing.
-  // Capture the live position before the new keyed media element mounts.
-  seekOnLoad.current = sourceLoadPosition(
-    sourceIdentity.current,
-    identity,
-    settings.position,
-    seekOnLoad.current,
-  );
-  sourceIdentity.current = identity;
+  const sourceKey = JSON.stringify(identity);
+  const mediaKey = useRef(sourceKey);
+  // Preserve the load position when the source changes within the same entry.
+  seekOnLoad.current = sourceLoadPosition(previousSource, identity, settings.position, seekOnLoad.current);
+  if (previousSource?.itemId !== identity.itemId || previousSource?.sourceId !== identity.sourceId) {
+    sourceIdentity.current = { ...identity, preferredSourceId: current?.preferredSourceId };
+  }
+
   function patch(value: Partial<PlaybackSettings>) {
-    setSettings((old) => ({ ...old, ...value }));
+    live.current = { ...live.current, ...value };
+    setSettings(live.current);
   }
-  function switchTo(index: number, queue = live.current.queue) {
-    const requested = index;
-    index = firstPlayableIndex(queue, index, itemsRef.current);
-    if (index < 0) {
-      setPlaying(false);
-      setError(
-        "В очереди нет доступных источников. Записи остаются в медиатеке.",
-      );
-      return;
-    }
-    if (queue[index] === live.current.queue[live.current.queueIndex]) {
-      if (native.current) native.current.currentTime = 0;
-      youtube.current?.seekTo?.(0, true);
-      native.current?.play().catch(() => setPlaying(false));
-      youtube.current?.playVideo?.();
-    }
+  function playIntent(value: boolean) {
+    playingRef.current = value;
+    setPlaying(value);
+  }
+  function currentMedia() {
+    return mediaKey.current === sourceKey;
+  }
+  function playNative(element: HTMLMediaElement) {
+    element.play().catch(() => {
+      if (native.current !== element || !currentMedia() || !playingRef.current) return;
+      playIntent(false);
+      setError("Нажмите «Воспроизвести», чтобы продолжить.");
+    });
+  }
+  function measureProgress() {
+    if (scrub.current?.target !== undefined) return;
+    if (native.current) attempt.progress(...nativePlaybackReading(native.current));
+    else if (youtube.current) attempt.progress(...youtubePlaybackReading(youtube.current));
+  }
+  function finishAttempt(reason: PlaybackFinish) {
+    measureProgress();
+    attempt.finish(reason);
+    scrub.current = null;
+    nativeRestart.current = null;
+    youtubeRestart.current = null;
+  }
+  function selectAttempt(state: PlaybackSettings, trigger: PlaybackTrigger, list = itemsRef.current) {
+    const id = state.queue[state.queueIndex];
+    const item = list.find((entry) => entry.id === id);
+    const playlistIds = state.queuePlaylistIds;
+    attempt.select(item ?? null, id && playlistIds && Object.hasOwn(playlistIds, id) ? playlistIds[id] : undefined, trigger);
+  }
+  function resetSources() {
+    setFailedSources(new Set());
+    sourceIdentity.current = undefined;
     seekOnLoad.current = 0;
-    setSourceIndex(0);
-    setError(index === requested ? "" : "Недоступная запись пропущена.");
-    setDuration(0);
-    setSettings((old) => ({ ...old, queue, queueIndex: index, position: 0 }));
-    setPlaying(true);
   }
-  function start(list: ItemDto[], index = 0) {
+  function playEntry(
+    state: PlaybackSettings,
+    index: number,
+    trigger: PlaybackTrigger,
+    { list = itemsRef.current, autoplay = true }: { list?: ItemDto[]; autoplay?: boolean } = {},
+  ) {
+    const id = state.queue[index];
+    const sameSource = id === current?.id &&
+      source?.id === playbackSources(current)[0]?.id;
+    resetSources();
+    patch({ ...state, queueIndex: index, position: 0 });
+    selectAttempt(live.current, trigger, list);
+    setError("");
+    playIntent(autoplay);
+    if (sameSource) {
+      const element = native.current;
+      if (autoplay && element) {
+        nativeStarted.current.delete(element);
+        nativeRestart.current = { element, position: 0 };
+      }
+      positionMedia(0, autoplay);
+      if (!autoplay) return;
+      if (element) {
+        if (element.paused || element.ended) playNative(element);
+      } else if (youtube.current) {
+        youtube.current.playVideo?.();
+      }
+    } else {
+      mediaKey.current = "";
+      setDuration(0);
+    }
+  }
+  function switchTo(index: number) {
+    const state = live.current;
+    const item = itemsById.get(state.queue[index]!);
+    if (!item || !playbackSources(item).length) return;
+    finishAttempt("manual");
+    failed.current.delete(item.id);
+    playEntry(state, index, "manual");
+  }
+  function start(list: ItemDto[], index = 0, playlistId?: string) {
     if (!list.length) return;
     requestAnimationFrame(() => watch.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    finishAttempt("manual");
     failed.current.clear();
-    const queue = list.map((i) => i.id);
-    const selected = queue[index];
-    const ordered = live.current.shuffle
-      ? [selected!, ...shuffleIds(queue.filter((id) => id !== selected))]
-      : queue;
-    const playable = firstPlayableIndex(
-      ordered,
-      live.current.shuffle ? 0 : index,
-      list,
-    );
+    setRemoval(undefined);
+    const state = {
+      ...live.current,
+      ...startPlaybackQueue(list, index, live.current.shuffle, playlistId),
+    };
+    const playable = firstPlayableIndex(state.queue, state.queueIndex, list);
     if (playable < 0) {
-      setSettings((old) => ({
-        ...old,
-        queue: ordered,
-        queueIndex: 0,
-        position: 0,
-        originalQueue: queue,
-      }));
-      setPlaying(false);
-      setError(
-        "В этой очереди нет доступных источников. Записи сохранены в медиатеке.",
-      );
+      resetSources();
+      patch(state);
+      selectAttempt(state, "manual", list);
+      playIntent(false);
+      setError("В этой очереди нет доступных источников. Записи сохранены в медиатеке.");
       return;
     }
-    switchTo(playable, ordered);
-    if (ordered[playable] !== selected)
+    playEntry(state, playable, playable === state.queueIndex ? "manual" : "advance", { list });
+    if (playable !== state.queueIndex)
       setError("Источник выбранной записи недоступен. Начинаем со следующей.");
-    setSettings((old) => ({ ...old, originalQueue: queue }));
+  }
+  function nextIndex(direction: 1 | -1) {
+    const { queue, queueIndex, repeat } = live.current;
+    return nextPlayableIndex(
+      queue, queueIndex,
+      itemsRef.current.filter((item) => !failed.current.has(item.id)),
+      direction, repeat === "all",
+    );
   }
   function next(direction: 1 | -1 = 1, ended = false) {
-    if (ended && live.current.repeat === "one" && current) {
-      seek(0);
-      setPlaying(true);
-      native.current?.play().catch(() => setPlaying(false));
-      youtube.current?.playVideo?.();
-      return;
-    }
-    const index = nextPlayableIndex(
-      live.current.queue,
-      live.current.queueIndex,
-      itemsRef.current.filter((i) => !failed.current.has(i.id)),
-      direction,
-      live.current.repeat === "all",
-    );
+    if (!currentMedia()) return;
+    finishAttempt(ended ? "ended" : "manual");
+    const state = live.current;
+    const index = ended && state.repeat === "one" ? state.queueIndex : nextIndex(direction);
     if (index < 0) {
-      setPlaying(false);
-      if (ended) seek(0);
+      playIntent(false);
+      if (ended) seek(0, false);
+      selectAttempt(live.current, "manual");
       return;
     }
-    switchTo(index);
+    const trigger = ended ? (index === state.queueIndex ? "repeat" : "advance") : "manual";
+    playEntry(state, index, trigger);
   }
   function sourceError() {
-    if (sourceIndex + 1 < sources.length) {
-      seekOnLoad.current = live.current.position;
-      setSourceIndex((n) => n + 1);
+    if (!currentMedia()) return;
+    mediaKey.current = "";
+    const unsuccessful = new Set(failedSources);
+    if (source) unsuccessful.add(source.id);
+    if (current && playbackSourceForAttempt(current, unsuccessful)) {
+      measureProgress();
+      attempt.paused();
+      setFailedSources(unsuccessful);
       setError("Основной источник недоступен. Переключено на другой.");
       return;
     }
+    finishAttempt("error");
     if (current) failed.current.add(current.id);
-    setError(
-      `«${current?.title ?? "Запись"}» недоступна. Переходим к следующей.`,
-    );
-    const index = nextPlayableIndex(
-      live.current.queue,
-      live.current.queueIndex,
-      itemsRef.current.filter((i) => !failed.current.has(i.id)),
-      1,
-      live.current.repeat === "all",
-    );
-    if (index >= 0) {
-      seekOnLoad.current = 0;
-      setSourceIndex(0);
-      patch({ queueIndex: index, position: 0 });
-    } else setPlaying(false);
+    const index = nextIndex(1);
+    if (index >= 0) playEntry(live.current, index, "advance", { autoplay: playingRef.current });
+    else {
+      setFailedSources(unsuccessful);
+      playIntent(false);
+    }
+    setError(index >= 0
+      ? `«${current?.title ?? "Запись"}» недоступна. Переходим к следующей.`
+      : "В очереди больше нет доступных источников.");
   }
-  function seek(position: number) {
-    const bounded = Math.max(
-      0,
-      Math.min(duration || current?.duration || Infinity, position),
-    );
-    if (isYoutube) youtube.current?.seekTo?.(bounded, true);
-    else if (native.current) native.current.currentTime = bounded;
+  function positionMedia(position: number, confirmYoutubeRestart = false) {
+    const player = youtube.current;
+    const element = native.current;
+    if (youtubeId && player) {
+      if (confirmYoutubeRestart || youtubeRestart.current)
+        youtubeRestart.current = createYoutubeRestartConfirmation(player.getCurrentTime?.() ?? 0, position);
+      if (playingRef.current || player.getPlayerState?.() === 2) player.seekTo(position, true);
+      else prepareYoutubePlayback(player, youtubeId, position, false);
+    } else if (element?.readyState) {
+      element.currentTime = position;
+      if (nativeRestart.current?.element === element)
+        nativeRestart.current.position = element.currentTime;
+    }
+    seekOnLoad.current = position;
+  }
+  function seek(position: number, record = true) {
+    const bounded = Math.max(0, Math.min(duration || current?.duration || Infinity, position));
+    if (record) {
+      measureProgress();
+      attempt.seek(bounded);
+    }
+    positionMedia(bounded);
     patch({ position: bounded });
-    seekOnLoad.current = bounded;
   }
+  function seekFromSlider(position: number) {
+    if (!scrub.current) {
+      seek(position);
+      return;
+    }
+    if (scrub.current.target === undefined) {
+      measureProgress();
+      attempt.paused();
+    }
+    scrub.current.target = position;
+    seek(position, false);
+  }
+  function finishScrub() {
+    const position = scrub.current?.target;
+    scrub.current = null;
+    if (position === undefined) return;
+    attempt.seek(position);
+    const element = native.current;
+    if (element && !element.paused && !element.seeking && nativeStarted.current.has(element))
+      attempt.playing(...nativePlaybackReading(element));
+    else if (!youtubeRestart.current && youtube.current?.getPlayerState?.() === 1)
+      attempt.playing(...youtubePlaybackReading(youtube.current));
+  }
+  const nativeEvents = {
+    onLoadedMetadata(event: SyntheticEvent<HTMLMediaElement>) {
+      if (!currentMedia()) return;
+      const element = event.currentTarget;
+      element.currentTime = seekOnLoad.current;
+      element.volume = live.current.volume;
+      setDuration(Number.isFinite(element.duration) ? element.duration : 0);
+    },
+    onPlaying(event: SyntheticEvent<HTMLMediaElement>) {
+      if (!currentMedia()) return;
+      const element = event.currentTarget;
+      if (element.paused || element.ended) return;
+      if (nativeRestart.current?.element === element && (element.seeking || element.readyState < 3)) return;
+      nativeRestart.current = null;
+      nativeStarted.current.add(element);
+      if (scrub.current?.target === undefined) attempt.playing(...nativePlaybackReading(element));
+      showFullscreenControls();
+      playIntent(true);
+    },
+    onTimeUpdate(event: SyntheticEvent<HTMLMediaElement>) {
+      const element = event.currentTarget;
+      if (!currentMedia() || element.seeking || scrub.current?.target !== undefined) return;
+      const reading = nativePlaybackReading(element);
+      patch({ position: reading[0] });
+      const restart = nativeRestart.current;
+      if (restart?.element === element && playingRef.current && nativeRestartHasProgress(element, restart.position)) {
+        nativeRestart.current = null;
+        nativeStarted.current.add(element);
+        attempt.playing(...reading);
+      }
+      attempt.progress(...reading);
+    },
+    onRateChange(event: SyntheticEvent<HTMLMediaElement>) {
+      if (currentMedia() && !event.currentTarget.seeking && scrub.current?.target === undefined)
+        attempt.progress(...nativePlaybackReading(event.currentTarget));
+    },
+    onWaiting() {
+      if (currentMedia()) attempt.paused();
+    },
+    onSeeking() {
+      if (currentMedia()) attempt.paused();
+    },
+    onSeeked(event: SyntheticEvent<HTMLMediaElement>) {
+      const element = event.currentTarget;
+      if (!currentMedia()) return;
+      if (nativeRestart.current?.element === element) {
+        nativeRestart.current.position = element.currentTime;
+        return;
+      }
+      if (
+        playingRef.current && !element.paused &&
+        element.readyState >= 3 && nativeStarted.current.has(element) && scrub.current?.target === undefined
+      ) attempt.playing(...nativePlaybackReading(element));
+    },
+    onPause(event: SyntheticEvent<HTMLMediaElement>) {
+      if (!currentMedia() || !event.currentTarget.paused || event.currentTarget.ended) return;
+      measureProgress();
+      attempt.paused();
+      showFullscreenControls();
+      playIntent(false);
+    },
+    onEnded: () => next(1, true),
+    onError: sourceError,
+  };
   function toggle() {
     if (!current) return;
     if (!source) {
-      setPlaying(true);
-      sourceError();
+      if (playbackSources(current).length) {
+        finishAttempt("manual");
+        failed.current.delete(current.id);
+        playEntry(live.current, live.current.queueIndex, "manual");
+      } else {
+        playIntent(true);
+        sourceError();
+      }
       return;
     }
-    if (!playing) {
-      setError("");
-      if (isYoutube) youtube.current?.playVideo?.();
-      else
-        native.current?.play().catch(() => {
-          setPlaying(false);
-          setError("Нажмите на плеер, чтобы разрешить воспроизведение.");
-        });
-    } else {
+    if (playingRef.current) {
+      measureProgress();
+      attempt.paused();
       native.current?.pause();
       youtube.current?.pauseVideo?.();
+      playIntent(false);
+    } else {
+      setError("");
+      playIntent(true);
+      if (native.current) playNative(native.current);
+      youtube.current?.playVideo?.();
     }
-    setPlaying(!playing);
   }
+  function addToQueue(item: ItemDto, placement: "next" | "last", playlistId?: string) {
+    const wasEmpty = !live.current.queue.length;
+    const updated = addToPlaybackQueue(live.current, item.id, placement, playlistId);
+    if (updated === live.current) return;
+    patch(updated);
+    if (wasEmpty) selectAttempt(updated, "manual");
+    if (removal?.id === item.id) setRemoval(undefined);
+  }
+  function reorder(id: string, target: number) {
+    const updated = moveQueueItem(live.current, id, target);
+    if (updated !== live.current) patch(updated);
+  }
+  function removeFromQueue(id: string) {
+    const state = live.current;
+    const result = removeUpcomingItem(state, id);
+    if (!result) return;
+    const queuePlaylistIds = { ...state.queuePlaylistIds };
+    setRemoval({
+      ...result.removal,
+      title: itemsById.get(id)?.title ?? "Запись",
+      playlistId: queuePlaylistIds[id],
+    });
+    delete queuePlaylistIds[id];
+    patch({ ...result.queue, queuePlaylistIds });
+  }
+  function undoRemoval() {
+    if (!removal) return;
+    const state = live.current;
+    const order = undoQueueRemoval(state, removal);
+    if (order !== state && itemsById.has(removal.id)) patch({
+      ...order,
+      queuePlaylistIds: removal.playlistId
+        ? { ...state.queuePlaylistIds, [removal.id]: removal.playlistId }
+        : state.queuePlaylistIds,
+    });
+    setRemoval(undefined);
+  }
+  function clearQueue() {
+    finishAttempt("manual");
+    attempt.select(null);
+    playIntent(false);
+    mediaKey.current = "";
+    resetSources();
+    failed.current.clear();
+    setError("");
+    setRemoval(undefined);
+    setShowSavePlaylist(false);
+    patch({ queue: [], queueIndex: 0, position: 0, queuePlaylistIds: {} });
+  }
+
+  useLayoutEffect(() => {
+    attempt.paused();
+    youtubeRestart.current = null;
+    mediaKey.current = sourceKey;
+  }, [sourceKey]);
   useEffect(() => {
     if (!live.current.queue.length || current) return;
-    const index = nextPlayableIndex(
-      live.current.queue,
-      live.current.queueIndex,
-      itemsRef.current,
-      1,
-      true,
-    );
-    seekOnLoad.current = 0;
-    setSourceIndex(0);
-    if (index >= 0) {
-      patch({ queueIndex: index, position: 0 });
-      setError("Текущая запись удалена. Выбрана следующая.");
+    finishAttempt("interrupted");
+    const recovered = recoverDeletedQueueEntry(live.current, itemsRef.current, failed.current);
+    const item = itemsById.get(recovered.queue[recovered.queueIndex]!);
+    if (item) {
+      const autoplay = playingRef.current && !failed.current.has(item.id) && playbackSources(item).length > 0;
+      playEntry(recovered, recovered.queueIndex, "advance", { autoplay });
+      setError("Текущая запись удалена. Выбрана другая запись из очереди.");
     } else {
-      setPlaying(false);
+      resetSources();
+      patch(recovered);
+      attempt.select(null);
+      playIntent(false);
       setError("В очереди больше нет доступных записей.");
     }
   }, [current?.id, items.length]);
-  const sourceKey = `${current?.id ?? ""}:${source?.id ?? ""}`;
   useEffect(() => {
     if (native.current) {
       native.current.volume = settings.volume;
-      if (playing)
-        native.current.play().catch(() => {
-          setPlaying(false);
-          setError("Нажмите «Воспроизвести», чтобы продолжить.");
-        });
+      if (playing) playNative(native.current);
       else native.current.pause();
     }
   }, [playing, sourceKey]);
   useEffect(() => {
     if (native.current) native.current.volume = settings.volume;
   }, [settings.volume]);
-  useEffect(() => {
-    const restored = restorePlayback(initialSettings, itemsRef.current);
-    setSettings(restored);
-    seekOnLoad.current = restored.position;
-    setPlaying(false);
-    if (native.current?.readyState)
-      native.current.currentTime = restored.position;
-    youtube.current?.seekTo?.(restored.position, true);
+  const lastInitialSettings = useRef(initialSettings);
+  useLayoutEffect(() => {
+    if (lastInitialSettings.current !== initialSettings) {
+      lastInitialSettings.current = initialSettings;
+      finishAttempt("interrupted");
+      const restored = restorePlayback(initialSettings ?? {}, itemsRef.current);
+      serverSignature.current = playbackSettingsSignature(restored);
+      resetSources();
+      patch(restored);
+      playIntent(false);
+      positionMedia(restored.position);
+      failed.current.clear();
+      setRemoval(undefined);
+    }
+    selectAttempt(live.current, "manual");
   }, [initialSettings]);
+  useEffect(() => () => attempt.finish("interrupted"), [attempt]);
 
-  useEffect(() => {
-    localStorage.setItem(`hibiki.player.${userId}`, JSON.stringify(settings));
-  }, [settings, userId]);
+  function cachePlayback() {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify({
+        ...live.current, serverSignature: serverSignature.current,
+      }));
+    } catch {}
+  }
+  useEffect(cachePlayback, [settings, storageKey]);
   useEffect(() => {
     const save = () => {
       if (savingSuspended.current) return;
@@ -436,7 +743,7 @@ export function PlayerProvider({
         method: "PUT",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...baseSettings.current, ...live.current }),
+        body: JSON.stringify(live.current),
         keepalive: true,
       }).catch(() => {});
     };
@@ -445,14 +752,36 @@ export function PlayerProvider({
   }, [userId]);
   useEffect(() => {
     let last = "";
+    let latestRequest = 0;
+    let mounted = true;
     const save = () => {
       if (savingSuspended.current) return;
-      const serialized = JSON.stringify(live.current);
+      const submitted = live.current;
+      const serialized = JSON.stringify(submitted);
       if (serialized === last) return;
       last = serialized;
-      api("/settings", "PUT", { ...baseSettings.current, ...live.current })
-        .then(() => setSaveError(""))
+      const request = ++latestRequest;
+      const initial = lastInitialSettings.current;
+      const responseIsCurrent = () => mounted && !savingSuspended.current &&
+        request === latestRequest && initial === lastInitialSettings.current;
+      api<Partial<PlaybackSettings>>("/settings", "PUT", submitted)
+        .then((saved) => {
+          if (!responseIsCurrent()) return;
+          serverSignature.current = playbackSettingsSignature(restorePlayback(saved, itemsRef.current));
+          const current = live.current;
+          const queuePlaylistIds = reconcileQueuePlaylistIds(
+            current.queuePlaylistIds, submitted.queuePlaylistIds, saved.queuePlaylistIds,
+          );
+          if (queuePlaylistIds !== current.queuePlaylistIds) {
+            patch({ queuePlaylistIds });
+            const itemId = current.queue[current.queueIndex];
+            if (itemId) attempt.updatePlaylistId(itemId, queuePlaylistIds?.[itemId]);
+          }
+          cachePlayback();
+          setSaveError("");
+        })
         .catch(() => {
+          if (!responseIsCurrent()) return;
           last = "";
           setSaveError(
             "Не удалось сохранить настройки. Локальная копия сохранена.",
@@ -462,6 +791,7 @@ export function PlayerProvider({
     const timer = setInterval(save, 5000);
     return () => {
       clearInterval(timer);
+      mounted = false;
       save();
     };
   }, [userId]);
@@ -473,35 +803,27 @@ export function PlayerProvider({
       artist: "Hibiki",
       album: current.kind === "audio" ? "Аудио" : "Видео",
     });
-    mediaSession.setActionHandler("play", () => {
-      setPlaying(true);
-      native.current?.play();
-      youtube.current?.playVideo?.();
-    });
-    mediaSession.setActionHandler("pause", () => setPlaying(false));
+    mediaSession.setActionHandler("play", () => { if (!playingRef.current) toggle(); });
+    mediaSession.setActionHandler("pause", () => { if (playingRef.current) toggle(); });
     mediaSession.setActionHandler("nexttrack", () => next());
-    mediaSession.setActionHandler("previoustrack", () => next(-1));
+    mediaSession.setActionHandler("previoustrack", () => {
+      if (live.current.position > 3) seek(0);
+      else next(-1);
+    });
+    mediaSession.setActionHandler("stop", () => {
+      finishAttempt("manual");
+      playIntent(false);
+      seek(0, false);
+      selectAttempt(live.current, "manual");
+    });
     return () => {
-      ["play", "pause", "nexttrack", "previoustrack"].forEach((a) =>
+      ["play", "pause", "nexttrack", "previoustrack", "stop"].forEach((a) =>
         mediaSession.setActionHandler(a as MediaSessionAction, null),
       );
     };
-  }, [current?.id]);
+  }, [current?.id, sourceKey, duration]);
   function shuffleToggle() {
-    if (!settings.queue.length) {
-      patch({ shuffle: !settings.shuffle });
-      return;
-    }
-    const id = current?.id;
-    const queue = settings.shuffle
-      ? (settings.originalQueue ?? settings.queue)
-      : [id!, ...shuffleIds(settings.queue.filter((q) => q !== id))];
-    patch({
-      shuffle: !settings.shuffle,
-      originalQueue: settings.shuffle ? settings.originalQueue : settings.queue,
-      queue,
-      queueIndex: Math.max(0, queue.indexOf(id!)),
-    });
+    patch(togglePlaybackShuffle(live.current));
   }
   const fullscreen = nativeFullscreen || viewportFullscreen;
   function showFullscreenControls() {
@@ -601,6 +923,67 @@ export function PlayerProvider({
   const artwork = playbackArtwork(current, source);
   const showArtwork = artwork && failedArtwork !== artwork;
   const sourceLabel = isYoutube ? "YouTube" : source ? "Локальный файл" : "Источник недоступен";
+  function queueRow(id: string, index: number, editable = false) {
+    const item = itemsById.get(id);
+    const title = item?.title ?? "Запись удалена";
+    const thumbnail = playbackArtwork(item);
+    const active = index === settings.queueIndex;
+    const available = item && playbackSources(item).length > 0 && !failed.current.has(id);
+    const canMoveUp = index > settings.queueIndex + 1;
+    const canMoveDown = index < settings.queue.length - 1;
+    return (
+      <div
+        key={id}
+        className={`queue-entry${dragOver === id ? " is-drop-target" : ""}`}
+        onDragOver={editable ? (event) => {
+          if (!draggingId.current || draggingId.current === id) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          setDragOver(id);
+        } : undefined}
+        onDrop={editable ? (event) => {
+          event.preventDefault();
+          const dragging = draggingId.current;
+          if (dragging) reorder(dragging, live.current.queue.indexOf(id));
+          draggingId.current = undefined;
+          setDragOver(undefined);
+        } : undefined}
+      >
+        {editable && (
+          <span
+            className="queue-drag"
+            aria-hidden="true"
+            draggable
+            onDragStart={(event) => {
+              event.dataTransfer.setData("text/plain", id);
+              event.dataTransfer.effectAllowed = "move";
+              draggingId.current = id;
+            }}
+            onDragEnd={() => { draggingId.current = undefined; setDragOver(undefined); }}
+          ><GripVertical size={16} /></span>
+        )}
+        <button className={`watch-queue-row ${active ? "active" : ""}`} aria-current={active ? "true" : undefined} aria-disabled={!item || !playbackSources(item).length} onClick={() => switchTo(index)}>
+          <span className="watch-queue-number">{active && playing ? <span className="equalizer" aria-hidden="true"><i /><i /><i /></span> : index + 1}</span>
+          <span className={`watch-queue-art art-${title.length % 6}`}>
+            {item?.kind === "video" ? <Video size={18} /> : <Music2 size={18} />}
+            {thumbnail && <img src={thumbnail} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />}
+            <span className="watch-queue-duration">{formatDuration(item?.duration)}</span>
+          </span>
+          <span className="watch-queue-info">
+            <strong>{title}</strong>
+            <small>{item ? available ? item.kind === "video" ? "Видео" : "Аудио" : "Источник недоступен" : "Нет в медиатеке"}</small>
+          </span>
+        </button>
+        {editable && (
+          <div className="queue-entry-actions">
+            <button className="icon-button" aria-disabled={!canMoveUp} aria-label={`Переместить выше: ${title}`} title="Переместить выше" onClick={() => reorder(id, index - 1)}><ArrowUp size={14} /></button>
+            <button className="icon-button" aria-disabled={!canMoveDown} aria-label={`Переместить ниже: ${title}`} title="Переместить ниже" onClick={() => reorder(id, index + 1)}><ArrowDown size={14} /></button>
+            <button className="icon-button" aria-label={`Удалить из очереди: ${title}`} title="Удалить из очереди" onClick={() => removeFromQueue(id)}><X size={14} /></button>
+          </div>
+        )}
+      </div>
+    );
+  }
   const player = (
     <section ref={watch} className={`watch-player ${current ? "" : "is-empty"}`} aria-label="Плеер">
       {!current ? (
@@ -632,19 +1015,44 @@ export function PlayerProvider({
                 onKeyDownCapture={showFullscreenControls}
               >
                 <div className="watch-media">
-                  {source && isYoutube ? (
+                  {source && youtubeId ? (
                     <Youtube
                       key={sourceKey}
-                      id={source.externalId || new URL(source.url!).searchParams.get("v") || source.url!.split("/").pop()!}
+                      id={youtubeId}
                       playing={playing}
                       volume={settings.volume}
                       position={seekOnLoad.current}
                       engine={youtube}
-                      onTime={(position, d) => { patch({ position }); setDuration(d); }}
+                      onTime={(...reading) => {
+                        if (!currentMedia() || scrub.current?.target !== undefined) return;
+                        const [position, d] = reading;
+                        patch({ position });
+                        setDuration(d ?? 0);
+                        const confirmRestart = youtubeRestart.current;
+                        if (confirmRestart && playingRef.current && youtube.current?.getPlayerState?.() === 1 &&
+                            confirmRestart(position, reading[2])) {
+                          youtubeRestart.current = null;
+                          attempt.playing(...reading);
+                        }
+                        attempt.progress(...reading);
+                      }}
                       onEnded={() => next(1, true)}
                       onError={sourceError}
-                      onPaused={() => { showFullscreenControls(); setPlaying(false); }}
-                      onPlaying={() => { showFullscreenControls(); setPlaying(true); }}
+                      onPaused={() => {
+                        if (!currentMedia()) return;
+                        measureProgress();
+                        attempt.paused();
+                        showFullscreenControls();
+                        playIntent(false);
+                      }}
+                      onBuffering={() => { if (currentMedia()) attempt.paused(); }}
+                      onPlaying={(...reading) => {
+                        if (!currentMedia()) return;
+                        youtubeRestart.current = null;
+                        if (scrub.current?.target === undefined) attempt.playing(...reading);
+                        showFullscreenControls();
+                        playIntent(true);
+                      }}
                     />
                   ) : source && presentationKind === "video" ? (
                     <video
@@ -652,15 +1060,7 @@ export function PlayerProvider({
                       ref={(element) => { native.current = element; }}
                       src={source.streamUrl!}
                       playsInline
-                      onLoadedMetadata={(event) => {
-                        event.currentTarget.currentTime = seekOnLoad.current;
-                        event.currentTarget.volume = live.current.volume;
-                        setDuration(event.currentTarget.duration);
-                        if (playingRef.current) event.currentTarget.play().catch(() => setPlaying(false));
-                      }}
-                      onTimeUpdate={(event) => patch({ position: event.currentTarget.currentTime })}
-                      onEnded={() => next(1, true)}
-                      onError={sourceError}
+                      {...nativeEvents}
                       onClick={toggle}
                     />
                   ) : (
@@ -681,15 +1081,7 @@ export function PlayerProvider({
                           key={sourceKey}
                           ref={(element) => { native.current = element; }}
                           src={source.streamUrl!}
-                          onLoadedMetadata={(event) => {
-                            event.currentTarget.currentTime = seekOnLoad.current;
-                            event.currentTarget.volume = live.current.volume;
-                            setDuration(event.currentTarget.duration);
-                            if (playingRef.current) event.currentTarget.play().catch(() => setPlaying(false));
-                          }}
-                          onTimeUpdate={(event) => patch({ position: event.currentTarget.currentTime })}
-                          onEnded={() => next(1, true)}
-                          onError={sourceError}
+                          {...nativeEvents}
                         />
                       )}
                     </div>
@@ -705,7 +1097,18 @@ export function PlayerProvider({
                       aria-valuetext={`${formatDuration(settings.position)} из ${formatDuration(total)}`}
                       type="range" min="0" max={total || 1} step="0.1"
                       value={Math.min(settings.position, total || 1)}
-                      onChange={(event) => seek(Number(event.target.value))}
+                      onPointerDown={(event) => {
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        scrub.current = {};
+                      }}
+                      onLostPointerCapture={finishScrub}
+                      onKeyDown={(event) => {
+                        if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key))
+                          scrub.current ??= {};
+                      }}
+                      onKeyUp={finishScrub}
+                      onBlur={finishScrub}
+                      onChange={(event) => seekFromSlider(Number(event.target.value))}
                       style={{ "--progress": `${total ? (settings.position / total) * 100 : 0}%` } as any}
                       disabled={!total}
                     />
@@ -746,36 +1149,60 @@ export function PlayerProvider({
               <p className="watch-shortcuts"><kbd>Пробел</kbd> пауза <span>·</span> <kbd>←</kbd> <kbd>→</kbd> 10 секунд <span>·</span> <kbd>F</kbd> полный экран</p>
             </div>
             <aside className="watch-queue" aria-label="Очередь воспроизведения">
-              <div className="watch-queue-heading"><div><ListMusic size={18} /><h2>Далее в очереди</h2></div><span>{settings.queueIndex + 1} / {settings.queue.length}</span></div>
-              <p className="watch-queue-description">Ваша подборка, один непрерывный поток.</p>
+              <div className="watch-queue-heading"><div><ListMusic size={18} /><h2>Очередь</h2></div><span>{settings.queue.length} {mediaWord(settings.queue.length)}</span></div>
               <div className="watch-queue-list">
-                {settings.queue.map((id, index) => {
-                  const item = items.find((i) => i.id === id);
-                  const thumbnail = playbackArtwork(item);
-                  const active = index === settings.queueIndex;
-                  return (
-                    <button key={`${id}-${index}`} className={`watch-queue-row ${active ? "active" : ""}`} aria-current={active ? "true" : undefined} onClick={() => switchTo(index)}>
-                      <span className="watch-queue-number">{active && playing ? <span className="equalizer" aria-hidden="true"><i /><i /><i /></span> : index + 1}</span>
-                      <span className={`watch-queue-art art-${(item?.title.length ?? 0) % 6}`}>
-                        {item?.kind === "video" ? <Video size={18} /> : <Music2 size={18} />}
-                        {thumbnail && <img src={thumbnail} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />}
-                        <span className="watch-queue-duration">{formatDuration(item?.duration)}</span>
-                      </span>
-                      <span className="watch-queue-info"><strong>{item?.title ?? "Запись удалена"}</strong><small>{item ? playbackSources(item).length ? `${item.kind === "video" ? "Видео" : "Аудио"}${active ? " · Сейчас играет" : ""}` : "Источник недоступен" : "Нет в медиатеке"}</small></span>
-                    </button>
-                  );
-                })}
+                {settings.queueIndex > 0 && (
+                  <details className="queue-past">
+                    <summary>Прослушанные <span>{settings.queueIndex}</span></summary>
+                    {settings.queue.slice(0, settings.queueIndex).map((id, index) => queueRow(id, index))}
+                  </details>
+                )}
+                <h3 className="queue-section-heading">Сейчас</h3>
+                {queueRow(current.id, settings.queueIndex)}
+                <h3 className="queue-section-heading">Далее</h3>
+                {settings.queue.slice(settings.queueIndex + 1).map((id, index) => queueRow(id, index + settings.queueIndex + 1, true))}
+                {settings.queueIndex === settings.queue.length - 1 && <p className="queue-empty">Дальше записей нет.</p>}
               </div>
-              <div className="watch-queue-footer"><span>Очередь сохранена при запуске</span><button className="text-button" onClick={() => { setPlaying(false); patch({ queue: [], queueIndex: 0, position: 0, originalQueue: [] }); }}>Очистить</button></div>
+              {removal && (
+                <div className="queue-notice">
+                  <span role="status">«{removal.title}» удалена из очереди</span>
+                  <button className="text-button" onClick={undoRemoval}>Отменить</button>
+                </div>
+              )}
+              <div className="watch-queue-footer">
+                <button className="text-button" onClick={() => { setCreatedPlaylist(undefined); setShowSavePlaylist(true); }}>Сохранить как плейлист</button>
+                <button className="text-button" onClick={clearQueue}>Очистить</button>
+              </div>
+              {createdPlaylist && (
+                <div className="queue-notice">
+                  <span role="status">Плейлист сохранён</span>
+                  <Link to={`/playlists/${createdPlaylist.id}`}>Открыть</Link>
+                </div>
+              )}
             </aside>
           </div>
         </>
+      )}
+      {current && showSavePlaylist && (
+        <QueuePlaylistDialog
+          ids={settings.queue}
+          close={() => setShowSavePlaylist(false)}
+          saved={(playlist) => {
+            setShowSavePlaylist(false);
+            setCreatedPlaylist(playlist);
+            onPlaylistSaved?.(playlist);
+          }}
+        />
       )}
       {!current && (error || saveError) && <p className="watch-empty-notice" role="status"><CircleAlert size={15} />{error || saveError}</p>}
     </section>
   );
   return (
-    <PlayerContext.Provider value={{ current, playing, settings, start, enqueue: (item) => setSettings((old) => ({ ...old, queue: [...old.queue, item.id], originalQueue: [...(old.originalQueue ?? old.queue), item.id] })), toggle }}>
+    <PlayerContext.Provider value={{
+      current, playing, settings, start, toggle,
+      enqueue: (item, playlistId) => addToQueue(item, "last", playlistId),
+      playNext: (item, playlistId) => addToQueue(item, "next", playlistId),
+    }}>
       {children(player)}
     </PlayerContext.Provider>
   );

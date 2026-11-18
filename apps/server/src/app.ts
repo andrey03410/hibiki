@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
 import staticFiles from "@fastify/static";
@@ -20,6 +20,10 @@ import { allowedLocalPath, storagePath } from "./media";
 import { registerMcp } from "./mcp";
 import { uploadPolicy } from "./upload-policy";
 import { ArtworkService } from "./artwork";
+import { registerNotes } from "./notes";
+import { registerReplacement } from "./replacement";
+import { registerHistory } from "./history";
+import { registerYoutubeSync } from "./youtube-sync";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -60,6 +64,8 @@ const tagInput = z.object({
 });
 const idOf = (request: { params: unknown }) =>
   z.object({ id: z.string() }).parse(request.params).id;
+const browserAccess = (request: FastifyRequest) =>
+  Boolean(request.user && !request.headers.authorization && request.cookies.hibiki_session);
 
 export async function createApp(options: { db: Db; storageRoot: string }) {
   const { db, storageRoot } = options;
@@ -175,7 +181,10 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     reply.clearCookie("hibiki_session", { path: "/" });
     return { ok: true };
   });
-  app.get("/api/library", (request) => library.snapshot(request.user!.id));
+  app.get("/api/library", (request, reply) => {
+    reply.header("Cache-Control", "private, no-store");
+    return library.snapshot(request.user!.id, browserAccess(request));
+  });
   app.get("/api/items", async (request) => {
     const query = z
       .object({
@@ -314,7 +323,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
           invariant(!archiveJob, 400, "one_archive", "Загрузите один архив");
           archiveJob = await jobs.create(ownerId, "import", {
             archivePath: tmp,
-          });
+          }, browserAccess(request));
         } else
           items.push(
             (await library.importLocal(ownerId, tmp, { title: undefined }))
@@ -339,7 +348,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     receiveUpload(request, request.user!.id, true),
   );
   app.post("/api/imports/:id/apply", (request) =>
-    jobs.applyImport(request.user!.id, idOf(request)),
+    jobs.applyImport(request.user!.id, idOf(request), browserAccess(request)),
   );
   app.post("/api/uploads/:id", async (request) => {
     const id = idOf(request);
@@ -384,28 +393,31 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       request.user!.id,
       input.definition,
       input.playlistId,
+      browserAccess(request),
     );
   });
   app.post("/api/playlists", (request) =>
-    library.savePlaylist(request.user!.id, playlistInput.parse(request.body)),
+    library.savePlaylist(request.user!.id, playlistInput.parse(request.body), undefined, browserAccess(request)),
   );
   app.patch("/api/playlists/:id", (request) =>
     library.savePlaylist(
       request.user!.id,
       playlistInput.parse(request.body),
       idOf(request),
+      browserAccess(request),
     ),
   );
   app.get("/api/playlists/:id/resolve", (request) =>
-    library.resolve(request.user!.id, idOf(request)),
+    library.resolve(request.user!.id, idOf(request), browserAccess(request)),
   );
   app.delete("/api/playlists/:id", async (request) => {
     await library.deletePlaylist(request.user!.id, idOf(request));
     return { ok: true };
   });
-  app.get("/api/jobs", async (request) => ({
-    jobs: await jobs.list(request.user!.id),
-  }));
+  app.get("/api/jobs", async (request, reply) => {
+    reply.header("Cache-Control", "private, no-store");
+    return { jobs: await jobs.list(request.user!.id, browserAccess(request)) };
+  });
   app.post("/api/jobs", (request) => {
     const input = z
       .object({
@@ -418,20 +430,22 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
         input: z.record(z.string(), z.unknown()).default({}),
       })
       .parse(request.body);
-    return jobs.create(request.user!.id, input.kind, input.input);
+    return jobs.create(request.user!.id, input.kind, input.input, browserAccess(request));
   });
-  app.get("/api/jobs/:id", (request) =>
-    jobs.get(request.user!.id, idOf(request)),
-  );
+  app.get("/api/jobs/:id", (request, reply) => {
+    reply.header("Cache-Control", "private, no-store");
+    return jobs.get(request.user!.id, idOf(request), browserAccess(request));
+  });
   app.post("/api/jobs/:id/cancel", (request) =>
-    jobs.cancel(request.user!.id, idOf(request)),
+    jobs.cancel(request.user!.id, idOf(request), browserAccess(request)),
   );
   app.post("/api/jobs/:id/retry", (request) =>
-    jobs.retry(request.user!.id, idOf(request)),
+    jobs.retry(request.user!.id, idOf(request), browserAccess(request)),
   );
   app.get("/api/jobs/:id/download", async (request, reply) => {
-    const path = await jobs.exportPath(request.user!.id, idOf(request));
+    const path = await jobs.exportPath(request.user!.id, idOf(request), browserAccess(request));
     reply
+      .header("Cache-Control", "private, no-store")
       .header(
         "content-disposition",
         'attachment; filename="hibiki-library.zip"',
@@ -501,6 +515,10 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     reply.header("content-length", size);
     return reply.send(createReadStream(path));
   });
+  registerNotes(app, db);
+  registerReplacement(app, db, library, storageRoot);
+  registerHistory(app, db);
+  registerYoutubeSync(app, db, library);
   registerMcp(app, s);
   const webRoot = resolve("apps/web/dist");
   if (existsSync(join(webRoot, "index.html"))) {

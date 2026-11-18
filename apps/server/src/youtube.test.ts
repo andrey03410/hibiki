@@ -64,7 +64,83 @@ import { afterEach, vi } from "vitest";
 import { mkdtemp, writeFile, chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverYoutube } from "./youtube.js";
+import { discoverYoutube, discoverYoutubePlaylist } from "./youtube.js";
+
+describe("complete YouTube snapshots", () => {
+  const url = "https://www.youtube.com/playlist?list=PLtest";
+  const entry = { id: "abcdefghijk", title: "[Deleted video]" };
+
+  async function withProvider(
+    payload: unknown,
+    stderr: string,
+    run: () => Promise<unknown>,
+  ) {
+    const root = await mkdtemp(join(tmpdir(), "hibiki-snapshot-"));
+    try {
+      const binary = join(root, "yt-dlp");
+      await writeFile(
+        binary,
+        `#!/usr/bin/env node
+        const args = process.argv.slice(2);
+        if (!args.includes("--no-ignore-errors") || args.includes("--ignore-errors"))
+          process.exit(1);
+        console.log(${JSON.stringify(JSON.stringify(payload))});
+        if (${JSON.stringify(stderr)}) console.error(${JSON.stringify(stderr)});
+      `,
+      );
+      await chmod(binary, 0o755);
+      vi.stubEnv("YTDLP_PATH", binary);
+      return await run();
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  it("accepts listed unavailable videos and explicitly empty playlists", async () => {
+    await withProvider(
+      { _type: "playlist", id: "PLtest", entries: [entry], playlist_count: 1 },
+      "",
+      async () => {
+        expect(await discoverYoutubePlaylist(url)).toMatchObject({
+          entries: [{ externalId: "abcdefghijk", available: false }],
+        });
+      },
+    );
+    await withProvider(
+      { _type: "playlist", id: "PLtest", entries: [], playlist_count: 0 },
+      "",
+      async () => {
+        expect(await discoverYoutubePlaylist(url)).toMatchObject({
+          entries: [],
+        });
+      },
+    );
+  });
+
+  it.each([
+    ["another playlist", { id: "PLother", entries: [entry] }, ""],
+    ["a malformed position", { entries: [entry, null] }, ""],
+    ["a nested playlist", { entries: [{ ...entry, _type: "playlist" }] }, ""],
+    ["an incomplete count", { entries: [entry], playlist_count: 2 }, ""],
+    [
+      "a gap in the positions",
+      { entries: [entry], requested_entries: [2] },
+      "",
+    ],
+    ["a provider warning", { entries: [entry] }, "WARNING: incomplete data"],
+    ["the truncation sentinel", { entries: Array(10_001).fill(entry) }, ""],
+  ])("rejects %s", async (_label, payload, stderr) => {
+    await withProvider(
+      { _type: "playlist", id: "PLtest", ...payload },
+      stderr,
+      () =>
+        expect(discoverYoutubePlaylist(url)).rejects.toBeInstanceOf(
+          YoutubeProviderError,
+        ),
+    );
+  });
+});
 
 describe("official metadata fallback", () => {
   afterEach(() => {

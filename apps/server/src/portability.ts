@@ -14,11 +14,31 @@ import {
   type PlaylistDefinition,
   type Settings,
 } from "@hibiki/contracts";
+import { usesPrivateHistory } from "@hibiki/core";
 import type { Db } from "./db.js";
 import { inspectFile } from "./media.js";
 
 const id = z.string().min(1).max(200);
 const title = z.string().max(2000);
+const note = z.string().max(10_000).optional();
+const queueContexts = z.record(id, id);
+const counter = z.number().int().nonnegative().max(2_147_483_647);
+const summarySchema = z.object({
+  launches: counter,
+  completed: counter,
+  partial: counter,
+  skipped: counter,
+  errors: counter,
+  listened: z.number().nonnegative(),
+  seeks: counter,
+  fromPlaylist: counter,
+  direct: counter,
+  manual: counter,
+  advance: counter,
+  repeat: counter,
+  lastStartedAt: z.iso.datetime().nullable(),
+  lastCompletedAt: z.iso.datetime().nullable(),
+}).strict();
 const sourceSchema = z
   .object({
     id,
@@ -38,6 +58,7 @@ const sourceSchema = z
       )
       .optional(),
     fileId: id.optional(),
+    note,
   })
   .strict();
 const fileSchema = z
@@ -92,12 +113,16 @@ const manifestSchema = z
             createdAt: z.iso.datetime(),
             sources: z.array(sourceSchema).max(100),
             tagIds: z.array(id).max(10000),
+            favorite: z.boolean().optional(),
+            note,
+            preferredSourceId: id.optional(),
+            listeningSummary: summarySchema.optional(),
           })
           .strict(),
       )
       .max(100000),
     tags: z
-      .array(z.object({ id, name: title, color: z.string().max(100) }).strict())
+      .array(z.object({ id, name: title, color: z.string().max(100), note }).strict())
       .max(10000),
     playlists: z
       .array(
@@ -107,6 +132,7 @@ const manifestSchema = z
             title,
             description: z.string().max(10000),
             definition: playlistDefinitionSchema,
+            note,
           })
           .strict(),
       )
@@ -116,6 +142,13 @@ const manifestSchema = z
   })
   .strict();
 export type PortableManifest = z.infer<typeof manifestSchema>;
+export function archiveRequiresBrowser(manifest: PortableManifest): boolean {
+  return manifest.items.some((item) =>
+    item.note !== undefined || item.listeningSummary !== undefined ||
+    item.sources.some((source) => source.note !== undefined),
+  ) || manifest.tags.some((tag) => tag.note !== undefined) ||
+    manifest.playlists.some((playlist) => playlist.note !== undefined || usesPrivateHistory(playlist.definition));
+}
 export interface ImportPreview {
   canApply: boolean;
   counts: { items: number; tags: number; playlists: number; files: number };
@@ -139,6 +172,7 @@ const safeSettings = (value: unknown): Settings => {
       : {};
   if (raw.originalQueue !== undefined)
     z.array(id).max(100000).parse(raw.originalQueue);
+  if (raw.queuePlaylistIds !== undefined) queueContexts.parse(raw.queuePlaylistIds);
   return settingsSchema.parse({
     ...{ volume: 0.8, repeat: "off", shuffle: false, queue: [], queueIndex: 0 },
     ...Object.fromEntries(
@@ -150,6 +184,7 @@ const safeSettings = (value: unknown): Settings => {
         "queueIndex",
         "position",
         "originalQueue",
+        "queuePlaylistIds",
       ]
         .filter((k) => raw[k] !== undefined)
         .map((k) => [k, raw[k]]),
@@ -202,7 +237,12 @@ export async function exportLibrary(
   ownerId: string,
   storageRoot: string,
   destination: string,
-  options: { includeFiles: boolean; signal?: AbortSignal },
+  options: {
+    includeFiles: boolean;
+    includeNotes?: boolean;
+    includeHistorySummary?: boolean;
+    signal?: AbortSignal;
+  },
 ): Promise<{ counts: ImportPreview["counts"]; missingFiles: string[] }> {
   options.signal?.throwIfAborted();
   const snapshot = await db.$transaction(async (tx) => ({
@@ -214,7 +254,16 @@ export async function exportLibrary(
     playlists: await tx.playlist.findMany({ where: { ownerId } }),
     files: await tx.mediaFile.findMany({ where: { ownerId } }),
     setting: await tx.setting.findUnique({ where: { userId: ownerId } }),
+    history: options.includeHistorySummary
+      ? await tx.listeningSummary.findMany({ where: { ownerId } })
+      : [],
   }));
+  const history = new Map(
+    snapshot.history.map(({ itemId, ownerId: _ownerId, lastStartedAt, lastCompletedAt, ...values }) => [
+      itemId,
+      { ...values, lastStartedAt: lastStartedAt?.toISOString() ?? null, lastCompletedAt: lastCompletedAt?.toISOString() ?? null },
+    ]),
+  );
   const usedFiles = new Set(
     snapshot.items.flatMap((i) =>
       i.sources.flatMap((s) => (s.fileId ? [s.fileId] : [])),
@@ -248,6 +297,15 @@ export async function exportLibrary(
       included,
     });
   }
+  const settings = safeSettings(snapshot.setting ? JSON.parse(snapshot.setting.json) : {});
+  if (settings.queuePlaylistIds) {
+    const playlistIds = new Set(snapshot.playlists.map((playlist) => playlist.id));
+    const queueIds = new Set(settings.queue);
+    settings.queuePlaylistIds = Object.fromEntries(
+      Object.entries(queueContexts.parse(settings.queuePlaylistIds)).filter(([itemId, playlistId]) =>
+        queueIds.has(itemId) && playlistIds.has(playlistId)),
+    );
+  }
   const manifest: PortableManifest = {
     format: "hibiki",
     version: 1,
@@ -261,6 +319,12 @@ export async function exportLibrary(
       duration: item.duration,
       createdAt: item.createdAt.toISOString(),
       tagIds: item.tags.map((t) => t.tagId),
+      ...(item.favorite ? { favorite: true } : {}),
+      ...(options.includeNotes && item.note ? { note: item.note } : {}),
+      ...(item.preferredSourceId && item.sources.some((source) => source.id === item.preferredSourceId)
+        ? { preferredSourceId: item.preferredSourceId }
+        : {}),
+      ...(history.has(item.id) ? { listeningSummary: history.get(item.id)! } : {}),
       sources: item.sources.map((s) => ({
         id: s.id,
         provider: s.provider as "youtube" | "local",
@@ -269,23 +333,24 @@ export async function exportLibrary(
         ...(s.reason ? { reason: s.reason } : {}),
         ...(s.thumbnail ? { thumbnail: s.thumbnail } : {}),
         ...(s.fileId ? { fileId: s.fileId } : {}),
+        ...(options.includeNotes && s.note ? { note: s.note } : {}),
       })),
     })),
     tags: snapshot.tags.map((t) => ({
       id: t.id,
       name: t.name,
       color: t.color,
+      ...(options.includeNotes && t.note ? { note: t.note } : {}),
     })),
     playlists: snapshot.playlists.map((p) => ({
       id: p.id,
       title: p.title,
       description: p.description,
       definition: playlistDefinitionSchema.parse(JSON.parse(p.definitionJson)),
+      ...(options.includeNotes && p.note ? { note: p.note } : {}),
     })),
     files,
-    settings: safeSettings(
-      snapshot.setting ? JSON.parse(snapshot.setting.json) : {},
-    ),
+    settings,
   };
   validateManifest(manifest);
   const json = Buffer.from(JSON.stringify(manifest));
@@ -366,6 +431,8 @@ function validateManifest(input: unknown): PortableManifest {
     if (!set.has(value)) throw new Error(`Неизвестная ссылка: ${value}`);
   };
   for (const item of manifest.items) {
+    if (item.preferredSourceId && !item.sources.some((source) => source.id === item.preferredSourceId))
+      throw new Error("Предпочтительный источник не принадлежит записи");
     for (const tag of item.tagIds) requireRef(tags, tag);
     for (const source of item.sources) {
       if (source.provider === "youtube" && !source.externalId)
@@ -426,6 +493,13 @@ function validateManifest(input: unknown): PortableManifest {
       : []),
   ])
     requireRef(items, value);
+  if (settings.queuePlaylistIds) {
+    const queueIds = new Set(settings.queue);
+    for (const [itemId, playlistId] of Object.entries(queueContexts.parse(settings.queuePlaylistIds))) {
+      requireRef(queueIds, itemId);
+      requireRef(playlists, playlistId);
+    }
+  }
   manifest.settings = settings;
   return manifest;
 }
@@ -778,8 +852,10 @@ export async function applyArchive(
           maps.tags.set(tag.id, newId);
           if (!existing)
             await tx.tag.create({
-              data: { id: newId, ownerId, name: tag.name, color: tag.color },
+              data: { id: newId, ownerId, name: tag.name, color: tag.color, note: tag.note },
             });
+          else if (tag.note && !existing.note)
+            await tx.tag.update({ where: { id: newId }, data: { note: tag.note } });
         }
         for (const playlist of manifest.playlists)
           maps.playlists.set(
@@ -834,11 +910,32 @@ export async function applyArchive(
                 originalTitle: item.originalTitle,
                 kind: item.kind,
                 duration: item.duration,
+                favorite: item.favorite,
+                note: item.note,
                 createdAt: new Date(item.createdAt),
               },
             });
             added++;
-          } else reused++;
+          } else {
+            reused++;
+            if (item.note)
+              await tx.item.updateMany({
+                where: { id: newId, ownerId, OR: [{ note: null }, { note: "" }] },
+                data: { note: item.note },
+              });
+          }
+          if (item.listeningSummary) {
+            const { lastStartedAt, lastCompletedAt, ...values } = item.listeningSummary;
+            await tx.listeningSummary.upsert({
+              where: { itemId: newId },
+              create: {
+                itemId: newId, ownerId, ...values,
+                lastStartedAt: lastStartedAt && new Date(lastStartedAt),
+                lastCompletedAt: lastCompletedAt && new Date(lastCompletedAt),
+              },
+              update: {},
+            });
+          }
           for (const tagId of item.tagIds)
             await tx.itemTag.upsert({
               where: {
@@ -898,6 +995,7 @@ export async function applyArchive(
                   : (source.reason ?? null),
               fileId,
               thumbnail: source.thumbnail,
+              ...(source.note && !(previousImport ?? existing)?.note ? { note: source.note } : {}),
             };
             if (
               previousImport &&
@@ -913,6 +1011,16 @@ export async function applyArchive(
             else if (!existing && !previousImport)
               await tx.source.create({
                 data: { id: sourceId, ownerId, itemId: newId, ...sourceData },
+              });
+            else if (source.note && !(previousImport ?? existing)?.note)
+              await tx.source.updateMany({
+                where: { id: (previousImport ?? existing)!.id, ownerId, itemId: newId },
+                data: { note: source.note },
+              });
+            if (source.id === item.preferredSourceId)
+              await tx.item.updateMany({
+                where: { id: newId, ownerId, preferredSourceId: null },
+                data: { preferredSourceId: (previousImport ?? existing)?.id ?? sourceId },
               });
           }
         }
@@ -937,9 +1045,15 @@ export async function applyArchive(
               title: playlist.title,
               description: playlist.description,
               definitionJson: JSON.stringify(definition),
+              note: playlist.note,
             },
             update: {},
           });
+          if (playlist.note)
+            await tx.playlist.updateMany({
+              where: { id: newId, ownerId, OR: [{ note: null }, { note: "" }] },
+              data: { note: playlist.note },
+            });
         }
         const settings = {
           ...manifest.settings,
@@ -950,6 +1064,13 @@ export async function applyArchive(
                   manifest.settings.originalQueue as string[]
                 ).map((i) => maps.items.get(i)!),
               }
+            : {}),
+          ...(manifest.settings.queuePlaylistIds
+            ? { queuePlaylistIds: Object.fromEntries(
+                Object.entries(queueContexts.parse(manifest.settings.queuePlaylistIds)).map(([itemId, playlistId]) => [
+                  maps.items.get(itemId)!, maps.playlists.get(playlistId)!,
+                ]),
+              ) }
             : {}),
         };
         await tx.setting.upsert({

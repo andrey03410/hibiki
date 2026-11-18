@@ -1,0 +1,99 @@
+.note-editor,
+.item-listening-summary {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.note-editor > summary,
+.item-listening-summary > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.note-fields {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.note-fields > label {
+  font-size: 0.82rem;
+}
+
+.note-actions,
+.note-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.note-actions {
+  flex-wrap: wrap;
+}
+
+.note-indicator {
+  margin-inline-start: 4px;
+  color: var(--muted);
+  vertical-align: middle;
+}
+
+.notes-error {
+  color: #f19da9;
+  font-size: 0.875rem;
+}
+
+.item-name-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.item-name-actions > .item-title {
+  min-width: 0;
+}
+
+.item-name-actions > .note-indicator {
+  flex-shrink: 0;
+}
+
+.item-name-actions > .favorite-button {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+}
+
+.favorite-button[aria-pressed="true"] {
+  color: var(--purple);
+}
+
+.item-source-notes {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.item-source-notes .note-editor {
+  margin: 0 0 10px;
+}
+
+.item-source-notes .source-details {
+  margin: 0;
+}
+
+.item-listening-summary dl {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 12px;
+  row-gap: 8px;
+  font-size: 0.8rem;
+}
+
+.item-listening-summary dt {
+  color: var(--muted);
+}
+
+.item-listening-summary dd {
+  margin-inline-start: 0;
+}

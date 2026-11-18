@@ -18,6 +18,13 @@ model User {
   playlists Playlist[]
   jobs Job[]
   setting Setting?
+  listeningAttempts ListeningAttempt[]
+  listeningSummaries ListeningSummary[]
+  historyPreference HistoryPreference?
+  sourceProposals SourceProposal[]
+  youtubeLinks YoutubeLink[]
+  youtubeSyncPreference YoutubeSyncPreference?
+  youtubeNotices YoutubeNotice[]
 }
 
 model Session {
@@ -43,11 +50,15 @@ model Item {
   originalTitle String
   kind String
   duration Float?
+  favorite Boolean @default(false)
+  note String?
+  preferredSourceId String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   sources Source[]
   tags ItemTag[]
+  sourceProposals SourceProposal[]
   @@index([ownerId, createdAt])
 }
 
@@ -64,6 +75,7 @@ model Source {
   checkedAt DateTime?
   fileId String?
   thumbnail String?
+  note String?
   item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
   file MediaFile? @relation(fields: [fileId], references: [id], onDelete: Restrict)
   @@unique([ownerId, key])
@@ -88,6 +100,7 @@ model Tag {
   ownerId String
   name String
   color String @default("#b8a5ff")
+  note String?
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   items ItemTag[]
   @@unique([ownerId, name])
@@ -108,9 +121,12 @@ model Playlist {
   description String @default("")
   definitionJson String
   revision Int @default(1)
+  note String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  youtubeLink YoutubeLink?
+  youtubeNotices YoutubeNotice[]
   @@index([ownerId])
 }
 
@@ -128,6 +144,7 @@ model Job {
   error String?
   leaseUntil DateTime?
   cancelRequested Boolean @default(false)
+  browserOnly Boolean @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
@@ -139,4 +156,107 @@ model Setting {
   userId String @id
   json String @default("{}")
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ListeningAttempt {
+  id String @id
+  ownerId String
+  itemId String
+  itemTitle String @default("")
+  playlistId String?
+  playlistTitle String?
+  startedAt DateTime
+  endedAt DateTime
+  trigger String
+  outcome String
+  reason String
+  listened Float
+  seeks Int
+  bytes Int
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  @@index([ownerId, startedAt, id])
+  @@index([ownerId, itemId, startedAt, id])
+  @@index([ownerId, playlistId, startedAt, id])
+}
+
+model ListeningSummary {
+  itemId String @id
+  ownerId String
+  launches Int @default(0)
+  completed Int @default(0)
+  partial Int @default(0)
+  skipped Int @default(0)
+  errors Int @default(0)
+  listened Float @default(0)
+  seeks Int @default(0)
+  fromPlaylist Int @default(0)
+  direct Int @default(0)
+  manual Int @default(0)
+  advance Int @default(0)
+  repeat Int @default(0)
+  lastStartedAt DateTime?
+  lastCompletedAt DateTime?
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  @@index([ownerId])
+}
+
+model HistoryPreference {
+  ownerId String @id
+  enabled Boolean @default(true)
+  resetAt DateTime?
+  prunedJson String @default("[]")
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+}
+
+model SourceProposal {
+  id String @id
+  ownerId String
+  itemId String
+  kind String
+  url String?
+  stagedPath String?
+  metadataJson String?
+  reason String?
+  status String @default("pending")
+  createdAt DateTime @default(now())
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  @@index([ownerId, itemId, status])
+}
+
+model YoutubeLink {
+  playlistId String @id
+  ownerId String
+  url String
+  snapshotJson String @default("[]")
+  additionsJson String @default("[]")
+  hiddenJson String @default("[]")
+  tagId String?
+  previewJson String?
+  lastCheckedAt DateTime?
+  lastAppliedAt DateTime?
+  error String?
+  version Int @default(0)
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  playlist Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  @@index([lastCheckedAt, playlistId])
+  @@unique([ownerId, url])
+}
+
+model YoutubeSyncPreference {
+  ownerId String @id
+  mode String @default("auto")
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+}
+
+model YoutubeNotice {
+  id String @id
+  ownerId String
+  playlistId String
+  payloadJson String
+  createdAt DateTime @default(now())
+  readAt DateTime?
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  playlist Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  @@index([ownerId, readAt, createdAt])
 }

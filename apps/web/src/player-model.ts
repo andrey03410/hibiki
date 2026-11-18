@@ -1,6 +1,10 @@
+import type { ItemDto, PlaylistDefinition } from "@hibiki/contracts";
+import { moveQueueItem, normalizeQueue, shuffleUpcoming, type QueueOrder } from "@hibiki/core";
+
 export interface PlayableItem {
   id: string;
   kind: "audio" | "video";
+  preferredSourceId?: string;
   sources: PlaybackSource[];
 }
 export interface PlaybackSource {
@@ -11,16 +15,129 @@ export interface PlaybackSource {
   externalId?: string | null;
   url?: string | null;
 }
-export interface PlaybackSettings {
-  queue: string[];
-  queueIndex: number;
+export interface PlaybackSettings extends QueueOrder {
   position: number;
   volume: number;
   repeat: "off" | "all" | "one";
   shuffle: boolean;
+  queuePlaylistIds?: Record<string, string>;
   originalQueue?: string[];
 }
+
+export type PlaybackTrigger = "manual" | "advance" | "repeat";
+export type PlaybackFinish = "ended" | "manual" | "error" | "interrupted";
+export type PlaybackReading = [position: number, duration?: number, playbackRate?: number];
+
+export function nativePlaybackReading(
+  media: Pick<HTMLMediaElement, "currentTime" | "duration" | "playbackRate">,
+  position = media.currentTime,
+): PlaybackReading {
+  return [position, media.duration, media.playbackRate];
+}
+
+export function nativeRestartHasProgress(
+  media: Pick<HTMLMediaElement, "paused" | "ended" | "seeking" | "currentTime">,
+  seekPosition: number,
+): boolean {
+  return !media.paused && !media.ended && !media.seeking && media.currentTime > seekPosition;
+}
+
+type YoutubePosition = { videoId: string; startSeconds: number };
+
+export function createYoutubeRestartConfirmation(positionBeforeSeek: number, target: number) {
+  let previous = positionBeforeSeek;
+  let verified = previous === target ? target : undefined;
+  return (position: number, playbackRate = 1) => {
+    // The first 500 ms poll can land just after the target.
+    const maxSampleTravel = 0.75 * Math.max(1, playbackRate);
+    if (verified !== undefined && position > verified && position - verified <= maxSampleTravel)
+      return true;
+    if (position === target || (previous - position >= 0.1 && position > target && position - target <= maxSampleTravel))
+      verified = position;
+    else if (position !== verified)
+      verified = undefined;
+    previous = position;
+    return false;
+  };
+}
+
+export function prepareYoutubePlayback(
+  player: {
+    cueVideoById(input: YoutubePosition): void;
+    loadVideoById(input: YoutubePosition): void;
+    playVideo(): void;
+  },
+  videoId: string,
+  startSeconds: number,
+  playing: boolean,
+) {
+  if (!playing) player.cueVideoById({ videoId, startSeconds });
+  else if (startSeconds > 0) player.loadVideoById({ videoId, startSeconds });
+  else player.playVideo();
+}
+
+export function youtubePlaybackReading(
+  player: {
+    getCurrentTime?(): number;
+    getDuration?(): number;
+    getPlaybackRate?(): number;
+  },
+  position = player.getCurrentTime?.() ?? 0,
+): PlaybackReading {
+  return [position, player.getDuration?.(), player.getPlaybackRate?.()];
+}
+
+interface ListeningAttempt {
+  select(item: ItemDto | null, playlistId?: string, trigger?: PlaybackTrigger): void;
+  playing(...reading: PlaybackReading): void;
+  progress(...reading: PlaybackReading): void;
+  paused(): void;
+  seek(position: number): void;
+  finish(reason: PlaybackFinish): void;
+}
+
+export function createPlaybackAttempt(history: ListeningAttempt) {
+  let selected: { item: ItemDto; playlistId?: string; trigger?: PlaybackTrigger } | undefined;
+  let started = false;
+  let running = false;
+  const attempt: ListeningAttempt = {
+    select(item, playlistId, trigger) {
+      selected = item ? { item, playlistId, trigger } : undefined;
+      started = running = false;
+      history.select(item, playlistId, trigger);
+    },
+    playing(...reading) {
+      if (!selected || running) return;
+      started = running = true;
+      history.playing(...reading);
+    },
+    progress(...reading) {
+      if (running) history.progress(...reading);
+    },
+    paused() {
+      if (!running) return;
+      running = false;
+      history.paused();
+    },
+    seek(position) {
+      if (selected) history.seek(position);
+    },
+    finish(reason) {
+      if (started) history.finish(reason);
+      selected = undefined;
+      started = running = false;
+    },
+  };
+  return {
+    ...attempt,
+    updatePlaylistId(itemId: string, playlistId?: string) {
+      if (selected?.item.id === itemId && !started && selected.playlistId !== playlistId)
+        attempt.select(selected.item, playlistId, selected.trigger);
+    },
+  };
+}
 export function playbackSources<T extends PlaybackSource>(item: {
+  preferredSourceId?: string;
   sources: T[];
 }): T[] {
   return item.sources
@@ -30,24 +147,93 @@ export function playbackSources<T extends PlaybackSource>(item: {
         (s.provider === "local" ? !!s.streamUrl : !!s.externalId || !!s.url),
     )
     .sort(
-      (a, b) => Number(b.provider === "local") - Number(a.provider === "local"),
+      (a, b) =>
+        Number(b.id === item.preferredSourceId) - Number(a.id === item.preferredSourceId) ||
+        Number(b.provider === "local") - Number(a.provider === "local"),
     );
 }
+
+export function playbackSourceForAttempt<T extends PlaybackSource>(
+  item: { preferredSourceId?: string; sources: T[] },
+  failed: ReadonlySet<string>,
+  active?: { sourceId: string; preferredSourceId?: string },
+): T | undefined {
+  const sources = playbackSources(item).filter((source) => !failed.has(source.id));
+  if (active && active.preferredSourceId !== item.preferredSourceId) {
+    const retained = sources.find((source) => source.id === active.sourceId);
+    if (retained) return retained;
+  }
+  return sources[0];
+}
+
+export function startPlaybackQueue(
+  items: { id: string }[],
+  index: number,
+  shuffled: boolean,
+  playlistId?: string,
+): QueueOrder & Pick<PlaybackSettings, "position" | "queuePlaylistIds"> {
+  let order = normalizeQueue(items.map((item) => item.id), index);
+  if (shuffled && order.queue.length) {
+    const selected = order.queue[order.queueIndex]!;
+    order = shuffleUpcoming({
+      queue: [selected, ...order.queue.filter((id) => id !== selected)],
+      queueIndex: 0,
+    });
+  }
+  return {
+    ...order,
+    position: 0,
+    queuePlaylistIds: playlistId
+      ? Object.fromEntries(order.queue.map((id) => [id, playlistId]))
+      : {},
+  };
+}
+
+export function addToPlaybackQueue(
+  state: PlaybackSettings,
+  id: string,
+  placement: "next" | "last",
+  playlistId?: string,
+): PlaybackSettings {
+  if (state.queue[state.queueIndex] === id) return state;
+  const order = moveQueueItem(state, id, placement);
+  const queuePlaylistIds = { ...state.queuePlaylistIds };
+  if (playlistId) queuePlaylistIds[id] = playlistId;
+  else delete queuePlaylistIds[id];
+  return { ...state, queue: order.queue, queueIndex: order.queueIndex, queuePlaylistIds };
+}
+
+export function togglePlaybackShuffle(state: PlaybackSettings): PlaybackSettings {
+  const order = state.shuffle ? state : shuffleUpcoming(state);
+  return { ...state, ...order, shuffle: !state.shuffle };
+}
+
+export function queuePlaylistInput(
+  title: string,
+  ids: string[],
+): { title: string; definition: PlaylistDefinition } {
+  return {
+    title: title.trim(),
+    definition: { version: 1, rule: { type: "items", ids: [...ids] }, sort: "source" },
+  };
+}
+
 export function restorePlayback(
   settings: Partial<PlaybackSettings>,
   items: PlayableItem[],
 ): PlaybackSettings {
   const oldQueue = Array.isArray(settings.queue)
-    ? settings.queue.filter((id) => typeof id === "string")
+    ? settings.queue
     : [];
   const currentId = oldQueue[settings.queueIndex ?? 0];
   const valid = new Set(items.map((i) => i.id));
   const queue = [...new Set(oldQueue.filter((id) => valid.has(id)))];
+  const inQueue = new Set(queue);
   const retained = queue.indexOf(currentId ?? "");
   return {
     queue,
     queueIndex: Math.max(0, retained),
-    position: retained >= 0 ? Math.max(0, Number(settings.position) || 0) : 0,
+    position: retained >= 0 && Number.isFinite(settings.position) ? Math.max(0, settings.position!) : 0,
     volume: Math.min(
       1,
       Math.max(0, Number.isFinite(settings.volume) ? settings.volume! : 0.8),
@@ -57,8 +243,48 @@ export function restorePlayback(
         ? settings.repeat
         : "off",
     shuffle: !!settings.shuffle,
-    originalQueue: settings.originalQueue?.filter((id) => valid.has(id)),
+    originalQueue: Array.isArray(settings.originalQueue)
+      ? settings.originalQueue.filter((id) => valid.has(id))
+      : undefined,
+    queuePlaylistIds: Object.fromEntries(
+      Object.entries(settings.queuePlaylistIds ?? {}).filter(
+        ([id, playlistId]) => inQueue.has(id) && typeof playlistId === "string" && !!playlistId,
+      ),
+    ),
   };
+}
+
+export function playbackSettingsSignature(settings: PlaybackSettings): string {
+  const { queue, queueIndex, position, volume, repeat, shuffle, queuePlaylistIds } = settings;
+  return JSON.stringify([
+    queue, queueIndex, position, volume, repeat, shuffle,
+    Object.entries(queuePlaylistIds ?? {}).sort(),
+  ]);
+}
+
+export function reconcileQueuePlaylistIds(
+  current: PlaybackSettings["queuePlaylistIds"],
+  submitted: PlaybackSettings["queuePlaylistIds"],
+  saved: PlaybackSettings["queuePlaylistIds"],
+): PlaybackSettings["queuePlaylistIds"] {
+  if (!current || !submitted || !saved) return current;
+  const retained = Object.entries(current).filter(([itemId, playlistId]) =>
+    submitted[itemId] !== playlistId || saved[itemId] === playlistId,
+  );
+  return retained.length === Object.keys(current).length ? current : Object.fromEntries(retained);
+}
+
+export function restoreCachedPlayback(
+  initial: Partial<PlaybackSettings> | undefined,
+  cached: (Partial<PlaybackSettings> & { serverSignature?: string }) | null,
+  items: PlayableItem[],
+): PlaybackSettings {
+  // When the server still has the last known settings, keep edits made after that save.
+  const server = restorePlayback(initial ?? {}, items);
+  return cached && (!Array.isArray(initial?.queue) ||
+    cached.serverSignature === playbackSettingsSignature(server))
+    ? restorePlayback(cached, items)
+    : server;
 }
 export function nextPlayableIndex(
   queue: string[],
@@ -88,6 +314,24 @@ export function firstPlayableIndex(
   return item && playbackSources(item).length
     ? selected
     : nextPlayableIndex(queue, selected, items, 1, true);
+}
+
+export function recoverDeletedQueueEntry(
+  state: PlaybackSettings,
+  items: PlayableItem[],
+  failed: ReadonlySet<string> = new Set(),
+): PlaybackSettings {
+  const restored = restorePlayback(state, items);
+  if (!restored.queue.length) return restored;
+  const playable = items.filter((item) => !failed.has(item.id));
+  const next = nextPlayableIndex(state.queue, state.queueIndex, playable, 1, false);
+  const neighbor = next >= 0
+    ? next
+    : nextPlayableIndex(state.queue, state.queueIndex, playable, -1, false);
+  const queueIndex = neighbor >= 0
+    ? restored.queue.indexOf(state.queue[neighbor]!)
+    : Math.min(restored.queue.length - 1, state.queueIndex);
+  return { ...restored, queueIndex };
 }
 
 interface SourceIdentity {

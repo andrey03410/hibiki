@@ -39,6 +39,7 @@ React 19 + Vite + React Router · Zod 4 · MCP Streamable HTTP · yt-dlp · FFmp
 | Архитектура и границы модулей | [architecture](.ai/map/architecture.md) |
 | Медиатека, теги, файлы и источники | [media](.ai/map/media.md) |
 | Правила и вычисление плейлистов | [playlists](.ai/map/playlists.md) |
+| История прослушивания и очистка | [history](.ai/map/history.md) |
 | YouTube и скачивание | [youtube](.ai/map/youtube.md) |
 | Фоновые задания | [jobs](.ai/map/jobs.md) |
 | Сайт и плеер | [web](.ai/map/web.md) |

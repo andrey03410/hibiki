@@ -4,12 +4,50 @@ import {
   type ItemDto,
   type LibraryDto,
   type PlaylistDefinition,
+  type PlaylistDto,
   type ResolvedPlaylist,
   type Rule,
 } from "@hibiki/contracts";
 
-export type PlaylistLibrary = Pick<LibraryDto, "items" | "tags" | "playlists">;
+export interface PlaylistHistory {
+  launches: number;
+  completed: number;
+  skipped: number;
+  lastStartedAt: Date | null;
+}
+export type PlaylistLibrary = Pick<LibraryDto, "items" | "tags" | "playlists"> & {
+  history?: ReadonlyMap<string, PlaylistHistory>;
+  now?: Date;
+};
 export const PLAYLIST_LIMITS = { depth: 40, expandedNodes: 10_000 } as const;
+
+export function usesPrivateHistory(
+  definition: PlaylistDefinition,
+  playlists?: ReadonlyMap<string, Pick<PlaylistDto, "definition">>,
+  visited = new Set<string>(),
+): boolean {
+  const usesHistory = (rule: Rule): boolean => {
+    switch (rule.type) {
+      case "history":
+        return true;
+      case "playlist": {
+        if (visited.has(rule.id)) return false;
+        const target = playlists?.get(rule.id);
+        if (!target) return false;
+        visited.add(rule.id);
+        return usesPrivateHistory(target.definition, playlists, visited);
+      }
+      case "union":
+      case "intersection":
+        return rule.rules.some(usesHistory);
+      case "difference":
+        return usesHistory(rule.include) || usesHistory(rule.exclude);
+      default:
+        return false;
+    }
+  };
+  return definition.sort === "last-started" || usesHistory(definition.rule);
+}
 
 export function collectReferences(input: Rule): {
   itemIds: string[];
@@ -160,6 +198,7 @@ function sortSelection(
   selected: Reasons,
   definition: PlaylistDefinition,
   items: Map<string, ItemDto>,
+  history: PlaylistLibrary["history"],
 ): Reasons {
   const ids = [...selected.keys()];
   const manualPositions = new Map<string, number>();
@@ -178,6 +217,11 @@ function sortSelection(
         return right.createdAt.localeCompare(left.createdAt);
       case "duration":
         return (left.duration ?? Infinity) - (right.duration ?? Infinity) || 0;
+      case "last-started":
+        return (
+          (history?.get(a)?.lastStartedAt?.getTime() ?? Infinity) -
+          (history?.get(b)?.lastStartedAt?.getTime() ?? Infinity) || 0
+        );
       case "source":
         return (
           (manualPositions.get(a) ?? Infinity) -
@@ -200,9 +244,11 @@ export function resolvePlaylist(
   const playlists = new Map(
     library.playlists.map((playlist) => [playlist.id, playlist]),
   );
+  const now = library.now?.getTime() ?? Date.now();
+  const privatePlaylists = new Map<string, boolean>();
   const evaluateDefinition = (input: PlaylistDefinition): Evaluation => {
     const result = evaluate(input.rule);
-    result.selected = sortSelection(result.selected, input, items);
+    result.selected = sortSelection(result.selected, input, items, library.history);
     return result;
   };
   const evaluate = (rule: Rule): Evaluation => {
@@ -218,6 +264,31 @@ export function resolvePlaylist(
         for (const item of items.values()) {
           if (item.tags.some((entry) => entry.id === rule.id))
             addReasons(result.selected, item.id, [`Тег «${tag.name}»`]);
+        }
+        break;
+      }
+      case "favorite":
+        for (const item of items.values())
+          if (item.favorite) addReasons(result.selected, item.id, ["В избранном"]);
+        break;
+      case "history": {
+        const explanation = {
+          "never-started": "Ещё не слушал",
+          "never-completed": "Ни разу не дослушал",
+          "skipped-at-least": `Быстрых пропусков не меньше ${rule.count}`,
+          "last-started-before": `Последний запуск более ${rule.days} дней назад`,
+        }[rule.condition];
+        for (const item of items.values()) {
+          const summary = library.history?.get(item.id);
+          const matches = rule.condition === "never-started"
+            ? !summary?.launches
+            : rule.condition === "never-completed"
+              ? !summary?.completed
+              : rule.condition === "skipped-at-least"
+                ? (summary?.skipped ?? 0) >= rule.count!
+                : summary?.lastStartedAt != null &&
+                  summary.lastStartedAt.getTime() < now - rule.days! * 86_400_000;
+          if (matches) addReasons(result.selected, item.id, [explanation]);
         }
         break;
       }
@@ -272,11 +343,17 @@ export function resolvePlaylist(
             ...reasons,
             `Плейлист «${playlist.title}»`,
           ]);
-        for (const [id, reasons] of nested.excluded)
-          addReasons(result.excluded, id, [
-            ...reasons,
-            `Исключено в плейлисте «${playlist.title}»`,
-          ]);
+        let privateComposition = privatePlaylists.get(rule.id);
+        if (privateComposition === undefined) {
+          privateComposition = usesPrivateHistory(playlist.definition, playlists);
+          privatePlaylists.set(rule.id, privateComposition);
+        }
+        if (!privateComposition)
+          for (const [id, reasons] of nested.excluded)
+            addReasons(result.excluded, id, [
+              ...reasons,
+              `Исключено в плейлисте «${playlist.title}»`,
+            ]);
         break;
       }
       case "union":

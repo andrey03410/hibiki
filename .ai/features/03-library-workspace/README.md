@@ -22,7 +22,7 @@ autonomous: true
 - [x] Продукт — [решения P01–P09](product.md), принят владельцем.
 - [x] Техника — [tech.md](tech.md).
 - [x] План — [plan.md](plan.md).
-- [ ] Реализация и QG.
+- [x] Реализация и QG — [verify.md](verify.md).
 - [ ] Проверка владельцем.
 - [ ] Влито.
 

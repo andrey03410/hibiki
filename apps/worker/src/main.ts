@@ -3,6 +3,7 @@ import { setTimeout } from "node:timers/promises";
 import { createDb } from "../../server/src/db.js";
 import { LibraryService } from "../../server/src/library.js";
 import { JobsService } from "../../server/src/jobs.js";
+import { YoutubeSyncService } from "../../server/src/youtube-sync.js";
 import {
   youtubeDiagnostics,
   updateYoutubeTool,
@@ -22,6 +23,7 @@ if (process.argv.includes("--diagnostics")) {
     storageRoot,
   );
   const abort = new AbortController();
+  const youtubeSync = new YoutubeSyncService(db);
   let stopping = false;
   const stop = () => {
     stopping = true;
@@ -31,6 +33,22 @@ if (process.argv.includes("--diagnostics")) {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   console.log("Hibiki worker готов");
+  const syncChecks = (async () => {
+    while (!abort.signal.aborted) {
+      try {
+        if (await youtubeSync.runDue(abort.signal)) continue;
+      } catch (error) {
+        if (abort.signal.aborted) break;
+        console.error(
+          "Ошибка синхронизации YouTube:",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+      await setTimeout(60_000, undefined, { signal: abort.signal }).catch(
+        () => {},
+      );
+    }
+  })();
   try {
     while (!stopping) {
       try {
@@ -48,7 +66,8 @@ if (process.argv.includes("--diagnostics")) {
       }
     }
   } finally {
-    await jobs.stop();
+    abort.abort();
+    await Promise.all([jobs.stop(), syncChecks]);
     await db.$disconnect();
   }
 }
