@@ -2,7 +2,7 @@
 id: '03'
 title: Личная медиатека, очередь и история прослушивания
 track: product
-stage: tech
+stage: plan
 branch: codex/03-library-workspace
 pr:
 started: 2026-11-18
@@ -20,7 +20,7 @@ autonomous: true
 
 - [x] Бриф — [brief.md](brief.md).
 - [x] Продукт — [решения P01–P09](product.md), принят владельцем.
-- [ ] Техника.
+- [x] Техника — [tech.md](tech.md).
 - [ ] План.
 - [ ] Реализация и QG.
 - [ ] Проверка владельцем.
