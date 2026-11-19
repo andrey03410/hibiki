@@ -2,10 +2,11 @@
 id: '06'
 title: Навигация по медиатеке и управление очередью
 track: product
-stage: review
+stage: merged
 branch: codex/06-library-navigation
 pr: https://github.com/andrey03410/hibiki/pull/6
 started: 2026-11-19
+merged: 2026-11-19
 autonomous: true
 ---
 
@@ -22,4 +23,4 @@ autonomous: true
 - [x] [Реализация и QG](verify.md).
 - [x] Живая приёмка во встроенном браузере и независимое ревью.
 - [x] [PR #6](https://github.com/andrey03410/hibiki/pull/6) открыт.
-- [ ] Вливание
+- [x] Вливание — [PR #6](https://github.com/andrey03410/hibiki/pull/6) после CI.
