@@ -2,7 +2,7 @@
 id: '05'
 title: Перемотка и очередь в мини-плеере
 track: product
-stage: plan
+stage: build
 branch: codex/05-compact-player-controls
 pr:
 started: 2026-11-19
@@ -18,7 +18,7 @@ autonomous: true
 - [x] [Бриф](brief.md).
 - [x] [Продукт](product.md).
 - [x] [Техника](tech.md).
-- [ ] План
+- [x] [План](plan.md).
 - [ ] Реализация и QG
 - [ ] Приёмка
 - [ ] Вливание
