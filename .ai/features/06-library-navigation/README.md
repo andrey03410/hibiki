@@ -2,7 +2,7 @@
 id: '06'
 title: Навигация по медиатеке и управление очередью
 track: product
-stage: tech
+stage: plan
 branch: codex/06-library-navigation
 pr:
 started: 2026-11-19
@@ -17,7 +17,7 @@ autonomous: true
 
 - [x] [Бриф](brief.md).
 - [x] [Продукт](product.md).
-- [ ] Техника
+- [x] [Техника](tech.md).
 - [ ] План
 - [ ] Реализация и QG
 - [ ] Приёмка
