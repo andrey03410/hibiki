@@ -6,6 +6,7 @@
 | 2026-11-17 | [01. Первая итерация Hibiki](features/01-mvp/README.md): медиатека, mixed player, правила плейлистов, MCP, worker и перенос | [PR #1](https://github.com/andrey03410/hibiki/pull/1); автономно, 90 тестов и живые проверки |
 | 2026-11-17 | [02. YouTube-плейлисты и большой плеер](features/02-watch-playlists/README.md): 136 OP + 73 ED ссылочно, 3 Key OST, watch layout, audio artwork, fullscreen с idle 3 с | [PR #2](https://github.com/andrey03410/hibiki/pull/2); автономно, 112 тестов, Node 22 CI и живой браузер/MCP |
 | 2026-11-18 | [03. Личная медиатека, очередь и история](features/03-library-workspace/README.md): редактирование очереди, бессрочная история и правила, замена источников, связанный YouTube, поиск и заметки | [PR #3](https://github.com/andrey03410/hibiki/pull/3); автономно, 230 тестов, живой браузер/YouTube/MCP, повторное ревью |
+| 2026-11-19 | [04. Медиатека и режимы воспроизведения](features/04-library-playback-modes/README.md): отдельный плеер, звуковой режим, очередь из выдачи, быстрые фильтры и карточки со значками источников | [PR #4](https://github.com/andrey03410/hibiki/pull/4); автономно, 248 тестов, встроенный браузер и независимое ревью |
 
 Первая продуктовая задача — [01-mvp](features/01-mvp/README.md).
 Начальная основа была создана без кода. Полная первая итерация выполнена после

@@ -2,10 +2,11 @@
 id: '04'
 title: Медиатека и режимы воспроизведения
 track: product
-stage: review
+stage: merged
 branch: codex/04-library-playback-modes
 pr: https://github.com/andrey03410/hibiki/pull/4
 started: 2026-11-19
+merged: 2026-11-19
 autonomous: true
 ---
 
@@ -23,6 +24,6 @@ autonomous: true
 - [x] Реализация и QG — [verify.md](verify.md).
 - [x] [PR #4](https://github.com/andrey03410/hibiki/pull/4) открыт.
 - [x] Проверка — автономная приёмка во встроенном браузере и независимое ревью.
-- [ ] Влито
+- [x] Вливание — [PR #4](https://github.com/andrey03410/hibiki/pull/4) после CI.
 
 > Продукт ок. Если очередь доходит до видео в медиатеке, остаёмся в ней и ждём нажатия «Смотреть». Переходи в полной автономной реализации и обязательно проверь вживую что все красиво и удобно. Проверяй в своем встроенном бразуре. Действуй автономно вплоть до влития в main
