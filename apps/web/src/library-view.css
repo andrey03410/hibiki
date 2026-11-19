@@ -111,6 +111,44 @@
   cursor: default;
 }
 
+.library-playback-action {
+  position: relative;
+  display: inline-flex;
+}
+
+.library-item-play.library-item-play-icon {
+  width: 33px;
+  min-height: 33px;
+  border-color: transparent;
+  background: transparent;
+  color: #cbb8dc;
+}
+
+.library-item-play.library-item-play-icon[aria-disabled="true"] {
+  color: #8d8197;
+}
+
+.library-playback-tooltip {
+  visibility: hidden;
+  position: absolute;
+  z-index: 30;
+  left: 0;
+  bottom: calc(100% + 5px);
+  width: max-content;
+  max-width: 165px;
+  padding: 5px 8px;
+  border: 1px solid #4b3f55;
+  border-radius: 6px;
+  background: #242029;
+  color: #e0d4f4;
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.library-playback-action:is(:hover, :focus-within) .library-playback-tooltip {
+  visibility: visible;
+}
+
 .library-sound-reason {
   visibility: hidden;
   position: absolute;

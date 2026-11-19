@@ -70,6 +70,7 @@ import type {
 } from "@hibiki/contracts";
 import { api, formatDuration, humanDuration, mediaWord } from "./api.ts";
 import { PlayerProvider, usePlayer } from "./player.tsx";
+import { LibraryPlaybackButton } from "./PlaybackControls";
 import { playbackSources, soundUnavailableReason } from "./player-model.ts";
 import { librarySourceBadges, matchesSearch, searchLibrary, selectLibraryResults, sourceAvailability, type LibraryView } from "./library-search.ts";
 import { LibrarySearchControls, useLibrarySearch } from "./LibrarySearchControls.tsx";
@@ -933,6 +934,8 @@ function ItemTable({
 
     const soundReason = inLibrary && item.kind === "video" ? soundUnavailableReason(item) : undefined;
     const soundReasonId = `library-sound-reason-${encodeURIComponent(item.id)}`;
+    const play = () => player.start(items, index, undefined, { fromLibrary: true });
+    const listen = () => player.start(items, index, undefined, { fromLibrary: true, mode: "audio" });
     const playActions = inLibrary && (
       <div className="library-item-playback">
         <button
@@ -941,7 +944,7 @@ function ItemTable({
           aria-label={`${playLabel} ${item.title}`}
           disabled={!available}
           title={available ? undefined : "Нет рабочего источника"}
-          onClick={() => player.start(items, index, undefined, { fromLibrary: true })}
+          onClick={play}
         >
           <Play size={13} fill="currentColor" /> {playLabel}
         </button>
@@ -958,7 +961,7 @@ function ItemTable({
                   notify(soundReason, true);
                   return;
                 }
-                player.start(items, index, undefined, { fromLibrary: true, mode: "audio" });
+                listen();
               }}
             >
               <Headphones size={14} /> Слушать
@@ -1086,7 +1089,13 @@ function ItemTable({
             </div>
           </div>
           <div className="library-card-footer">
-            {playActions}
+            <div className="library-item-playback">
+              <LibraryPlaybackButton action={item.kind === "video" ? "watch" : "play"} itemTitle={item.title}
+                unavailableReason={available ? undefined : "Нет рабочего источника"} onActivate={play} />
+              {item.kind === "video" && (
+                <LibraryPlaybackButton action="listen" itemTitle={item.title} unavailableReason={soundReason} onActivate={listen} />
+              )}
+            </div>
             <div className="library-card-tools">{favorite}{menu}</div>
           </div>
         </article>
