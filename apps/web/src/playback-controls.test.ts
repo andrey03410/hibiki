@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
-import { CompactPlaybackQueue, LibraryPlaybackButton, PlaybackSeekBar } from "./PlaybackControls";
+import { CompactPlaybackQueue, CompactPlaybackQueueRow, PlaybackSeekBar } from "./PlaybackControls";
 
 it("renders a labeled seek control with shared playback time", () => {
   const handlers = { onSeek: vi.fn(), onScrubStart: vi.fn(), onScrubEnd: vi.fn() };
@@ -26,18 +26,25 @@ it("renders the compact queue trigger as a collapsed button on the current page"
     settings: { queue: ["a"], queueIndex: 0, mode: "original" },
     itemsById: new Map(),
     failedIds: new Set<string>(),
+    onSelect: vi.fn(),
   }));
   expect(html).toMatch(/<button[^>]*aria-label="Очередь воспроизведения"[^>]*aria-expanded="false"/);
   expect(html).not.toContain('href="/player"');
 });
 
-it("keeps an icon-only library action named and describes an unavailable source", () => {
-  const html = renderToStaticMarkup(createElement(LibraryPlaybackButton, {
-    action: "listen", itemTitle: "Опенинг",
-    unavailableReason: "Для прослушивания нужна локальная копия", onActivate: vi.fn(),
+it("exposes the current compact queue entry as a native button", () => {
+  const html = renderToStaticMarkup(createElement(CompactPlaybackQueueRow, {
+    title: "Опенинг", kind: "video", duration: 90, current: true, onSelect: vi.fn(),
   }));
-  expect(html).toMatch(/<button[^>]*aria-label="Слушать Опенинг"[^>]*aria-disabled="true"[^>]*aria-describedby/);
-  expect(html).toContain('role="tooltip"');
-  expect(html).toContain("Для прослушивания нужна локальная копия");
-  expect(html.slice(0, html.indexOf("</button>"))).not.toContain(">Слушать<");
+  expect(html).toMatch(/<li><button[^>]*type="button"[^>]*aria-current="true"/);
+  expect(html).toContain("Опенинг");
+  expect(html).not.toContain("aria-disabled");
+});
+
+it("explains why a compact queue entry cannot be selected", () => {
+  const html = renderToStaticMarkup(createElement(CompactPlaybackQueueRow, {
+    title: "Опенинг", kind: "video", current: false, onSelect: vi.fn(),
+    unavailableReason: "В видео нет звуковой дорожки",
+  }));
+  expect(html).toMatch(/<button[^>]*aria-disabled="true"[^>]*aria-describedby="([^"]+)"[\s\S]*<small id="\1">В видео нет звуковой дорожки/);
 });

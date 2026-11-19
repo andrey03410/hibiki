@@ -176,6 +176,12 @@ export function soundUnavailableReason(item: PlayableItem): string | undefined {
   return "Источник звука недоступен";
 }
 
+export function queueEntryUnavailableReason(item: PlayableItem | undefined, mode: PlaybackMode): string | undefined {
+  if (!item) return "Нет в медиатеке";
+  if (mode === "audio") return soundUnavailableReason(item);
+  if (!playbackSources(item).length) return "Источник недоступен";
+}
+
 export function playbackSourceForAttempt<T extends PlaybackSource>(
   item: { kind: "audio" | "video"; preferredSourceId?: string; sources: T[] },
   failed: ReadonlySet<string>,
@@ -188,6 +194,15 @@ export function playbackSourceForAttempt<T extends PlaybackSource>(
     if (retained) return retained;
   }
   return sources[0];
+}
+
+export function itemActivation(
+  { queue, queueIndex, mode }: Pick<PlaybackSettings, "queue" | "queueIndex" | "mode">,
+  itemId: string,
+  requestedMode = mode,
+): "start" | "toggle" | "changeMode" {
+  if (queue[queueIndex] !== itemId) return "start";
+  return requestedMode === mode ? "toggle" : "changeMode";
 }
 
 export function startPlaybackQueue(
