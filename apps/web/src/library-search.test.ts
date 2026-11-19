@@ -1,6 +1,17 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { ItemDto, SourceDto } from "@hibiki/contracts";
-import { defaultLibrarySearch, matchesSearch, searchLibrary } from "./library-search";
+import { LibrarySearchControls } from "./LibrarySearchControls";
+import {
+  defaultLibrarySearch,
+  libraryFilterConditions,
+  librarySourceBadges,
+  matchesSearch,
+  resetLibraryFilters,
+  searchLibrary,
+  selectLibraryResults,
+} from "./library-search";
 
 const tag = { id: "tag", name: "Саундтрек", color: "#b8a5ff" };
 const extra = { id: "extra", name: "Аниме", color: "#b8a5ff" };
@@ -17,6 +28,26 @@ function item(id: string, change: Partial<ItemDto> = {}): ItemDto {
 }
 
 describe("library search", () => {
+  it("shows YouTube and a working local audio copy as separate card sources", () => {
+    const entry = item("mixed", { sources: [remote, { ...local, mime: "audio/mp4" }] });
+    expect(librarySourceBadges(entry)).toEqual([
+      { provider: "youtube", status: "available", label: "YouTube" },
+      { provider: "local", status: "available", label: "Аудиокопия на устройстве" },
+    ]);
+  });
+
+  it("distinguishes sources awaiting a check, missing local copies, and records without a source", () => {
+    const entry = item("unknown", { sources: [
+      { ...remote, status: "unknown" }, { ...local, streamUrl: undefined, status: "unavailable" },
+    ] });
+    expect(librarySourceBadges(entry)).toEqual([
+      { provider: "youtube", status: "unknown", label: "YouTube · доступность не проверена" },
+      { provider: "local", status: "unavailable", label: "Локальная копия недоступна" },
+    ]);
+    expect(librarySourceBadges(item("none", { sources: [] }))).toEqual([
+      { provider: "none", status: "unavailable", label: "Нет источника" },
+    ]);
+  });
   it("intersects text, selected tags, kind, duration, inclusive date bounds, provider, availability and favorite", () => {
     const items = [
       item("match"), item("other-kind", { kind: "audio" }),
@@ -83,5 +114,66 @@ describe("library search", () => {
   it("matches the same normalized terms on tag and playlist screens", () => {
     expect(matchesSearch("  НОЧЬ город ", "Прогулки: город", "Слушать ночью")).toBe(true);
     expect(matchesSearch("ночь город", "Прогулки: город")).toBe(false);
+  });
+
+  it("removes just the requested active condition and counts advanced filters separately", () => {
+    const search = {
+      ...defaultLibrarySearch, kind: "video", tagIds: [tag.id, extra.id],
+      provider: "youtube", minDuration: "0", maxDuration: "-1",
+    } satisfies typeof defaultLibrarySearch;
+    const conditions = libraryFilterConditions(search, [tag, extra]);
+
+    expect(conditions.filter(({ advanced }) => advanced).map(({ key }) => key))
+      .toEqual(["provider", "minDuration"]);
+    const updated = conditions.find(({ key }) => key === "provider")!.clear(search);
+    const items = [item("youtube"), item("local", { sources: [local] }),
+      item("audio", { kind: "audio" }), item("partial", { tags: [extra] })];
+    expect(searchLibrary(items, updated).map(({ id }) => id)).toEqual(["local", "youtube"]);
+    expect(conditions.find(({ key }) => key === `tag:${tag.id}`)!.clear(updated).tagIds).toEqual([extra.id]);
+  });
+
+  it("resets filters while keeping the query and selected sort", () => {
+    const cleared = resetLibraryFilters({
+      ...defaultLibrarySearch,
+      query: "  opening ", kind: "audio", tagIds: [tag.id], favoriteOnly: true,
+      provider: "local", availability: "available", minDuration: "30", addedFrom: "2026-11-18",
+      sort: "title-desc",
+    });
+    expect(cleared).toEqual({ ...defaultLibrarySearch, query: "  opening ", sort: "title-desc" });
+    expect(searchLibrary([
+      item("a", { title: "A" }), item("b", { title: "B", favorite: false, tags: [] }),
+      item("c", { title: "C", originalTitle: "Ending" }),
+    ], cleared).map(({ id }) => id)).toEqual(["b", "a"]);
+  });
+
+  it("applies select-all to current results while keeping hidden records selected", () => {
+    const results = searchLibrary([item("b"), item("a"), item("hidden", { originalTitle: "Ending" })], {
+      ...defaultLibrarySearch, query: "opening", sort: "title-asc",
+    });
+    const selected = selectLibraryResults(["hidden", "a"], results, true);
+    expect(selected).toEqual(["hidden", "a", "b"]);
+    expect(selectLibraryResults(selected, results, false)).toEqual(["hidden"]);
+  });
+
+  it("shows quick filters and removable advanced conditions while the advanced panel is collapsed", () => {
+    const html = renderToStaticMarkup(createElement(LibrarySearchControls, {
+      value: { ...defaultLibrarySearch, kind: "video", tagIds: [tag.id], provider: "youtube" },
+      tags: [tag], count: 3, view: "cards", onViewChange: () => {}, onChange: () => {}, onPlay: () => {},
+    }));
+    expect(html).toMatch(/<button[^>]*aria-pressed="true"[^>]*>Видео<\/button>/);
+    expect(html).toContain('aria-label="Карточки" aria-pressed="true"');
+    expect(html).toMatch(/<button[^>]*aria-expanded="false"[^>]*><svg[^>]*>[^]*?<\/svg> Фильтры \(1\)<\/button>/);
+    expect(html).toContain('aria-label="Снять фильтр «YouTube»"');
+    expect(html).toContain('role="status">Найдено: 3');
+    expect(html).toContain("Сбросить фильтры");
+  });
+
+  it("offers both playback modes for a filtered collection", () => {
+    const html = renderToStaticMarkup(createElement(LibrarySearchControls, {
+      value: defaultLibrarySearch, tags: [], count: 3, view: "list",
+      onViewChange: () => {}, onChange: () => {}, onPlay: () => {},
+    }));
+    expect(html).toContain("Играть найденное");
+    expect(html).toContain("Слушать найденное");
   });
 });

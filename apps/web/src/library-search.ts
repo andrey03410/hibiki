@@ -1,4 +1,4 @@
-import type { ItemDto } from "@hibiki/contracts";
+import type { ItemDto, SourceDto, TagDto } from "@hibiki/contracts";
 import { noteFor, type NotesIndex } from "./note-model";
 
 export type LibrarySearch = {
@@ -21,6 +21,18 @@ export const defaultLibrarySearch: LibrarySearch = {
   sort: "added-desc",
 };
 
+export type LibraryView = "list" | "cards";
+
+export const libraryKinds = { "": "Все", audio: "Аудио", video: "Видео" } satisfies Record<LibrarySearch["kind"], string>;
+export const libraryProviders = {
+  "": "Любой", youtube: "YouTube", local: "Есть локальная копия",
+  "working-local": "Есть рабочая локальная копия",
+} satisfies Record<LibrarySearch["provider"], string>;
+export const libraryStatuses = {
+  "": "Любая", available: "Есть доступный источник", unknown: "Статус неизвестен",
+  unavailable: "Нет рабочего источника",
+} satisfies Record<LibrarySearch["availability"], string>;
+
 function terms(query: string) {
   return query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
 }
@@ -35,10 +47,47 @@ export function matchesSearch(query: string, ...fields: (string | undefined)[]) 
   return !words.length || includesTerms(words, fields);
 }
 
-export function sourceAvailability(item: ItemDto): Exclude<LibrarySearch["availability"], ""> {
-  if (item.sources.some((source) => source.status === "available")) return "available";
-  if (item.sources.some((source) => source.status === "unknown")) return "unknown";
+function sourceStatus(sources: SourceDto[]): SourceDto["status"] {
+  if (sources.some((source) => source.status === "available")) return "available";
+  if (sources.some((source) => source.status === "unknown")) return "unknown";
   return "unavailable";
+}
+
+function workingLocalSource(source: SourceDto): boolean {
+  return source.provider === "local" && source.status === "available" && !!source.streamUrl;
+}
+
+export function sourceAvailability(item: ItemDto): SourceDto["status"] {
+  return sourceStatus(item.sources);
+}
+
+type LibrarySourceBadge = {
+  provider: SourceDto["provider"] | "none";
+  status: SourceDto["status"];
+  label: string;
+};
+
+export function librarySourceBadges(item: Pick<ItemDto, "kind" | "sources">): LibrarySourceBadge[] {
+  const badges: LibrarySourceBadge[] = [];
+  const youtube = item.sources.filter((source) => source.provider === "youtube");
+  if (youtube.length) {
+    const status = sourceStatus(youtube);
+    const label = status === "available" ? "YouTube" : status === "unknown"
+      ? "YouTube · доступность не проверена" : "YouTube недоступен";
+    badges.push({ provider: "youtube", status, label });
+  }
+  const local = item.sources.filter((source) => source.provider === "local");
+  if (local.length) {
+    const working = local.filter(workingLocalSource);
+    const audioCopy = item.kind === "video" && working.every((source) => source.mime?.startsWith("audio/"));
+    const status = working.length ? "available"
+      : local.some((source) => source.status === "unknown") ? "unknown" : "unavailable";
+    const label = status === "available" ? audioCopy ? "Аудиокопия на устройстве" : "На устройстве"
+      : status === "unknown" ? "Локальная копия · доступность не проверена" : "Локальная копия недоступна";
+    badges.push({ provider: "local", status, label });
+  }
+  if (!badges.length) badges.push({ provider: "none", status: "unavailable", label: "Нет источника" });
+  return badges;
 }
 
 function durationBound(value: string) {
@@ -52,6 +101,50 @@ function dateBound(value: string, nextDay = false) {
   if (!Number.isFinite(+date)) return undefined;
   if (nextDay) date.setDate(date.getDate() + 1);
   return +date;
+}
+
+type LibraryFilterCondition = {
+  key: string;
+  label: string;
+  advanced: boolean;
+  clear: (search: LibrarySearch) => LibrarySearch;
+};
+
+export function libraryFilterConditions(search: LibrarySearch, tags: TagDto[]): LibraryFilterCondition[] {
+  const conditions: LibraryFilterCondition[] = [];
+  function add(field: Exclude<keyof LibrarySearch, "query" | "sort" | "tagIds">, label: string, advanced = false) {
+    conditions.push({
+      key: field, label, advanced,
+      clear: (current) => ({ ...current, [field]: defaultLibrarySearch[field] }),
+    });
+  }
+
+  if (search.kind) add("kind", libraryKinds[search.kind]);
+  if (search.favoriteOnly) add("favoriteOnly", "Избранное");
+  for (const id of search.tagIds) {
+    conditions.push({
+      key: `tag:${id}`,
+      label: tags.find((tag) => tag.id === id)?.name ?? "Удалённый тег",
+      advanced: false,
+      clear: (current) => ({ ...current, tagIds: current.tagIds.filter((tagId) => tagId !== id) }),
+    });
+  }
+  if (search.provider) add("provider", libraryProviders[search.provider], true);
+  if (search.availability) add("availability", libraryStatuses[search.availability], true);
+  if (durationBound(search.minDuration) !== undefined) add("minDuration", `Длительность от ${search.minDuration} с`, true);
+  if (durationBound(search.maxDuration) !== undefined) add("maxDuration", `Длительность до ${search.maxDuration} с`, true);
+  if (dateBound(search.addedFrom) !== undefined) add("addedFrom", `Добавлено с ${search.addedFrom}`, true);
+  if (dateBound(search.addedThrough) !== undefined) add("addedThrough", `Добавлено по ${search.addedThrough}`, true);
+  return conditions;
+}
+
+export function resetLibraryFilters({ query, sort }: LibrarySearch): LibrarySearch {
+  return { ...defaultLibrarySearch, query, sort };
+}
+
+export function selectLibraryResults(selected: string[], items: ItemDto[], checked: boolean) {
+  const ids = new Set(items.map(({ id }) => id));
+  return checked ? [...new Set([...selected, ...ids])] : selected.filter((id) => !ids.has(id));
 }
 
 const titleOrder = new Intl.Collator("ru", { sensitivity: "base", numeric: true });
@@ -77,7 +170,7 @@ export function searchLibrary(items: ItemDto[], search: LibrarySearch, notes?: N
     }
     if (search.availability && sourceAvailability(item) !== search.availability) return false;
     if (search.provider === "working-local") {
-      if (!item.sources.some((source) => source.provider === "local" && source.status === "available" && source.streamUrl)) return false;
+      if (!item.sources.some(workingLocalSource)) return false;
     } else if (search.provider && !item.sources.some((source) => source.provider === search.provider)) {
       return false;
     }

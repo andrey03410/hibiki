@@ -93,6 +93,7 @@ describe("portable library", () => {
           originalQueue: [item.id],
           queueIndex: 0,
           position: 2,
+          mode: "audio",
         }),
       },
       update: {},
@@ -118,6 +119,7 @@ describe("portable library", () => {
       where: { ownerId: ctx.otherUserId },
     });
     expect(await readFile(join(ctx.root, importedFile.path))).toEqual(wav());
+    expect(imported.items[0].sources[0].hasAudio).toBe(true);
     const settings = JSON.parse(
       (
         await ctx.db.setting.findUniqueOrThrow({
@@ -128,6 +130,7 @@ describe("portable library", () => {
     expect(settings.queue).toEqual([imported.items[0].id]);
     expect(settings.originalQueue).toEqual([imported.items[0].id]);
     expect(settings.shuffle).toBe(true);
+    expect(settings.mode).toBe("audio");
     for (const playlist of imported.playlists)
       expect(JSON.stringify(playlist.definition)).not.toContain(item.id);
     await applyArchive(ctx.db, ctx.otherUserId, ctx.root, checked);
@@ -208,7 +211,9 @@ describe("portable library", () => {
     );
     expect(checked.preview.missingFiles).toHaveLength(1);
     expect(checked.preview.canApply).toBe(true);
+    expect(checked.manifest.settings).not.toHaveProperty("mode");
     await applyArchive(ctx.db, ctx.otherUserId, ctx.root, checked);
+    expect((await ctx.library.snapshot(ctx.otherUserId)).items[0].sources[0].hasAudio).toBeUndefined();
     expect(
       (await ctx.library.snapshot(ctx.otherUserId)).items[0].sources.every(
         (s) => s.status !== "available",

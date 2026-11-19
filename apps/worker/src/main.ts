@@ -17,11 +17,8 @@ if (process.argv.includes("--diagnostics")) {
   console.log(updated.stdout);
 } else {
   const db = createDb(storageRoot);
-  const jobs = new JobsService(
-    db,
-    new LibraryService(db, storageRoot),
-    storageRoot,
-  );
+  const library = new LibraryService(db, storageRoot);
+  const jobs = new JobsService(db, library, storageRoot);
   const abort = new AbortController();
   const youtubeSync = new YoutubeSyncService(db);
   let stopping = false;
@@ -33,6 +30,13 @@ if (process.argv.includes("--diagnostics")) {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   console.log("Hibiki worker готов");
+  const audioTracks = library.backfillAudioTracks(abort.signal).catch((error: unknown) => {
+    if (abort.signal.aborted) return;
+    console.error(
+      "Ошибка проверки звуковых дорожек:",
+      error instanceof Error ? error.message : String(error),
+    );
+  });
   const syncChecks = (async () => {
     while (!abort.signal.aborted) {
       try {
@@ -67,7 +71,7 @@ if (process.argv.includes("--diagnostics")) {
     }
   } finally {
     abort.abort();
-    await Promise.all([jobs.stop(), syncChecks]);
+    await Promise.all([jobs.stop(), syncChecks, audioTracks]);
     await db.$disconnect();
   }
 }

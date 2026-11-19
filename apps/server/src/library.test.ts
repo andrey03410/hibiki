@@ -24,6 +24,7 @@ describe("personal library", () => {
     });
     const b = await ctx.library.importLocal(ctx.userId, input);
     expect(a.item.kind).toBe("audio");
+    expect(a.item.sources[0].hasAudio).toBe(true);
     expect(a.item.duration).toBeGreaterThan(0);
     expect(b.item.id).toBe(a.item.id);
     expect(b.reused).toBe(true);
@@ -52,6 +53,7 @@ describe("personal library", () => {
     expect(stored.originalTitle).toBe("Opening");
     expect(stored.tags[0].id).toBe(tag.id);
     expect(stored.sources[0].status).toBe("unavailable");
+    expect(stored.sources[0].hasAudio).toBeUndefined();
   });
   it("rejects foreign item/tag/playlist references before making changes", async () => {
     const { item } = await ctx.library.upsertYoutube(ctx.userId, {
@@ -177,8 +179,9 @@ describe("personal library", () => {
     expect(original).toMatchObject({
       status: "unavailable",
       reason: "unsupported_codec",
+      hasAudio: true,
     });
-    expect(playable).toMatchObject({ provider: "local", mime: "video/mp4" });
+    expect(playable).toMatchObject({ provider: "local", mime: "video/mp4", hasAudio: true });
     expect(playable.hash).not.toBe(originalHash);
     for (const source of video.item.sources) {
       const file = await ctx.db.mediaFile.findUniqueOrThrow({
@@ -256,6 +259,40 @@ describe("personal library", () => {
       ),
     ).toHaveLength(1);
     expect((await ctx.library.snapshot(ctx.userId)).items).toHaveLength(1);
+  });
+
+  it("fills in audio track metadata for real legacy videos and leaves missing files unknown", async () => {
+    const importVideo = async (hasAudio: boolean) => {
+      const input = join(ctx.root, hasAudio ? "with-audio.mp4" : "silent.mp4");
+      await promisify(execFile)(String(ffmpeg), [
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=blue:s=64x64:r=10:d=0.3",
+        ...(hasAudio ? ["-f", "lavfi", "-i", "sine=duration=0.3"] : []),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        ...(hasAudio ? ["-c:a", "aac", "-shortest"] : ["-an"]),
+        input,
+      ], { timeout: 10_000 });
+      return (await ctx.library.importLocal(ctx.userId, input)).item;
+    };
+    const audible = await importVideo(true);
+    const silent = await importVideo(false);
+    expect(audible.sources[0].hasAudio).toBe(true);
+    expect(silent.sources[0].hasAudio).toBe(false);
+
+    const { item: missing } = await ctx.library.importLocal(ctx.otherUserId, join(ctx.root, "with-audio.mp4"));
+    const lostFile = await ctx.db.mediaFile.findUniqueOrThrow({ where: { id: missing.sources[0].fileId } });
+    await rm(join(ctx.root, lostFile.path));
+    await ctx.db.mediaFile.updateMany({ data: { hasAudio: null } });
+    expect((await ctx.library.getItem(ctx.userId, audible.id)).sources[0].hasAudio).toBeUndefined();
+
+    await ctx.library.backfillAudioTracks();
+
+    expect((await ctx.library.getItem(ctx.userId, audible.id)).sources[0]).toMatchObject({
+      fileId: audible.sources[0].fileId, hasAudio: true,
+    });
+    expect((await ctx.library.snapshot(ctx.userId)).items.find((item) => item.id === silent.id)?.sources[0].hasAudio).toBe(false);
+    expect((await ctx.library.getItem(ctx.otherUserId, missing.id)).sources[0].hasAudio).toBeUndefined();
+    expect(await ctx.db.mediaFile.count()).toBe(3);
   });
 
   it("does not duplicate an item when the same local file is imported concurrently", async () => {
@@ -413,6 +450,14 @@ describe("personal library", () => {
         originalQueue: ["foreign", a],
       }),
     ).toMatchObject({ queueIndex: 0, position: 0, originalQueue: [a] });
+  });
+  it("validates explicit changes to playback mode while retaining partial settings writes", async () => {
+    expect(await ctx.library.getSettings(ctx.userId)).not.toHaveProperty("mode");
+    await ctx.library.setSettings(ctx.userId, { mode: "audio" });
+    await ctx.library.setSettings(ctx.userId, { volume: 0.3 });
+    await expect(ctx.library.setSettings(ctx.userId, { mode: "video" })).rejects.toThrow();
+    expect(await ctx.library.getSettings(ctx.userId)).toMatchObject({ mode: "audio", volume: 0.3 });
+    expect(await ctx.library.setSettings(ctx.userId, { mode: "original" })).toMatchObject({ mode: "original" });
   });
   it("atomically reuses the YouTube identity for concurrent imports and preserves custom titles", async () => {
     const results = await Promise.all([

@@ -16,6 +16,7 @@ export interface SourceDto {
   mime?: string;
   bytes?: number;
   hash?: string;
+  hasAudio?: boolean;
   thumbnail?: string;
   streamUrl?: string;
 }
@@ -100,6 +101,7 @@ export interface ResolvedPlaylist {
   duration: number;
 }
 export type RepeatMode = "off" | "all" | "one";
+export type PlaybackMode = z.infer<typeof playbackModeSchema>;
 export interface Settings {
   volume: number;
   repeat: RepeatMode;
@@ -107,6 +109,7 @@ export interface Settings {
   queue: string[];
   queueIndex: number;
   position?: number;
+  mode?: PlaybackMode;
   [key: string]: unknown;
 }
 
@@ -119,6 +122,7 @@ export const RULE_LIMITS = {
 const idSchema = z.string().min(1).max(256);
 export const mediaKindSchema = z.enum(["audio", "video"]);
 export const repeatModeSchema = z.enum(["off", "all", "one"]);
+export const playbackModeSchema = z.enum(["original", "audio"]);
 const durationSchema = z.number().finite().nonnegative();
 
 const recursiveRuleSchema: z.ZodType<Rule> = z.lazy(() =>
@@ -255,6 +259,7 @@ export const sourceSchema = z
     mime: z.string().optional(),
     bytes: z.number().int().nonnegative().optional(),
     hash: z.string().optional(),
+    hasAudio: z.boolean().optional(),
     thumbnail: z.string().optional(),
     streamUrl: z.string().optional(),
   })
@@ -339,5 +344,6 @@ export const settingsSchema = z
     queue: z.array(idSchema).max(100_000),
     queueIndex: z.number().int().min(-1),
     position: durationSchema.optional(),
+    mode: playbackModeSchema.optional(),
   })
   .catchall(z.unknown()) satisfies z.ZodType<Settings>;
