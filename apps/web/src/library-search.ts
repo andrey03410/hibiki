@@ -1,4 +1,4 @@
-import type { ItemDto, TagDto } from "@hibiki/contracts";
+import type { ItemDto, SourceDto, TagDto } from "@hibiki/contracts";
 import { noteFor, type NotesIndex } from "./note-model";
 
 export type LibrarySearch = {
@@ -47,10 +47,47 @@ export function matchesSearch(query: string, ...fields: (string | undefined)[]) 
   return !words.length || includesTerms(words, fields);
 }
 
-export function sourceAvailability(item: ItemDto): Exclude<LibrarySearch["availability"], ""> {
-  if (item.sources.some((source) => source.status === "available")) return "available";
-  if (item.sources.some((source) => source.status === "unknown")) return "unknown";
+function sourceStatus(sources: SourceDto[]): SourceDto["status"] {
+  if (sources.some((source) => source.status === "available")) return "available";
+  if (sources.some((source) => source.status === "unknown")) return "unknown";
   return "unavailable";
+}
+
+function workingLocalSource(source: SourceDto): boolean {
+  return source.provider === "local" && source.status === "available" && !!source.streamUrl;
+}
+
+export function sourceAvailability(item: ItemDto): SourceDto["status"] {
+  return sourceStatus(item.sources);
+}
+
+type LibrarySourceBadge = {
+  provider: SourceDto["provider"] | "none";
+  status: SourceDto["status"];
+  label: string;
+};
+
+export function librarySourceBadges(item: Pick<ItemDto, "kind" | "sources">): LibrarySourceBadge[] {
+  const badges: LibrarySourceBadge[] = [];
+  const youtube = item.sources.filter((source) => source.provider === "youtube");
+  if (youtube.length) {
+    const status = sourceStatus(youtube);
+    const label = status === "available" ? "YouTube" : status === "unknown"
+      ? "YouTube · доступность не проверена" : "YouTube недоступен";
+    badges.push({ provider: "youtube", status, label });
+  }
+  const local = item.sources.filter((source) => source.provider === "local");
+  if (local.length) {
+    const working = local.filter(workingLocalSource);
+    const audioCopy = item.kind === "video" && working.every((source) => source.mime?.startsWith("audio/"));
+    const status = working.length ? "available"
+      : local.some((source) => source.status === "unknown") ? "unknown" : "unavailable";
+    const label = status === "available" ? audioCopy ? "Аудиокопия на устройстве" : "На устройстве"
+      : status === "unknown" ? "Локальная копия · доступность не проверена" : "Локальная копия недоступна";
+    badges.push({ provider: "local", status, label });
+  }
+  if (!badges.length) badges.push({ provider: "none", status: "unavailable", label: "Нет источника" });
+  return badges;
 }
 
 function durationBound(value: string) {
@@ -133,7 +170,7 @@ export function searchLibrary(items: ItemDto[], search: LibrarySearch, notes?: N
     }
     if (search.availability && sourceAvailability(item) !== search.availability) return false;
     if (search.provider === "working-local") {
-      if (!item.sources.some((source) => source.provider === "local" && source.status === "available" && source.streamUrl)) return false;
+      if (!item.sources.some(workingLocalSource)) return false;
     } else if (search.provider && !item.sources.some((source) => source.provider === search.provider)) {
       return false;
     }

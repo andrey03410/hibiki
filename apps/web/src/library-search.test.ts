@@ -6,6 +6,7 @@ import { LibrarySearchControls } from "./LibrarySearchControls";
 import {
   defaultLibrarySearch,
   libraryFilterConditions,
+  librarySourceBadges,
   matchesSearch,
   resetLibraryFilters,
   searchLibrary,
@@ -27,6 +28,26 @@ function item(id: string, change: Partial<ItemDto> = {}): ItemDto {
 }
 
 describe("library search", () => {
+  it("shows YouTube and a working local audio copy as separate card sources", () => {
+    const entry = item("mixed", { sources: [remote, { ...local, mime: "audio/mp4" }] });
+    expect(librarySourceBadges(entry)).toEqual([
+      { provider: "youtube", status: "available", label: "YouTube" },
+      { provider: "local", status: "available", label: "Аудиокопия на устройстве" },
+    ]);
+  });
+
+  it("distinguishes sources awaiting a check, missing local copies, and records without a source", () => {
+    const entry = item("unknown", { sources: [
+      { ...remote, status: "unknown" }, { ...local, streamUrl: undefined, status: "unavailable" },
+    ] });
+    expect(librarySourceBadges(entry)).toEqual([
+      { provider: "youtube", status: "unknown", label: "YouTube · доступность не проверена" },
+      { provider: "local", status: "unavailable", label: "Локальная копия недоступна" },
+    ]);
+    expect(librarySourceBadges(item("none", { sources: [] }))).toEqual([
+      { provider: "none", status: "unavailable", label: "Нет источника" },
+    ]);
+  });
   it("intersects text, selected tags, kind, duration, inclusive date bounds, provider, availability and favorite", () => {
     const items = [
       item("match"), item("other-kind", { kind: "audio" }),

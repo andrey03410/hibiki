@@ -71,7 +71,7 @@ import type {
 import { api, formatDuration, humanDuration, mediaWord } from "./api.ts";
 import { PlayerProvider, usePlayer } from "./player.tsx";
 import { playbackSources, soundUnavailableReason } from "./player-model.ts";
-import { matchesSearch, searchLibrary, selectLibraryResults, sourceAvailability, type LibraryView } from "./library-search.ts";
+import { librarySourceBadges, matchesSearch, searchLibrary, selectLibraryResults, sourceAvailability, type LibraryView } from "./library-search.ts";
 import { LibrarySearchControls, useLibrarySearch } from "./LibrarySearchControls.tsx";
 import { NoteEditor, NoteIndicator, NotesContext, NotesLoadError, useNotes, useNotesController } from "./NoteEditor.tsx";
 import { noteFor } from "./note-model.ts";
@@ -1068,7 +1068,20 @@ function ItemTable({
             <span className={artClass} aria-hidden="true">{art}</span>
             <div className="library-card-description">
               <div className="item-name-actions">{itemTitle}</div>
-              <span className="item-subtitle">{kindLabel} · {duration}</span>
+              <div className="library-card-meta">
+                <span className="item-subtitle">{kindLabel} · {duration}</span>
+                <span className="library-card-sources" role="group" aria-label="Источники">
+                  {librarySourceBadges(item).map(({ provider, status, label }) => {
+                    const Icon = provider === "youtube" ? Youtube : provider === "local" ? HardDrive : CircleAlert;
+                    return (
+                      <span key={provider} className="library-card-source" data-provider={provider} data-status={status}
+                        role="img" aria-label={label} title={label}>
+                        <Icon size={14} aria-hidden="true" />
+                      </span>
+                    );
+                  })}
+                </span>
+              </div>
               {!available && <span className="item-subtitle">Нет рабочего источника</span>}
             </div>
           </div>

@@ -188,6 +188,42 @@
   flex: 1;
 }
 
+.library-card-meta,
+.library-card-sources {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.library-card-meta {
+  flex-wrap: wrap;
+  column-gap: 8px;
+}
+
+.library-card-source {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 18px;
+  border-radius: 4px;
+  color: #bea9c8;
+  background: #ffffff0b;
+}
+
+.library-card-source[data-provider="youtube"][data-status="available"] {
+  color: #e7a6af;
+  background: #e7a6af14;
+}
+
+.library-card-source[data-provider="local"][data-status="available"] {
+  color: #a4d6bd;
+  background: #a4d6bd14;
+}
+
+.library-card-source[data-status="unavailable"] {
+  color: #d4b18e;
+}
+
 .library-card-footer {
   justify-content: space-between;
   flex-wrap: wrap;
