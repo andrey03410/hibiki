@@ -2,10 +2,11 @@
 id: '05'
 title: Перемотка и очередь в мини-плеере
 track: product
-stage: review
+stage: merged
 branch: codex/05-compact-player-controls
 pr: https://github.com/andrey03410/hibiki/pull/5
 started: 2026-11-19
+merged: 2026-11-19
 autonomous: true
 ---
 
@@ -22,4 +23,4 @@ autonomous: true
 - [x] [Реализация и QG](verify.md).
 - [x] [PR #5](https://github.com/andrey03410/hibiki/pull/5) открыт.
 - [x] Живая приёмка во встроенном браузере и независимое ревью.
-- [ ] Вливание
+- [x] Вливание — [PR #5](https://github.com/andrey03410/hibiki/pull/5) после CI.
