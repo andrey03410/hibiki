@@ -2,7 +2,7 @@
 id: '06'
 title: Навигация по медиатеке и управление очередью
 track: product
-stage: product
+stage: tech
 branch: codex/06-library-navigation
 pr:
 started: 2026-11-19
@@ -16,7 +16,7 @@ autonomous: true
 > /feature создай новую фичу и внеси все эти правки и сразу вливай в main
 
 - [x] [Бриф](brief.md).
-- [ ] Продукт
+- [x] [Продукт](product.md).
 - [ ] Техника
 - [ ] План
 - [ ] Реализация и QG
