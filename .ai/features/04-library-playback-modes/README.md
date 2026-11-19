@@ -2,7 +2,7 @@
 id: '04'
 title: Медиатека и режимы воспроизведения
 track: product
-stage: tech
+stage: plan
 branch: codex/04-library-playback-modes
 pr:
 started: 2026-11-19
@@ -18,7 +18,7 @@ autonomous: true
 
 - [x] Бриф — [brief.md](brief.md).
 - [x] Продукт — [решения P01–P05](product.md) приняты владельцем.
-- [ ] Техника
+- [x] Техника — [tech.md](tech.md).
 - [ ] План
 - [ ] Реализация и QG
 - [ ] Проверка владельцем
