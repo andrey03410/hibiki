@@ -90,6 +90,7 @@ model MediaFile {
   bytes BigInt
   kind String
   duration Float?
+  hasAudio Boolean?
   createdAt DateTime @default(now())
   sources Source[]
   @@unique([ownerId, hash])

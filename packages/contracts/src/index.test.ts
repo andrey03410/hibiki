@@ -5,6 +5,7 @@ import {
   playlistDefinitionSchema,
   ruleSchema,
   settingsSchema,
+  sourceSchema,
 } from "./index.js";
 
 describe("playlist contracts", () => {
@@ -141,4 +142,17 @@ describe("playlist contracts", () => {
       }).success,
     ).toBe(true);
   });
+});
+
+it("accepts a local source with a known absence of an audio track", () => {
+  expect(sourceSchema.parse({
+    id: "silent", provider: "local", status: "available", hasAudio: false,
+  }).hasAudio).toBe(false);
+});
+
+it("validates optional playback mode in serialized settings", () => {
+  const legacy = { volume: 0.5, repeat: "off", shuffle: false, queue: [], queueIndex: 0 };
+  expect(settingsSchema.parse(legacy)).not.toHaveProperty("mode");
+  expect(settingsSchema.parse({ ...legacy, mode: "audio" }).mode).toBe("audio");
+  expect(settingsSchema.safeParse({ ...legacy, mode: "video" }).success).toBe(false);
 });

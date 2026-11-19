@@ -40,6 +40,7 @@ describe("local playback compatibility", () => {
       ]);
       const info = await inspectFile(file);
       expect(info.kind).toBe("audio");
+      expect(info.hasAudio).toBe(true);
       expect(info.browserCompatible).toBe(true);
       expect(await preparePlayback(file, info, root)).toBeUndefined();
     }
@@ -71,12 +72,26 @@ describe("local playback compatibility", () => {
     const info = await inspectFile(file);
     expect(info).toMatchObject({
       kind: "video",
+      hasAudio: true,
       videoCodec: "h264",
       audioCodec: "aac",
       browserCompatible: true,
     });
     expect(await preparePlayback(file, info, root)).toBeUndefined();
     expect(await readdir(root)).toEqual(["compatible.mp4"]);
+  });
+
+  it("recognizes an H.264 MP4 without audio as a playable silent video", async () => {
+    const file = join(root, "silent.mp4");
+    await generate(file, [
+      "-f", "lavfi", "-i", "color=c=blue:s=64x64:r=10:d=0.3",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an",
+    ]);
+    expect(await inspectFile(file)).toMatchObject({
+      kind: "video",
+      hasAudio: false,
+      browserCompatible: true,
+    });
   });
 
   it("remuxes raw AAC into an audio-only M4A playback copy", async () => {

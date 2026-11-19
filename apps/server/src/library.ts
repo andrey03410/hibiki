@@ -8,6 +8,7 @@ import {
   copyMedia,
   hashFile,
   storagePath,
+  inspectAudioTrack,
   inspectFile,
   preparePlayback,
   type MediaInspection,
@@ -20,7 +21,7 @@ import type {
   PlaylistDto,
   TagDto,
 } from "@hibiki/contracts";
-import { playlistDefinitionSchema } from "@hibiki/contracts";
+import { playbackModeSchema, playlistDefinitionSchema } from "@hibiki/contracts";
 import { collectReferences, resolvePlaylist, usesPrivateHistory } from "@hibiki/core";
 
 const itemInclude = {
@@ -68,6 +69,8 @@ export function itemDto(row: IncludedItem): ItemDto {
       mime: source.file?.mime,
       bytes: source.file ? Number(source.file.bytes) : undefined,
       hash: source.file?.hash,
+      hasAudio:
+        source.provider === "local" ? (source.file?.hasAudio ?? undefined) : undefined,
       streamUrl: source.fileId ? `/files/${source.fileId}` : undefined,
     })),
   };
@@ -125,6 +128,39 @@ export class LibraryService {
     public db: Db,
     public storageRoot: string,
   ) {}
+  async backfillAudioTracks(signal?: AbortSignal) {
+    const batchSize = 64;
+    let after: string | undefined;
+    for (;;) {
+      signal?.throwIfAborted();
+      const files = await this.db.mediaFile.findMany({
+        where: { hasAudio: null, id: after === undefined ? undefined : { gt: after } },
+        select: { id: true, path: true, bytes: true },
+        orderBy: { id: "asc" },
+        take: batchSize,
+      });
+      for (const file of files) {
+        signal?.throwIfAborted();
+        let hasAudio: boolean;
+        try {
+          const path = storagePath(this.storageRoot, file.path);
+          const info = await stat(path, { bigint: true });
+          if (!info.isFile() || info.size !== file.bytes) continue;
+          hasAudio = await inspectAudioTrack(path, signal);
+        } catch {
+          signal?.throwIfAborted();
+          continue;
+        }
+        signal?.throwIfAborted();
+        await this.db.mediaFile.updateMany({
+          where: { id: file.id, path: file.path, hasAudio: null },
+          data: { hasAudio },
+        });
+      }
+      if (files.length < batchSize) return;
+      after = files.at(-1)?.id;
+    }
+  }
   async snapshot(ownerId: string, browserJobs = false): Promise<LibraryDto> {
     return this.snapshotWith(ownerId, this.db, browserJobs);
   }
@@ -211,11 +247,16 @@ export class LibraryService {
       }
     };
     if (prior) {
-      const item = await this.getItem(ownerId, prior.itemId);
       const original = prior.fileId
         ? await this.db.mediaFile.findUnique({ where: { id: prior.fileId } })
         : null;
-      if (await fileIntact(original)) {
+      if (original && await fileIntact(original)) {
+        if (original.hasAudio !== media.hasAudio)
+          await this.db.mediaFile.update({
+            where: { id: original.id },
+            data: { hasAudio: media.hasAudio },
+          });
+        const item = await this.getItem(ownerId, prior.itemId);
         if (media.browserCompatible && prior.status === "available") {
           if (options.applyReplacement) {
             const applyReplacement = options.applyReplacement;
@@ -261,7 +302,7 @@ export class LibraryService {
         let file = await this.db.mediaFile.findUnique({
           where: { ownerId_hash: { ownerId, hash: info.hash } },
         });
-        if (!(await fileIntact(file))) {
+        if (!file || !(await fileIntact(file))) {
           const path = await copyMedia(
             this.storageRoot,
             ownerId,
@@ -280,6 +321,7 @@ export class LibraryService {
               bytes: info.bytes,
               kind: info.kind,
               duration: info.duration,
+              hasAudio: info.hasAudio,
             },
             update: {
               path,
@@ -287,10 +329,16 @@ export class LibraryService {
               bytes: info.bytes,
               kind: info.kind,
               duration: info.duration,
+              hasAudio: info.hasAudio,
             },
           });
+        } else if (file.hasAudio !== info.hasAudio) {
+          file = await this.db.mediaFile.update({
+            where: { id: file.id },
+            data: { hasAudio: info.hasAudio },
+          });
         }
-        return file!;
+        return file;
       };
       options.signal?.throwIfAborted();
       const file = await store(filePath, media);
@@ -769,6 +817,7 @@ export class LibraryService {
       "settings_too_large",
       "Настройки слишком велики",
     );
+    playbackModeSchema.optional().parse(value.mode);
     return this.db.$transaction(async (tx) => {
       const current = await tx.setting.findUnique({
         where: { userId: ownerId },

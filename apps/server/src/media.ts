@@ -42,6 +42,7 @@ export interface MediaInspection {
   duration: number | null;
   title: string;
   browserCompatible: boolean;
+  hasAudio: boolean;
   videoCodec?: string;
   audioCodec?: string;
   videoStream?: string;
@@ -56,6 +57,50 @@ export async function hashFile(path: string, signal?: AbortSignal) {
     hash.update(chunk);
   return hash.digest("hex");
 }
+async function probeMediaStreams(path: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  let output = "";
+  try {
+    await run(String(ffmpeg), ["-hide_banner", "-nostdin", "-i", path], {
+      timeout: 30_000,
+      maxBuffer: 1_048_576,
+      signal,
+    });
+  } catch (error) {
+    signal?.throwIfAborted();
+    const result = error as { code?: number | string; stderr?: string };
+    // FFmpeg reports stream headers, then exits with code 1 when no output is provided.
+    if (result.code === 1) output = result.stderr ?? "";
+  }
+  const streams = [
+    ...output.matchAll(
+      /^ *Stream #(\d+:\d+)[^:\r\n]*:\s*(Audio|Video):\s*([\w]+)([^\r\n]*)/gm,
+    ),
+  ].map((match) => ({
+    id: match[1]!,
+    type: match[2]!,
+    codec: match[3]!,
+    details: match[4]!,
+  }));
+  const video = streams.find(
+    (stream) =>
+      stream.type === "Video" && !stream.details.includes("(attached pic)"),
+  );
+  const audio = streams.find((stream) => stream.type === "Audio");
+  invariant(
+    video || audio,
+    415,
+    "invalid_media",
+    "В файле нет аудио или видео для воспроизведения",
+  );
+  return { audio, video, output };
+}
+
+export async function inspectAudioTrack(path: string, signal?: AbortSignal) {
+  const { audio } = await probeMediaStreams(path, signal);
+  return Boolean(audio);
+}
+
 export async function inspectFile(
   path: string,
   options: { signal?: AbortSignal } = {},
@@ -77,9 +122,6 @@ export async function inspectFile(
   );
   let duration: number | null = null;
   let title = basename(path, ext);
-  let kind: "audio" | "video" = mimes[ext].startsWith("video")
-    ? "video"
-    : "audio";
   try {
     const metadata = await parseFile(path, {
       duration: true,
@@ -90,46 +132,8 @@ export async function inspectFile(
   } catch {
     /* FFmpeg probes video and formats without music tags. */
   }
-  options.signal?.throwIfAborted();
-  let probe = "";
-  try {
-    await run(String(ffmpeg), ["-hide_banner", "-i", path], {
-      timeout: 30000,
-      maxBuffer: 1048576,
-      signal: options.signal,
-    });
-  } catch (error) {
-    options.signal?.throwIfAborted();
-    probe = String((error as { stderr?: string }).stderr ?? "");
-  }
-  invariant(
-    /Audio:|Video:/.test(probe),
-    415,
-    "invalid_media",
-    "Файл не удалось декодировать как аудио или видео",
-  );
-  const streams = [
-    ...probe.matchAll(
-      /Stream #(\d+:\d+)[^:\r\n]*:\s*(Audio|Video):\s*([\w]+)([^\r\n]*)/g,
-    ),
-  ].map((match) => ({
-    id: match[1]!,
-    type: match[2]!,
-    codec: match[3]!,
-    details: match[4]!,
-  }));
-  const video = streams.find(
-    (stream) =>
-      stream.type === "Video" && !stream.details.includes("(attached pic)"),
-  );
-  const audio = streams.find((stream) => stream.type === "Audio");
-  invariant(
-    video || audio,
-    415,
-    "invalid_media",
-    "В файле нет аудио или видео для воспроизведения",
-  );
-  kind = video ? "video" : "audio";
+  const { audio, video, output } = await probeMediaStreams(path, options.signal);
+  const kind = video ? "video" : "audio";
   const compatibleVideoCodec =
     video?.codec === "h264" &&
     /\byuvj?420p(?:\b|\()/.test(video.details) &&
@@ -151,7 +155,7 @@ export async function inspectFile(
           ["opus", "vorbis"].includes(audio?.codec ?? "")) ||
         ([".m4a", ".mp4", ".m4v"].includes(ext) && compatibleAudioCodec) ||
         (ext === ".webm" && ["opus", "vorbis"].includes(audio?.codec ?? ""));
-  const found = probe.match(/Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/);
+  const found = output.match(/Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/);
   if (duration === null && found)
     duration = +found[1] * 3600 + +found[2] * 60 + +found[3];
   const mime =
@@ -172,6 +176,7 @@ export async function inspectFile(
     duration,
     title,
     browserCompatible,
+    hasAudio: Boolean(audio),
     videoCodec: video?.codec,
     audioCodec: audio?.codec,
     videoStream: video?.id,

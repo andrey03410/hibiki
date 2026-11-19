@@ -1,18 +1,12 @@
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
-import { Filter, Play, Search, X } from "lucide-react";
-import type { TagDto } from "@hibiki/contracts";
-import { defaultLibrarySearch, type LibrarySearch } from "./library-search";
+import { useEffect, useId, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { Headphones, Heart, LayoutGrid, List, Play, Search, SlidersHorizontal, Tags, X } from "lucide-react";
+import type { PlaybackMode, TagDto } from "@hibiki/contracts";
+import {
+  defaultLibrarySearch, libraryFilterConditions, libraryKinds, libraryProviders, libraryStatuses,
+  matchesSearch, resetLibraryFilters, type LibrarySearch, type LibraryView,
+} from "./library-search";
 import "./library-search.css";
 
-const kinds = { "": "Все записи", audio: "Аудио", video: "Видео" } satisfies Record<LibrarySearch["kind"], string>;
-const providers = {
-  "": "Любой", youtube: "YouTube", local: "Есть локальная копия",
-  "working-local": "Есть рабочая локальная копия",
-} satisfies Record<LibrarySearch["provider"], string>;
-const statuses = {
-  "": "Любая", available: "Есть доступный источник", unknown: "Статус неизвестен",
-  unavailable: "Нет рабочего источника",
-} satisfies Record<LibrarySearch["availability"], string>;
 const sorts = {
   "added-desc": "Сначала новые", "added-asc": "Сначала старые",
   "title-asc": "Название ↑", "title-desc": "Название ↓",
@@ -29,9 +23,9 @@ export function useLibrarySearch(userId: string) {
         const value = stored[field];
         if (typeof value === "string") initial[field] = value;
       }
-      if (stored.kind && Object.hasOwn(kinds, stored.kind)) initial.kind = stored.kind;
-      if (stored.provider && Object.hasOwn(providers, stored.provider)) initial.provider = stored.provider;
-      if (stored.availability && Object.hasOwn(statuses, stored.availability)) initial.availability = stored.availability;
+      if (stored.kind && Object.hasOwn(libraryKinds, stored.kind)) initial.kind = stored.kind;
+      if (stored.provider && Object.hasOwn(libraryProviders, stored.provider)) initial.provider = stored.provider;
+      if (stored.availability && Object.hasOwn(libraryStatuses, stored.availability)) initial.availability = stored.availability;
       if (stored.sort && Object.hasOwn(sorts, stored.sort)) initial.sort = stored.sort;
       if (Array.isArray(stored.tagIds)) initial.tagIds = stored.tagIds.filter((id) => typeof id === "string");
       initial.favoriteOnly = stored.favoriteOnly === true;
@@ -50,34 +44,52 @@ export function useLibrarySearch(userId: string) {
   return [value, setValue] as const;
 }
 
-export function LibrarySearchControls({ value, onChange, tags, count, onPlay }: {
+export function LibrarySearchControls({ value, onChange, tags, count, view, onViewChange, onPlay }: {
   value: LibrarySearch;
   onChange: Dispatch<SetStateAction<LibrarySearch>>;
   tags: TagDto[];
   count: number;
-  onPlay: () => void;
+  view: LibraryView;
+  onViewChange: (view: LibraryView) => void;
+  onPlay: (mode?: PlaybackMode) => void;
 }) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [tagsOpen, setTagsOpen] = useState(false);
+  const [tagQuery, setTagQuery] = useState("");
+  const tagPicker = useRef<HTMLDivElement>(null);
+  const tagButton = useRef<HTMLButtonElement>(null);
+  const advancedId = useId(), tagPickerId = useId();
+  useEffect(() => {
+    if (!tagsOpen) return;
+    function closeOnOutsideClick(event: PointerEvent) {
+      if (event.target instanceof Node && !tagPicker.current?.contains(event.target)) setTagsOpen(false);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      if (tagPicker.current?.contains(document.activeElement)) tagButton.current?.focus();
+      setTagsOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [tagsOpen]);
+
   function set<K extends keyof LibrarySearch>(field: K, next: LibrarySearch[K]) {
     onChange((current) => ({ ...current, [field]: next }));
   }
 
-  const chips = [
-    value.kind && kinds[value.kind],
-    value.provider && providers[value.provider],
-    value.availability && statuses[value.availability],
-    value.favoriteOnly && "Избранное",
-    ...value.tagIds.map((id) => tags.find((tag) => tag.id === id)?.name ?? "Удалённый тег"),
-    value.minDuration && `Длительность от ${value.minDuration} с`,
-    value.maxDuration && `Длительность до ${value.maxDuration} с`,
-    value.addedFrom && `Добавлено с ${value.addedFrom}`,
-    value.addedThrough && `Добавлено по ${value.addedThrough}`,
-  ].filter(Boolean);
+  const conditions = libraryFilterConditions(value, tags);
+  const advancedCount = conditions.filter(({ advanced }) => advanced).length;
+  const matchingTags = tagsOpen ? tags.filter((tag) => matchesSearch(tagQuery, tag.name)) : [];
 
   return (
     <div className="library-search-controls">
-      <div className="collection-tools">
-        <label className="search-input">
-          <Search size={16} />
+      <div className="library-search-tools">
+        <div className="search-input">
+          <Search size={17} />
           <input
             type="search"
             aria-label="Поиск в медиатеке"
@@ -90,86 +102,134 @@ export function LibrarySearchControls({ value, onChange, tags, count, onPlay }: 
               <X size={14} />
             </button>
           )}
-        </label>
+        </div>
         <select aria-label="Сортировка медиатеки" value={value.sort} onChange={(event) => set("sort", event.target.value as LibrarySearch["sort"])}>
           {Object.entries(sorts).map(([id, label]) => <option value={id} key={id}>{label}</option>)}
         </select>
+        <div className="library-segmented library-view-switch" role="group" aria-label="Вид медиатеки">
+          <button type="button" title="Список" aria-label="Список" aria-pressed={view === "list"} onClick={() => onViewChange("list")}>
+            <List size={16} /> <span>Список</span>
+          </button>
+          <button type="button" title="Карточки" aria-label="Карточки" aria-pressed={view === "cards"} onClick={() => onViewChange("cards")}>
+            <LayoutGrid size={15} /> <span>Карточки</span>
+          </button>
+        </div>
       </div>
-      <details className="library-filter-panel">
-        <summary><Filter size={15} /> Фильтры{chips.length > 0 && ` (${chips.length})`}</summary>
-        <div className="library-filter-fields">
-          <label>
-            Тип записи
-            <select value={value.kind} onChange={(event) => set("kind", event.target.value as LibrarySearch["kind"])}>
-              {Object.entries(kinds).map(([id, label]) => <option value={id} key={id}>{label}</option>)}
-            </select>
-          </label>
+      <div className="library-filter-tools">
+        <div className="library-segmented" role="group" aria-label="Тип записи">
+          {Object.entries(libraryKinds).map(([id, label]) => (
+            <button key={id} type="button" aria-pressed={value.kind === id} onClick={() => set("kind", id as LibrarySearch["kind"])}>{label}</button>
+          ))}
+        </div>
+        <button className="library-filter-button" type="button" aria-pressed={value.favoriteOnly} onClick={() => set("favoriteOnly", !value.favoriteOnly)}>
+          <Heart size={15} fill={value.favoriteOnly ? "currentColor" : "none"} /> Избранное
+        </button>
+        <div className="library-tag-picker" ref={tagPicker}>
+          <button
+            ref={tagButton}
+            className="library-filter-button"
+            type="button"
+            aria-expanded={tagsOpen}
+            aria-controls={tagPickerId}
+            onClick={() => {
+              if (!tagsOpen) setTagQuery("");
+              setTagsOpen(!tagsOpen);
+            }}
+          >
+            <Tags size={15} /> Теги{value.tagIds.length > 0 && ` (${value.tagIds.length})`}
+          </button>
+          <div className="library-tag-popover" id={tagPickerId} hidden={!tagsOpen}>
+            {tagsOpen && (
+              <>
+                <label className="search-input">
+                  <Search size={15} />
+                  <input autoFocus type="search" aria-label="Поиск по тегам" placeholder="Поиск по тегам" value={tagQuery} onChange={(event) => setTagQuery(event.target.value)} />
+                </label>
+                {matchingTags.length ? (
+                  <div className="library-tag-options" role="group" aria-label="Совпадение по всем выбранным тегам">
+                    {matchingTags.map((tag) => (
+                      <label key={tag.id}>
+                        <input
+                          type="checkbox"
+                          checked={value.tagIds.includes(tag.id)}
+                          onChange={(event) => {
+                            const checked = event.target.checked;
+                            onChange((current) => ({
+                              ...current,
+                              tagIds: checked ? [...current.tagIds, tag.id] : current.tagIds.filter((id) => id !== tag.id),
+                            }));
+                          }}
+                        />
+                        <span className="library-tag-color" style={{ background: tag.color }} />
+                        {tag.name}
+                      </label>
+                    ))}
+                  </div>
+                ) : <p className="muted">{tags.length ? "Теги не найдены" : "В медиатеке пока нет тегов"}</p>}
+              </>
+            )}
+          </div>
+        </div>
+        <button
+          className="library-filter-button library-advanced-toggle"
+          type="button"
+          aria-expanded={advancedOpen}
+          aria-controls={advancedId}
+          onClick={() => setAdvancedOpen(!advancedOpen)}
+        >
+          <SlidersHorizontal size={15} /> Фильтры{advancedCount > 0 && ` (${advancedCount})`}
+        </button>
+      </div>
+      <div className="library-filter-fields" id={advancedId} hidden={!advancedOpen}>
+        <div className="library-filter-selects">
           <label>
             Источник
             <select value={value.provider} onChange={(event) => set("provider", event.target.value as LibrarySearch["provider"])}>
-              {Object.entries(providers).map(([id, label]) => <option value={id} key={id}>{label}</option>)}
+              {Object.entries(libraryProviders).map(([id, label]) => <option value={id} key={id}>{label}</option>)}
             </select>
           </label>
           <label>
             Доступность
             <select value={value.availability} onChange={(event) => set("availability", event.target.value as LibrarySearch["availability"])}>
-              {Object.entries(statuses).map(([id, label]) => <option value={id} key={id}>{label}</option>)}
+              {Object.entries(libraryStatuses).map(([id, label]) => <option value={id} key={id}>{label}</option>)}
             </select>
           </label>
-          <label className="check-row">
-            <input type="checkbox" checked={value.favoriteOnly} onChange={(event) => set("favoriteOnly", event.target.checked)} />
-            Только избранное
-          </label>
-          <label>
-            Длительность от, сек.
-            <input type="number" min="0" step="any" value={value.minDuration} onChange={(event) => set("minDuration", event.target.value)} />
-          </label>
-          <label>
-            Длительность до, сек.
-            <input type="number" min="0" step="any" value={value.maxDuration} onChange={(event) => set("maxDuration", event.target.value)} />
-          </label>
-          <label>
-            Добавлено с
-            <input type="date" value={value.addedFrom} onChange={(event) => set("addedFrom", event.target.value)} />
-          </label>
-          <label>
-            Добавлено по
-            <input type="date" value={value.addedThrough} onChange={(event) => set("addedThrough", event.target.value)} />
-          </label>
         </div>
-        {(tags.length > 0 || value.tagIds.length > 0) && (
-          <fieldset className="library-filter-tags">
-            <legend>Все выбранные теги</legend>
-            <div className="tag-picker">
-              {tags.map((tag) => {
-                const checked = value.tagIds.includes(tag.id);
-                return (
-                  <label className={`tag-option ${checked ? "active" : ""}`} key={tag.id}>
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={(event) => set("tagIds", event.target.checked ? [...value.tagIds, tag.id] : value.tagIds.filter((id) => id !== tag.id))}
-                    />
-                    <span style={{ background: tag.color }} />
-                    {tag.name}
-                  </label>
-                );
-              })}
-            </div>
-          </fieldset>
-        )}
-      </details>
+        <fieldset>
+          <legend>Длительность, сек.</legend>
+          <div className="library-filter-range">
+            <label>От<input type="number" min="0" step="any" value={value.minDuration} onChange={(event) => set("minDuration", event.target.value)} /></label>
+            <label>До<input type="number" min="0" step="any" value={value.maxDuration} onChange={(event) => set("maxDuration", event.target.value)} /></label>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Дата добавления</legend>
+          <div className="library-filter-range">
+            <label>С<input type="date" value={value.addedFrom} onChange={(event) => set("addedFrom", event.target.value)} /></label>
+            <label>По<input type="date" value={value.addedThrough} onChange={(event) => set("addedThrough", event.target.value)} /></label>
+          </div>
+        </fieldset>
+      </div>
       <div className="library-search-results">
         <span role="status">Найдено: {count}</span>
-        <div className="library-search-chips">
-          {chips.map((chip, index) => <span key={`${index}-${chip}`}>{chip}</span>)}
-        </div>
-        {(chips.length > 0 || value.query || value.sort !== defaultLibrarySearch.sort) && (
-          <button type="button" className="text-button" onClick={() => onChange(defaultLibrarySearch)}>Сбросить</button>
+        {conditions.length > 0 && (
+          <div className="library-search-chips">
+            {conditions.map(({ key, label, clear }) => (
+              <button key={key} type="button" aria-label={`Снять фильтр «${label}»`} onClick={() => onChange(clear)}>
+                {label} <X size={12} />
+              </button>
+            ))}
+            <button type="button" className="text-button" onClick={() => onChange(resetLibraryFilters)}>Сбросить фильтры</button>
+          </div>
         )}
-        <button type="button" className="button subtle compact" disabled={!count} onClick={onPlay}>
-          <Play size={15} fill="currentColor" /> Играть найденное
-        </button>
+        <div className="library-result-playback">
+          <button type="button" className="button subtle compact" disabled={!count} onClick={() => onPlay()}>
+            <Play size={15} fill="currentColor" /> Играть найденное
+          </button>
+          <button type="button" className="button subtle compact" disabled={!count} onClick={() => onPlay("audio")}>
+            <Headphones size={15} /> Слушать найденное
+          </button>
+        </div>
       </div>
     </div>
   );

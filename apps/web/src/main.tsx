@@ -1,5 +1,6 @@
 import React, {
   useEffect,
+  useMemo,
   useRef,
   useState,
   useContext,
@@ -18,6 +19,7 @@ import {
 } from "react-router";
 import {
   AudioLines,
+  Headphones,
   Library,
   ListMusic,
   Tags,
@@ -68,8 +70,8 @@ import type {
 } from "@hibiki/contracts";
 import { api, formatDuration, humanDuration, mediaWord } from "./api.ts";
 import { PlayerProvider, usePlayer } from "./player.tsx";
-import { playbackSources } from "./player-model.ts";
-import { matchesSearch, searchLibrary, sourceAvailability } from "./library-search.ts";
+import { playbackSources, soundUnavailableReason } from "./player-model.ts";
+import { matchesSearch, searchLibrary, selectLibraryResults, sourceAvailability, type LibraryView } from "./library-search.ts";
 import { LibrarySearchControls, useLibrarySearch } from "./LibrarySearchControls.tsx";
 import { NoteEditor, NoteIndicator, NotesContext, NotesLoadError, useNotes, useNotesController } from "./NoteEditor.tsx";
 import { noteFor } from "./note-model.ts";
@@ -79,6 +81,7 @@ import { HistorySettings } from "./HistorySettings.tsx";
 import { useHistoryRevision } from "./history-events.ts";
 import type { HistoryPreference } from "./listening-client.ts";
 import "./styles.css";
+import "./library-view.css";
 
 const EMPTY: LibraryDto = { items: [], tags: [], playlists: [], jobs: [] };
 type Toast = { id: number; text: string; error?: boolean };
@@ -532,7 +535,7 @@ function Workspace({
           )
         }
       >
-        {(watchPlayer) => <>
+        {(watchPlayer, miniPlayer) => <>
         <div className="app-shell">
           <aside className="sidebar">
             <Link className="brand" to="/">
@@ -549,6 +552,10 @@ function Workspace({
                 <Library size={19} />
                 <span>Медиатека</span>
                 <span className="nav-count">{library.items.length}</span>
+              </NavLink>
+              <NavLink to="/player" aria-label="Плеер">
+                <AudioLines size={19} />
+                <span>Плеер</span>
               </NavLink>
               <NavLink to="/playlists">
                 <ListMusic size={19} />
@@ -625,10 +632,10 @@ function Workspace({
             </div>
           </aside>
           <main className="main-content">
-            {watchPlayer}
             <div id="browse-content" className="browse-content">
             <Routes>
-              <Route path="/" element={<LibraryPage search={librarySearch} />} />
+              <Route path="/player" element={watchPlayer} />
+              <Route path="/" element={<LibraryPage userId={user.id} search={librarySearch} />} />
               <Route
                 path="/playlists"
                 element={<PlaylistsPage query={playlistQuery} onQuery={setPlaylistQuery} onCreate={() => setCreateOpen(true)} />}
@@ -657,6 +664,7 @@ function Workspace({
               <span>響き · Звучание, которое остаётся</span>
               <span>HIBIKI · ВАША ЛИЧНАЯ МЕДИАТЕКА</span>
             </footer>
+            {miniPlayer}
           </main>
         </div>
         {importOpen && <ImportModal close={() => setImportOpen(false)} />}{" "}
@@ -704,7 +712,7 @@ function PageTop({ label, children }: { label: string; children?: ReactNode }) {
     </div>
   );
 }
-function LibraryPage({ search }: { search: ReturnType<typeof useLibrarySearch> }) {
+function LibraryPage({ userId, search }: { userId: string; search: ReturnType<typeof useLibrarySearch> }) {
   const { library, openImport } = useData(),
     player = usePlayer();
   const [filters, setFilters] = search;
@@ -712,119 +720,43 @@ function LibraryPage({ search }: { search: ReturnType<typeof useLibrarySearch> }
   const [selected, setSelected] = useState<string[]>([]),
     [playlistOpen, setPlaylistOpen] = useState(false),
     [batchOpen, setBatchOpen] = useState(false);
-  const items = searchLibrary(library.items, filters, notes);
-  const audio = library.items.filter((i) => i.kind === "audio").length,
-    video = library.items.length - audio;
+  const viewKey = `hibiki:library-view:${userId}`;
+  const [view, setView] = useState<LibraryView>(() => {
+    try {
+      return localStorage.getItem(viewKey) === "cards" ? "cards" : "list";
+    } catch {
+      return "list";
+    }
+  });
+  const items = useMemo(() => searchLibrary(library.items, filters, notes), [library.items, filters, notes]);
+
+  function changeView(next: LibraryView) {
+    setView(next);
+    try {
+      localStorage.setItem(viewKey, next);
+    } catch {
+      // The current view still works when browser storage is unavailable.
+    }
+  }
+
   return (
     <>
-      <PageTop label="Медиатека">
-        <span className="status-pill">
-          <span className="online-dot" />
-          Всё на своём месте
-        </span>
-      </PageTop>
-      <div className="title-row">
-        <div>
-          <span className="eyebrow">СОБРАНО ВАМИ</span>
-          <h1>
-            Медиатека<span className="heading-dot">.</span>
-          </h1>
-          <p className="muted">
-            Ваши звуки, истории и всё, что хочется сохранить.
-          </p>
-        </div>
+      <div className="title-row library-title-row">
+        <h1>Медиатека</h1>
         <Button className="primary" onClick={openImport}>
           <Plus size={17} />
           Добавить медиа
         </Button>
       </div>
-      <section className="library-hero">
-        <div className="hero-text">
-          <span className="hero-label">
-            <AudioLines size={15} /> ВАШ ЛИЧНЫЙ РИТМ
-          </span>
-          <h2>
-            Разное звучание.
-            <br />
-            Одно пространство.
-          </h2>
-          <p>
-            Аудио и видео рядом. Собирайте плейлисты,
-            <br />
-            связывайте их тегами и находите своё настроение.
-          </p>
-          <Button
-            className="hero-button"
-            onClick={() =>
-              library.items.length ? player.start(library.items) : openImport()
-            }
-          >
-            <Play size={14} fill="currentColor" />
-            {library.items.length
-              ? "Слушать медиатеку"
-              : "Добавить первую запись"}
-            <ArrowUpRight size={15} />
-          </Button>
-        </div>
-        <div className="hero-art" aria-hidden="true">
-          <div className="record-disc">
-            <span className="disc-label">
-              響<span>HIBIKI</span>
-            </span>
-          </div>
-          <div className="art-wave">
-            <i />
-            <i />
-            <i />
-            <i />
-            <i />
-            <i />
-            <i />
-            <i />
-            <i />
-            <i />
-            <i />
-            <i />
-            <i />
-          </div>
-          <span className="hero-japanese">音を、つなぐ。</span>
-          <span className="hero-coordinate">PERSONAL COLLECTION / 01</span>
-        </div>
-      </section>
-      <div className="library-stat-row">
-        <span>
-          <strong>{library.items.length}</strong>{" "}
-          {mediaWord(library.items.length)}
-        </span>
-        <i />
-        <span>
-          <Music2 size={14} />
-          {audio} аудио
-        </span>
-        <span>
-          <Video size={14} />
-          {video} видео
-        </span>
-        <span>
-          <Clock3 size={14} />
-          {humanDuration(
-            library.items.reduce((s, i) => s + (i.duration ?? 0), 0),
-          )}
-        </span>
-        <span className="stat-right">Всё, что вы любите. В одном месте.</span>
-      </div>
       <section className="library-section">
-        <div className="section-heading">
-          <h2>
-            Ваша коллекция <span>{library.items.length}</span>
-          </h2>
-        </div>
         <LibrarySearchControls
           value={filters}
           onChange={setFilters}
           tags={library.tags}
           count={items.length}
-          onPlay={() => player.start(items)}
+          view={view}
+          onViewChange={changeView}
+          onPlay={(mode) => player.start(items, 0, undefined, { mode, fromLibrary: true })}
         />
         <NotesLoadError />
         {selected.length > 0 && (
@@ -851,6 +783,7 @@ function LibraryPage({ search }: { search: ReturnType<typeof useLibrarySearch> }
         )}
         <ItemTable
           items={items}
+          view={view}
           selected={selected}
           onSelected={setSelected}
           onTag={(id) => setFilters((old) => (
@@ -896,6 +829,12 @@ function LibraryPage({ search }: { search: ReturnType<typeof useLibrarySearch> }
     </>
   );
 }
+function ItemArtwork({ thumbnail, kind }: { thumbnail?: string; kind: ItemDto["kind"] }) {
+  const [failed, setFailed] = useState(false);
+  if (thumbnail && !failed) return <img src={thumbnail} alt="" loading="lazy" onError={() => setFailed(true)} />;
+  return kind === "video" ? <Video size={19} /> : <Music2 size={19} />;
+}
+
 function ItemTable({
   items,
   reasons,
@@ -904,6 +843,7 @@ function ItemTable({
   onTag,
   reorder,
   playlistId,
+  view,
 }: {
   items: ItemDto[];
   reasons?: Record<string, string[]>;
@@ -912,6 +852,7 @@ function ItemTable({
   onTag?: (id: string) => void;
   reorder?: (id: string, direction: number) => void;
   playlistId?: string;
+  view?: LibraryView;
 }) {
   const player = usePlayer(),
     { library, refresh, notify } = useData();
@@ -919,8 +860,23 @@ function ItemTable({
   const [editTarget, setEditTarget] = useState<{ id: string; focusSource?: boolean }>(),
     [remove, setRemove] = useState<ItemDto | null>(null),
     [busy, setBusy] = useState(false);
-  const currentItems = new Map(library.items.map((item) => [item.id, item]));
+  const currentItems = useMemo(() => new Map(library.items.map((item) => [item.id, item])), [library.items]);
   const edit = editTarget ? currentItems.get(editTarget.id) : undefined;
+  const inLibrary = view !== undefined;
+  const selectedIds = new Set(selected);
+  const selectedCount = selected ? items.filter((item) => selectedIds.has(item.id)).length : 0;
+  const selectAll = selected && (
+    <input
+      type="checkbox"
+      aria-label="Выбрать все найденные записи"
+      checked={items.length > 0 && selectedCount === items.length}
+      ref={(input) => {
+        if (input) input.indeterminate = selectedCount > 0 && selectedCount < items.length;
+      }}
+      onChange={(event) => onSelected?.(selectLibraryResults(selected, items, event.target.checked))}
+    />
+  );
+
   async function job(kind: string, itemId: string, mode?: string) {
     try {
       await api("/jobs", "POST", { kind, input: { itemId, mode } });
@@ -930,251 +886,286 @@ function ItemTable({
       notify((e as Error).message, true);
     }
   }
+
+  const results = items.map((item, index) => {
+    const local = item.sources.some((source) => source.provider === "local" && source.status === "available"),
+      hasLocal = item.sources.some((source) => source.provider === "local"),
+      yt = item.sources.some((source) => source.provider === "youtube"),
+      streamUrl = item.sources.find((source) => source.streamUrl)?.streamUrl,
+      externalUrl = item.sources.find((source) => source.url)?.url,
+      thumbnail = item.sources.find((source) => source.thumbnail)?.thumbnail,
+      available = playbackSources(item).length > 0,
+      active = player.current?.id === item.id,
+      canToggle = active && (!playlistId || player.settings.queuePlaylistIds?.[item.id] === playlistId),
+      canResumeVideo = canToggle && player.waitingForVideo,
+      status = sourceAvailability(item),
+      hasItemNote = !!noteFor(notes, "item", item.id),
+      hasSourceNote = item.sources.some((source) => noteFor(notes, "source", source.id)),
+      kindLabel = item.kind === "video" ? "Видео" : "Аудио",
+      playLabel = item.kind === "video" ? "Смотреть" : "Воспроизвести";
+
+    const artClass = `item-art art-${index % 6}`;
+    const art = <ItemArtwork key={thumbnail} thumbnail={thumbnail} kind={item.kind} />;
+    const itemTitle = (
+      <>
+        <button className="item-title" onClick={() => setEditTarget({ id: item.id })}>{item.title}</button>
+        {(hasItemNote || hasSourceNote) && (
+          <NoteIndicator label={hasItemNote ? "Есть заметка у записи" : "Есть заметка у источника"} />
+        )}
+      </>
+    );
+    const favorite = <FavoriteButton item={currentItems.get(item.id) ?? item} />;
+    const selection = selected && (
+      <input
+        type="checkbox"
+        aria-label={`Выбрать ${item.title}`}
+        checked={selectedIds.has(item.id)}
+        onChange={(event) => onSelected?.(
+          event.target.checked ? [...selected, item.id] : selected.filter((id) => id !== item.id),
+        )}
+      />
+    );
+    const duration = (
+      <span className="item-duration" title={item.duration === null ? "Длительность неизвестна" : undefined}>
+        {formatDuration(item.duration)}
+      </span>
+    );
+
+    const soundReason = inLibrary && item.kind === "video" ? soundUnavailableReason(item) : undefined;
+    const soundReasonId = `library-sound-reason-${encodeURIComponent(item.id)}`;
+    const playActions = inLibrary && (
+      <div className="library-item-playback">
+        <button
+          className="library-item-play"
+          type="button"
+          aria-label={`${playLabel} ${item.title}`}
+          disabled={!available}
+          title={available ? undefined : "Нет рабочего источника"}
+          onClick={() => player.start(items, index, undefined, { fromLibrary: true })}
+        >
+          <Play size={13} fill="currentColor" /> {playLabel}
+        </button>
+        {item.kind === "video" && (
+          <div className="library-listen-action">
+            <button
+              className="library-item-play"
+              type="button"
+              aria-label={`Слушать ${item.title}`}
+              aria-disabled={soundReason ? true : undefined}
+              aria-describedby={soundReason ? soundReasonId : undefined}
+              onClick={() => {
+                if (soundReason) {
+                  notify(soundReason, true);
+                  return;
+                }
+                player.start(items, index, undefined, { fromLibrary: true, mode: "audio" });
+              }}
+            >
+              <Headphones size={14} /> Слушать
+            </button>
+            {soundReason && <span className="library-sound-reason" id={soundReasonId} role="tooltip">{soundReason}</span>}
+          </div>
+        )}
+      </div>
+    );
+    const menu = (
+      <details className="row-menu" name={inLibrary ? "library-item-actions" : undefined}
+        onKeyDown={(event) => {
+          if (!inLibrary || event.key !== "Escape" || !event.currentTarget.open) return;
+          event.currentTarget.open = false;
+          event.currentTarget.querySelector("summary")?.focus();
+        }}
+      >
+        <summary aria-label={`Действия с ${item.title}`}>
+          <MoreHorizontal size={19} />
+        </summary>
+        <div className="dropdown" onClick={(event) => {
+          if (inLibrary && event.target instanceof Element && event.target.closest("button:not(:disabled), a")) {
+            const details = event.currentTarget.parentElement;
+            if (details instanceof HTMLDetailsElement) details.open = false;
+          }
+        }}>
+          <button onClick={() => setEditTarget({ id: item.id })}>
+            <Pencil size={14} />
+            Детали записи
+          </button>
+          {status === "unavailable" && (
+            <button onClick={() => setEditTarget({ id: item.id, focusSource: true })}>
+              <RefreshCw size={14} />
+              Заменить источник
+            </button>
+          )}
+          <button
+            disabled={active}
+            onClick={() => {
+              player.playNext(item, playlistId);
+              notify("Запись будет играть следующей");
+            }}
+          >
+            <ListPlus size={14} />
+            Играть следующей
+          </button>
+          <button
+            onClick={() => {
+              player.enqueue(item, playlistId);
+              notify("Добавлено в очередь");
+            }}
+          >
+            <ListPlus size={14} />
+            Добавить в очередь
+          </button>
+          {reorder && (
+            <>
+              <button disabled={index === 0} onClick={() => reorder(item.id, -1)}>
+                ↑ Переместить выше
+              </button>
+              <button disabled={index === items.length - 1} onClick={() => reorder(item.id, 1)}>
+                ↓ Переместить ниже
+              </button>
+            </>
+          )}
+          {yt && (
+            <>
+              <button onClick={() => job("youtube-download", item.id, "audio")}>
+                <Download size={14} />
+                Скачать аудио
+              </button>
+              <button onClick={() => job("youtube-download", item.id, "video")}>
+                <Video size={14} />
+                Скачать видео
+              </button>
+              <button onClick={() => job("youtube-refresh", item.id)}>
+                <RefreshCw size={14} />
+                Проверить источник
+              </button>
+            </>
+          )}
+          {streamUrl && (
+            <a href={streamUrl} download={item.title}>
+              <Download size={14} />
+              Сохранить файл
+            </a>
+          )}
+          {externalUrl && (
+            <a href={externalUrl} target="_blank" rel="noreferrer">
+              <ExternalLink size={14} />
+              Открыть источник
+            </a>
+          )}
+          <button className="danger-text" onClick={() => setRemove(item)}>
+            <Trash2 size={14} />
+            Удалить из медиатеки
+          </button>
+        </div>
+      </details>
+    );
+
+    if (view === "cards") {
+      return (
+        <article className={`library-item-card ${active ? "current" : ""}`} key={item.id} aria-current={active || undefined}>
+          <div className="library-card-main">
+            {selection}
+            <span className={artClass} aria-hidden="true">{art}</span>
+            <div className="library-card-description">
+              <div className="item-name-actions">{itemTitle}</div>
+              <span className="item-subtitle">{kindLabel} · {duration}</span>
+              {!available && <span className="item-subtitle">Нет рабочего источника</span>}
+            </div>
+          </div>
+          <div className="library-card-footer">
+            {playActions}
+            <div className="library-card-tools">{favorite}{menu}</div>
+          </div>
+        </article>
+      );
+    }
+
+    return (
+      <div
+        className={`item-row ${selected ? "selectable" : ""} ${active ? "current" : ""} ${!available ? "unavailable" : ""}`}
+        key={item.id}
+        aria-current={(inLibrary && active) || undefined}
+      >
+        {selection ?? <span className="row-number">{index + 1}</span>}
+        <div className="item-title-cell">
+          {inLibrary ? <span className={artClass} aria-hidden="true">{art}</span> : (
+            <button
+              className={artClass}
+              aria-label={`${canResumeVideo ? "Смотреть" : canToggle && player.playing ? "Приостановить" : "Воспроизвести"} ${item.title}`}
+              onClick={() => {
+                if (canResumeVideo) player.watchCurrent();
+                else if (canToggle) player.toggle();
+                else player.start(items, index, playlistId);
+              }}
+            >
+              {art}
+              <span className="art-play">
+                {canToggle && player.playing ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}
+              </span>
+            </button>
+          )}
+          <div className="truncate">
+            <div className="item-name-actions">{itemTitle}{favorite}</div>
+            <span className="item-subtitle">
+              {kindLabel}
+              {item.originalTitle !== item.title
+                ? ` · ${item.originalTitle}`
+                : local ? " · Локальная коллекция" : yt ? " · YouTube" : ""}
+              {status === "unavailable" && " · Нет рабочего источника"}
+              {status === "unknown" && " · Доступность не проверена"}
+            </span>
+            {reasons?.[item.id] && (
+              <details className="reason-details">
+                <summary>Почему в плейлисте</summary>
+                <p>{reasons[item.id]!.join(" · ")}</p>
+              </details>
+            )}
+          </div>
+        </div>
+        <div className="item-tags">
+          {item.tags.slice(0, 2).map((tag) => (
+            <TagPill key={tag.id} tag={tag} onClick={onTag ? () => onTag(tag.id) : undefined} />
+          ))}
+          {item.tags.length > 2 && <span className="small muted">+{item.tags.length - 2}</span>}
+        </div>
+        <span className={`source-badge ${!available ? "missing" : ""}`}>
+          {hasLocal ? <HardDrive size={13} /> : yt ? <Youtube size={14} /> : <CircleAlert size={13} />}
+          <span>
+            {local ? "На устройстве" : hasLocal ? "Есть локальная копия" : yt ? "YouTube" : "Нет источника"}
+          </span>
+        </span>
+        {duration}
+        {playActions}
+        {menu}
+      </div>
+    );
+  });
+
   return (
     <>
-      <div className="item-table">
-        <div className={`table-heading ${selected ? "selectable" : ""}`}>
-          {selected ? (
-            <input
-              type="checkbox"
-              aria-label="Выбрать все записи"
-              checked={
-                !!items.length && items.every((i) => selected.includes(i.id))
-              }
-              onChange={(e) =>
-                onSelected?.(
-                  e.target.checked
-                    ? [...new Set([...selected, ...items.map((i) => i.id)])]
-                    : selected.filter((id) => !items.some((i) => i.id === id)),
-                )
-              }
-            />
-          ) : (
-            <span>#</span>
-          )}
-          <span>НАЗВАНИЕ</span>
-          <span>ТЕГИ</span>
-          <span>ИСТОЧНИК</span>
-          <Clock3 size={14} />
-          <span />
-        </div>
-        {items.map((item, index) => {
-          const local = item.sources.some(
-              (s) => s.provider === "local" && s.status === "available",
-            ),
-            hasLocal = item.sources.some((s) => s.provider === "local"),
-            yt = item.sources.some((s) => s.provider === "youtube"),
-            available = playbackSources(item).length > 0,
-            active = player.current?.id === item.id,
-            canToggle = active && (!playlistId || player.settings.queuePlaylistIds?.[item.id] === playlistId),
-            status = sourceAvailability(item),
-            hasItemNote = !!noteFor(notes, "item", item.id),
-            hasSourceNote = item.sources.some((source) => noteFor(notes, "source", source.id));
-          return (
-            <div
-              className={`item-row ${selected ? "selectable" : ""} ${active ? "current" : ""} ${!available ? "unavailable" : ""}`}
-              key={item.id}
-            >
-              {selected ? (
-                <input
-                  type="checkbox"
-                  aria-label={`Выбрать ${item.title}`}
-                  checked={selected.includes(item.id)}
-                  onChange={(e) =>
-                    onSelected?.(
-                      e.target.checked
-                        ? [...selected, item.id]
-                        : selected.filter((id) => id !== item.id),
-                    )
-                  }
-                />
-              ) : (
-                <span className="row-number">{index + 1}</span>
-              )}
-              <div className="item-title-cell">
-                <button
-                  className={`item-art art-${index % 6}`}
-                  aria-label={
-                    canToggle && player.playing
-                      ? `Приостановить ${item.title}`
-                      : `Воспроизвести ${item.title}`
-                  }
-                  onClick={() =>
-                    canToggle ? player.toggle() : player.start(items, index, playlistId)
-                  }
-                >
-                  {item.sources.find((s) => s.thumbnail)?.thumbnail ? (
-                    <img
-                      src={item.sources.find((s) => s.thumbnail)!.thumbnail}
-                      alt=""
-                      loading="lazy"
-                    />
-                  ) : item.kind === "video" ? (
-                    <Video size={19} />
-                  ) : (
-                    <Music2 size={19} />
-                  )}
-                  <span className="art-play">
-                    {canToggle && player.playing ? (
-                      <Pause size={15} fill="currentColor" />
-                    ) : (
-                      <Play size={15} fill="currentColor" />
-                    )}
-                  </span>
-                </button>
-                <div className="truncate">
-                  <div className="item-name-actions">
-                    <button className="item-title" onClick={() => setEditTarget({ id: item.id })}>{item.title}</button>
-                    {(hasItemNote || hasSourceNote) && (
-                      <NoteIndicator label={hasItemNote ? "Есть заметка у записи" : "Есть заметка у источника"} />
-                    )}
-                    <FavoriteButton item={currentItems.get(item.id) ?? item} />
-                  </div>
-                  <span className="item-subtitle">
-                    {item.kind === "video" ? "Видео" : "Аудио"}
-                    {item.originalTitle !== item.title
-                      ? ` · ${item.originalTitle}`
-                      : local
-                        ? " · Локальная коллекция"
-                        : yt ? " · YouTube" : ""}
-                    {status === "unavailable" && " · Нет рабочего источника"}
-                    {status === "unknown" && " · Доступность не проверена"}
-                  </span>
-                  {reasons?.[item.id] && (
-                    <details className="reason-details">
-                      <summary>Почему в плейлисте</summary>
-                      <p>{reasons[item.id]!.join(" · ")}</p>
-                    </details>
-                  )}
-                </div>
-              </div>
-              <div className="item-tags">
-                {item.tags.slice(0, 2).map((t) => (
-                  <TagPill
-                    key={t.id}
-                    tag={t}
-                    onClick={onTag ? () => onTag(t.id) : undefined}
-                  />
-                ))}
-                {item.tags.length > 2 && (
-                  <span className="small muted">+{item.tags.length - 2}</span>
-                )}
-              </div>
-              <span className={`source-badge ${!available ? "missing" : ""}`}>
-                {hasLocal ? <HardDrive size={13} /> : yt ? <Youtube size={14} /> : <CircleAlert size={13} />}
-                <span>
-                  {local ? "На устройстве" : hasLocal ? "Есть локальная копия" : yt ? "YouTube" : "Нет источника"}
-                </span>
-              </span>
-              <span className="item-duration" title={item.duration === null ? "Длительность неизвестна" : undefined}>
-                {formatDuration(item.duration)}
-              </span>
-              <details className="row-menu">
-                <summary aria-label={`Действия с ${item.title}`}>
-                  <MoreHorizontal size={19} />
-                </summary>
-                <div className="dropdown">
-                  <button onClick={() => setEditTarget({ id: item.id })}>
-                    <Pencil size={14} />
-                    Детали записи
-                  </button>
-                  {status === "unavailable" && (
-                    <button onClick={() => setEditTarget({ id: item.id, focusSource: true })}>
-                      <RefreshCw size={14} />
-                      Заменить источник
-                    </button>
-                  )}
-                  <button
-                    disabled={active}
-                    onClick={() => {
-                      player.playNext(item, playlistId);
-                      notify("Запись будет играть следующей");
-                    }}
-                  >
-                    <ListPlus size={14} />
-                    Играть следующей
-                  </button>
-                  <button
-                    onClick={() => {
-                      player.enqueue(item, playlistId);
-                      notify("Добавлено в очередь");
-                    }}
-                  >
-                    <ListPlus size={14} />
-                    Добавить в очередь
-                  </button>
-                  {reorder && (
-                    <>
-                      <button
-                        disabled={index === 0}
-                        onClick={() => reorder(item.id, -1)}
-                      >
-                        ↑ Переместить выше
-                      </button>
-                      <button
-                        disabled={index === items.length - 1}
-                        onClick={() => reorder(item.id, 1)}
-                      >
-                        ↓ Переместить ниже
-                      </button>
-                    </>
-                  )}
-                  {yt && (
-                    <>
-                      <button
-                        onClick={() =>
-                          job("youtube-download", item.id, "audio")
-                        }
-                      >
-                        <Download size={14} />
-                        Скачать аудио
-                      </button>
-                      <button
-                        onClick={() =>
-                          job("youtube-download", item.id, "video")
-                        }
-                      >
-                        <Video size={14} />
-                        Скачать видео
-                      </button>
-                      <button onClick={() => job("youtube-refresh", item.id)}>
-                        <RefreshCw size={14} />
-                        Проверить источник
-                      </button>
-                    </>
-                  )}
-                  {item.sources.find((s) => s.streamUrl) && (
-                    <a
-                      href={item.sources.find((s) => s.streamUrl)!.streamUrl}
-                      download={item.title}
-                    >
-                      <Download size={14} />
-                      Сохранить файл
-                    </a>
-                  )}
-                  {item.sources.find((s) => s.url) && (
-                    <a
-                      href={item.sources.find((s) => s.url)!.url}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <ExternalLink size={14} />
-                      Открыть источник
-                    </a>
-                  )}
-                  <button
-                    className="danger-text"
-                    onClick={() => setRemove(item)}
-                  >
-                    <Trash2 size={14} />
-                    Удалить из медиатеки
-                  </button>
-                </div>
-              </details>
+      {view === "cards" ? (
+        items.length > 0 && (
+          <>
+            <label className="library-card-select-all">{selectAll} Выбрать все найденные записи</label>
+            <div className="library-card-grid">{results}</div>
+          </>
+        )
+      ) : (
+        (!inLibrary || items.length > 0) && (
+          <div className={`item-table ${inLibrary ? "library-item-table" : ""}`}>
+            <div className={`table-heading ${selected ? "selectable" : ""}`}>
+              {selectAll ?? <span>#</span>}
+              <span>НАЗВАНИЕ</span>
+              <span>ТЕГИ</span>
+              <span>ИСТОЧНИК</span>
+              <Clock3 size={14} />
+              {inLibrary && <span className="library-playback-heading" />}
+              <span />
             </div>
-          );
-        })}
-      </div>
+            {results}
+          </div>
+        )
+      )}
       {edit && (
         <EditItem
           key={edit.id}
@@ -1643,6 +1634,15 @@ function PlaylistCard({ playlist }: { playlist: PlaylistDto }) {
           ? `${resolved.total} ${mediaWord(resolved.total)} · ${humanDuration(resolved.duration)}`
           : "Вычисляем состав…"}
       </span>
+      <button
+        type="button"
+        className="button subtle compact playlist-card-listen"
+        aria-label={`Слушать ${playlist.title}`}
+        disabled={!resolved?.items.length}
+        onClick={() => resolved && player.start(resolved.items, 0, playlist.id, { mode: "audio" })}
+      >
+        <Headphones size={15} /> Слушать
+      </button>
     </article>
   );
 }
@@ -1763,6 +1763,14 @@ function PlaylistPage() {
               onClick={() => resolved && player.start(resolved.items, 0, playlist.id)}
             >
               <Play size={16} fill="currentColor" />
+              Воспроизвести
+            </Button>
+            <Button
+              className="subtle"
+              disabled={!resolved?.items.length}
+              onClick={() => resolved && player.start(resolved.items, 0, playlist.id, { mode: "audio" })}
+            >
+              <Headphones size={16} />
               Слушать
             </Button>
             <Button className="subtle" onClick={() => setEdit(true)}>

@@ -1,4 +1,4 @@
-import type { ItemDto } from "@hibiki/contracts";
+import type { ItemDto, TagDto } from "@hibiki/contracts";
 import { noteFor, type NotesIndex } from "./note-model";
 
 export type LibrarySearch = {
@@ -20,6 +20,18 @@ export const defaultLibrarySearch: LibrarySearch = {
   addedFrom: "", addedThrough: "", provider: "", availability: "", favoriteOnly: false,
   sort: "added-desc",
 };
+
+export type LibraryView = "list" | "cards";
+
+export const libraryKinds = { "": "Все", audio: "Аудио", video: "Видео" } satisfies Record<LibrarySearch["kind"], string>;
+export const libraryProviders = {
+  "": "Любой", youtube: "YouTube", local: "Есть локальная копия",
+  "working-local": "Есть рабочая локальная копия",
+} satisfies Record<LibrarySearch["provider"], string>;
+export const libraryStatuses = {
+  "": "Любая", available: "Есть доступный источник", unknown: "Статус неизвестен",
+  unavailable: "Нет рабочего источника",
+} satisfies Record<LibrarySearch["availability"], string>;
 
 function terms(query: string) {
   return query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
@@ -52,6 +64,50 @@ function dateBound(value: string, nextDay = false) {
   if (!Number.isFinite(+date)) return undefined;
   if (nextDay) date.setDate(date.getDate() + 1);
   return +date;
+}
+
+type LibraryFilterCondition = {
+  key: string;
+  label: string;
+  advanced: boolean;
+  clear: (search: LibrarySearch) => LibrarySearch;
+};
+
+export function libraryFilterConditions(search: LibrarySearch, tags: TagDto[]): LibraryFilterCondition[] {
+  const conditions: LibraryFilterCondition[] = [];
+  function add(field: Exclude<keyof LibrarySearch, "query" | "sort" | "tagIds">, label: string, advanced = false) {
+    conditions.push({
+      key: field, label, advanced,
+      clear: (current) => ({ ...current, [field]: defaultLibrarySearch[field] }),
+    });
+  }
+
+  if (search.kind) add("kind", libraryKinds[search.kind]);
+  if (search.favoriteOnly) add("favoriteOnly", "Избранное");
+  for (const id of search.tagIds) {
+    conditions.push({
+      key: `tag:${id}`,
+      label: tags.find((tag) => tag.id === id)?.name ?? "Удалённый тег",
+      advanced: false,
+      clear: (current) => ({ ...current, tagIds: current.tagIds.filter((tagId) => tagId !== id) }),
+    });
+  }
+  if (search.provider) add("provider", libraryProviders[search.provider], true);
+  if (search.availability) add("availability", libraryStatuses[search.availability], true);
+  if (durationBound(search.minDuration) !== undefined) add("minDuration", `Длительность от ${search.minDuration} с`, true);
+  if (durationBound(search.maxDuration) !== undefined) add("maxDuration", `Длительность до ${search.maxDuration} с`, true);
+  if (dateBound(search.addedFrom) !== undefined) add("addedFrom", `Добавлено с ${search.addedFrom}`, true);
+  if (dateBound(search.addedThrough) !== undefined) add("addedThrough", `Добавлено по ${search.addedThrough}`, true);
+  return conditions;
+}
+
+export function resetLibraryFilters({ query, sort }: LibrarySearch): LibrarySearch {
+  return { ...defaultLibrarySearch, query, sort };
+}
+
+export function selectLibraryResults(selected: string[], items: ItemDto[], checked: boolean) {
+  const ids = new Set(items.map(({ id }) => id));
+  return checked ? [...new Set([...selected, ...ids])] : selected.filter((id) => !ids.has(id));
 }
 
 const titleOrder = new Intl.Collator("ru", { sensitivity: "base", numeric: true });

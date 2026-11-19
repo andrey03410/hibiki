@@ -25,6 +25,8 @@ import {
   createYoutubeRestartConfirmation,
   recoverDeletedQueueEntry,
   reconcileQueuePlaylistIds,
+  canAutoplayPlayback,
+  soundUnavailableReason,
 } from "./player-model.ts";
 
 const audio = {
@@ -212,6 +214,46 @@ describe("player listening lifecycle", () => {
 });
 
 describe("browser playback model", () => {
+  const videoWithSound = {
+    ...video,
+    sources: [
+      { id: "copy", provider: "local", status: "available", streamUrl: "/files/copy", mime: "audio/mp4", hasAudio: true },
+      { id: "movie", provider: "local", status: "available", streamUrl: "/files/movie", mime: "video/mp4", hasAudio: true },
+      { id: "youtube", provider: "youtube", status: "available", externalId: "abcdefghijk" },
+    ],
+  };
+  const youtubeOnly = { ...videoWithSound, id: "yt-only", sources: [videoWithSound.sources[2]!] };
+  const silent = { ...videoWithSound, id: "silent", sources: [{ ...videoWithSound.sources[1]!, hasAudio: false }] };
+
+  it("plays a video in its original form and prefers its audio copy when listening", () => {
+    const item = { ...videoWithSound, preferredSourceId: "copy" };
+    expect(playbackSources(item, "original").map((source) => source.id)).toEqual(["movie", "youtube", "copy"]);
+    expect(playbackSources(item, "audio").map((source) => source.id)).toEqual(["copy", "movie"]);
+    expect(playbackKind(item, item.sources[1], "audio")).toBe("audio");
+    expect(playbackSources(silent, "original")).toHaveLength(1);
+    expect(playbackSources(silent, "audio")).toEqual([]);
+    expect(soundUnavailableReason(silent)).toBe("В видео нет звуковой дорожки");
+    expect(soundUnavailableReason(youtubeOnly)).toBe("Для прослушивания нужна локальная копия");
+    expect(soundUnavailableReason(video)).toBe("Звуковая дорожка ещё не проверена");
+  });
+
+  it("waits to play video outside the player, including YouTube, and allows local audio", () => {
+    expect(canAutoplayPlayback(videoWithSound, videoWithSound.sources[1], "original", false)).toBe(false);
+    expect(canAutoplayPlayback(youtubeOnly, youtubeOnly.sources[0], "original", false)).toBe(false);
+    expect(canAutoplayPlayback(videoWithSound, videoWithSound.sources[1], "original", true)).toBe(true);
+    expect(canAutoplayPlayback(videoWithSound, videoWithSound.sources[1], "audio", false)).toBe(true);
+    expect(canAutoplayPlayback(videoWithSound, videoWithSound.sources[0], "original", false)).toBe(true);
+  });
+
+  it("finds the next compatible entry without changing the saved queue or wrapping by default", () => {
+    const entries = [audio, silent, youtubeOnly, videoWithSound];
+    const queue = entries.map((item) => item.id);
+    expect(nextPlayableIndex(queue, 0, entries, 1, false, "audio")).toBe(3);
+    expect(firstPlayableIndex(queue, 1, entries, "audio", false)).toBe(3);
+    expect(nextPlayableIndex(queue, 3, entries, 1, false, "audio")).toBe(-1);
+    expect(restorePlayback({ queue, queueIndex: 3, mode: "audio" }, entries)).toMatchObject({ queue, mode: "audio" });
+    expect(restorePlayback({ queue }, entries).mode).toBe("original");
+  });
   it("cues a paused YouTube restore at its saved position and loads an active one", () => {
     const operations: unknown[][] = [];
     const iframe = {
@@ -331,6 +373,16 @@ describe("browser playback model", () => {
     expect(restoreCachedPlayback(imported, cache, items)).toMatchObject({
       queue: ["video", "audio"], position: 0,
     });
+  });
+  it("keeps unsynced cached edits across the upgrade from a signature without a mode", () => {
+    const server = { queue: ["audio", "video"], queueIndex: 0, position: 5, volume: 0.8, repeat: "off", shuffle: false } as const;
+    const initial = { ...server, queue: [...server.queue] };
+    const legacySignature = JSON.stringify([server.queue, 0, 5, 0.8, "off", false, []]);
+    const restored = restoreCachedPlayback(initial, {
+      queue: ["video", "audio"], queueIndex: 0, position: 24, serverSignature: legacySignature,
+    }, [audio, video]);
+    expect(restored).toMatchObject({ queue: ["video", "audio"], position: 24, mode: "original" });
+    expect(playbackSettingsSignature({ ...restored, mode: "audio" })).not.toBe(playbackSettingsSignature(restored));
   });
   it("drops playlist contexts rejected by the server without reverting later queue edits", () => {
     const submitted = { audio: "deleted", video: "old", lost: "deleted" };

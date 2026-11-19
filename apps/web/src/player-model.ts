@@ -1,4 +1,4 @@
-import type { ItemDto, PlaylistDefinition } from "@hibiki/contracts";
+import type { ItemDto, PlaybackMode, PlaylistDefinition } from "@hibiki/contracts";
 import { moveQueueItem, normalizeQueue, shuffleUpcoming, type QueueOrder } from "@hibiki/core";
 
 export interface PlayableItem {
@@ -14,12 +14,15 @@ export interface PlaybackSource {
   streamUrl?: string | null;
   externalId?: string | null;
   url?: string | null;
+  mime?: string | null;
+  hasAudio?: boolean;
 }
 export interface PlaybackSettings extends QueueOrder {
   position: number;
   volume: number;
   repeat: "off" | "all" | "one";
   shuffle: boolean;
+  mode: PlaybackMode;
   queuePlaylistIds?: Record<string, string>;
   originalQueue?: string[];
 }
@@ -137,28 +140,49 @@ export function createPlaybackAttempt(history: ListeningAttempt) {
   };
 }
 export function playbackSources<T extends PlaybackSource>(item: {
+  kind: "audio" | "video";
   preferredSourceId?: string;
   sources: T[];
-}): T[] {
+}, mode: PlaybackMode = "original"): T[] {
+  const matchesKind = (source: T) => mode === "audio"
+    ? playbackKind(item, source) === "audio"
+    : item.kind !== "video" || playbackKind(item, source) === item.kind;
+  const soundCapable = (source: T) => source.provider === "local" &&
+    (source.hasAudio ?? (playbackKind(item, source) === "audio"));
   return item.sources
     .filter(
       (s) =>
         s.status !== "unavailable" &&
+        (mode !== "audio" || soundCapable(s)) &&
         (s.provider === "local" ? !!s.streamUrl : !!s.externalId || !!s.url),
     )
     .sort(
       (a, b) =>
+        Number(matchesKind(b)) - Number(matchesKind(a)) ||
         Number(b.id === item.preferredSourceId) - Number(a.id === item.preferredSourceId) ||
         Number(b.provider === "local") - Number(a.provider === "local"),
     );
 }
 
+export function soundUnavailableReason(item: PlayableItem): string | undefined {
+  if (playbackSources(item, "audio").length) return;
+  const sources = playbackSources(item);
+  if (sources.some((source) => source.provider === "local" && source.hasAudio === false))
+    return "В видео нет звуковой дорожки";
+  if (sources.some((source) => source.provider === "local" && source.hasAudio === undefined))
+    return "Звуковая дорожка ещё не проверена";
+  if (sources.some((source) => source.provider === "youtube"))
+    return "Для прослушивания нужна локальная копия";
+  return "Источник звука недоступен";
+}
+
 export function playbackSourceForAttempt<T extends PlaybackSource>(
-  item: { preferredSourceId?: string; sources: T[] },
+  item: { kind: "audio" | "video"; preferredSourceId?: string; sources: T[] },
   failed: ReadonlySet<string>,
   active?: { sourceId: string; preferredSourceId?: string },
+  mode: PlaybackMode = "original",
 ): T | undefined {
-  const sources = playbackSources(item).filter((source) => !failed.has(source.id));
+  const sources = playbackSources(item, mode).filter((source) => !failed.has(source.id));
   if (active && active.preferredSourceId !== item.preferredSourceId) {
     const retained = sources.find((source) => source.id === active.sourceId);
     if (retained) return retained;
@@ -243,6 +267,7 @@ export function restorePlayback(
         ? settings.repeat
         : "off",
     shuffle: !!settings.shuffle,
+    mode: settings.mode === "audio" ? "audio" : "original",
     originalQueue: Array.isArray(settings.originalQueue)
       ? settings.originalQueue.filter((id) => valid.has(id))
       : undefined,
@@ -255,11 +280,13 @@ export function restorePlayback(
 }
 
 export function playbackSettingsSignature(settings: PlaybackSettings): string {
-  const { queue, queueIndex, position, volume, repeat, shuffle, queuePlaylistIds } = settings;
-  return JSON.stringify([
+  const { queue, queueIndex, position, volume, repeat, shuffle, mode, queuePlaylistIds } = settings;
+  const signature = [
     queue, queueIndex, position, volume, repeat, shuffle,
     Object.entries(queuePlaylistIds ?? {}).sort(),
-  ]);
+  ];
+  // Preserve the default signature used by older cached player state.
+  return JSON.stringify(mode === "audio" ? [...signature, mode] : signature);
 }
 
 export function reconcileQueuePlaylistIds(
@@ -292,9 +319,10 @@ export function nextPlayableIndex(
   items: PlayableItem[],
   direction: number,
   wrap: boolean,
+  mode: PlaybackMode = "original",
 ): number {
   const valid = new Set(
-    items.filter((i) => playbackSources(i).length > 0).map((i) => i.id),
+    items.filter((i) => playbackSources(i, mode).length > 0).map((i) => i.id),
   );
   for (let n = 1; n <= queue.length; n++) {
     let index = current + n * direction;
@@ -309,11 +337,13 @@ export function firstPlayableIndex(
   queue: string[],
   selected: number,
   items: PlayableItem[],
+  mode: PlaybackMode = "original",
+  wrap = true,
 ): number {
   const item = items.find((i) => i.id === queue[selected]);
-  return item && playbackSources(item).length
+  return item && playbackSources(item, mode).length
     ? selected
-    : nextPlayableIndex(queue, selected, items, 1, true);
+    : nextPlayableIndex(queue, selected, items, 1, wrap, mode);
 }
 
 export function recoverDeletedQueueEntry(
@@ -324,10 +354,10 @@ export function recoverDeletedQueueEntry(
   const restored = restorePlayback(state, items);
   if (!restored.queue.length) return restored;
   const playable = items.filter((item) => !failed.has(item.id));
-  const next = nextPlayableIndex(state.queue, state.queueIndex, playable, 1, false);
+  const next = nextPlayableIndex(state.queue, state.queueIndex, playable, 1, false, state.mode);
   const neighbor = next >= 0
     ? next
-    : nextPlayableIndex(state.queue, state.queueIndex, playable, -1, false);
+    : nextPlayableIndex(state.queue, state.queueIndex, playable, -1, false, state.mode);
   const queueIndex = neighbor >= 0
     ? restored.queue.indexOf(state.queue[neighbor]!)
     : Math.min(restored.queue.length - 1, state.queueIndex);
@@ -393,12 +423,23 @@ export function playbackArtwork(
 
 export function playbackKind(
   item: { kind: "audio" | "video" },
-  source?: { provider: "local" | "youtube"; mime?: string },
+  source?: { provider: "local" | "youtube"; mime?: string | null },
+  mode: PlaybackMode = "original",
 ): "audio" | "video" {
+  if (mode === "audio") return "audio";
   if (source?.provider === "youtube") return "video";
   if (source?.mime?.startsWith("audio/")) return "audio";
   if (source?.mime?.startsWith("video/")) return "video";
   return item.kind;
+}
+
+export function canAutoplayPlayback(
+  item: { kind: "audio" | "video" },
+  source: PlaybackSource | undefined,
+  mode: PlaybackMode,
+  onPlayerScreen: boolean,
+): boolean {
+  return !!source && (onPlayerScreen || playbackKind(item, source, mode) === "audio");
 }
 
 

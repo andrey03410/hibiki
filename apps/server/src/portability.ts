@@ -159,9 +159,10 @@ export interface ImportPreview {
 export interface CheckedArchive {
   manifest: PortableManifest;
   preview: ImportPreview;
-  files: Map<string, { path: string; hash: string; bytes: number }>;
+  files: Map<string, ExtractedFile>;
   archiveHash: string;
 }
+type ExtractedFile = { path: string; hash: string; bytes: number; hasAudio?: boolean };
 const MAX_TOTAL = 20 * 1024 ** 3;
 const MAX_MANIFEST = 16 * 1024 ** 2;
 const MAX_ENTRIES = 100_001;
@@ -183,6 +184,7 @@ const safeSettings = (value: unknown): Settings => {
         "queue",
         "queueIndex",
         "position",
+        "mode",
         "originalQueue",
         "queuePlaylistIds",
       ]
@@ -511,10 +513,7 @@ export async function inspectArchive(
 ): Promise<CheckedArchive> {
   signal?.throwIfAborted();
   await mkdir(workDir, { recursive: true });
-  const files = new Map<
-    string,
-    { path: string; hash: string; bytes: number }
-  >();
+  const files = new Map<string, ExtractedFile>();
   const names = new Set<string>();
   let manifestBuffer: Buffer | undefined;
   let total = 0;
@@ -645,6 +644,7 @@ export async function inspectArchive(
       signal?.throwIfAborted();
       if (media.kind !== file.kind || media.mime !== file.mime)
         throw new Error(`Тип медиа не совпадает с манифестом: ${file.id}`);
+      actual.hasAudio = media.hasAudio;
       if (!media.browserCompatible)
         for (const item of manifest.items)
           for (const source of item.sources)
@@ -808,6 +808,7 @@ export async function applyArchive(
         for (const file of manifest.files) {
           signal?.throwIfAborted();
           const plan = prepared.get(file.hash)!;
+          const hasAudio = checked.files.get(file.path)?.hasAudio;
           let stored = await tx.mediaFile.findUnique({
             where: { ownerId_hash: { ownerId, hash: file.hash } },
           });
@@ -822,6 +823,7 @@ export async function applyArchive(
                 bytes: file.bytes,
                 kind: file.kind,
                 duration: file.duration,
+                hasAudio,
               },
             });
           else if (plan.copied && stored.path === plan.previousPath)
@@ -833,7 +835,13 @@ export async function applyArchive(
                 bytes: file.bytes,
                 kind: file.kind,
                 duration: file.duration,
+                hasAudio,
               },
+            });
+          else if (hasAudio !== undefined && stored.hasAudio !== hasAudio)
+            stored = await tx.mediaFile.update({
+              where: { id: stored.id },
+              data: { hasAudio },
             });
           const usable =
             stored.path === plan.relative

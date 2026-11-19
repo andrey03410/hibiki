@@ -15,6 +15,10 @@ MCP, worker и перенос. Проверки — в verify.md задачи. �
 watch layout с очередью справа, audio artwork, fullscreen overlay с idle3 с,
 проверка метаданных YouTube-позиций без названия. Статус и QG — в папке задачи.
 
+[04. Медиатека и режимы воспроизведения](.ai/features/04-library-playback-modes/README.md):
+отдельный `/player`, звуковой режим общей очереди, запуск с выбранного результата,
+быстрые фильтры и компактные карточки.
+
 ## Стек и проверки
 
 TypeScript · Node.js >=22.16 · npm workspaces · Fastify 5 · SQLite + Prisma 7 ·
