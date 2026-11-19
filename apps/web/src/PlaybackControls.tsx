@@ -1,8 +1,8 @@
-import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
-import { Headphones, ListMusic, Music2, Play, Video, X } from "lucide-react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type Ref } from "react";
+import { ListMusic, Music2, Video, X } from "lucide-react";
 import type { ItemDto } from "@hibiki/contracts";
 import { formatDuration, mediaWord } from "./api";
-import { playbackSources, soundUnavailableReason, type PlaybackSettings } from "./player-model";
+import { queueEntryUnavailableReason, type PlaybackSettings } from "./player-model";
 
 const seekKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"];
 
@@ -49,14 +49,53 @@ export function PlaybackSeekBar({
   );
 }
 
-export function CompactPlaybackQueue({ settings, itemsById, failedIds }: {
+export function CompactPlaybackQueueRow({ title, kind, duration, current, unavailableReason, failed, buttonRef, onSelect }: {
+  title: string;
+  kind?: ItemDto["kind"];
+  duration?: ItemDto["duration"];
+  current: boolean;
+  unavailableReason?: string;
+  failed?: boolean;
+  buttonRef?: Ref<HTMLButtonElement>;
+  onSelect: () => void;
+}) {
+  const reasonId = useId();
+  const reason = unavailableReason ?? (failed ? "Источник недоступен" : undefined);
+  const Icon = kind === "video" ? Video : Music2;
+  return (
+    <li>
+      <button
+        ref={buttonRef}
+        className="mini-queue-row"
+        type="button"
+        aria-label={title}
+        aria-current={current ? "true" : undefined}
+        aria-disabled={unavailableReason ? true : undefined}
+        aria-describedby={reason ? reasonId : undefined}
+        onClick={() => { if (!unavailableReason) onSelect(); }}
+      >
+        <Icon size={15} aria-hidden="true" />
+        <span className="mini-queue-name">
+          <span title={title}>{title}</span>
+          {reason && <small id={reasonId}>{reason}</small>}
+        </span>
+        <span className="mini-queue-duration">{formatDuration(duration)}</span>
+      </button>
+    </li>
+  );
+}
+
+export function CompactPlaybackQueue({ settings, itemsById, failedIds, onSelect }: {
   settings: Pick<PlaybackSettings, "queue" | "queueIndex" | "mode">;
   itemsById: ReadonlyMap<string, ItemDto>;
   failedIds: ReadonlySet<string>;
+  onSelect: (index: number) => void;
 }) {
   const [open, setOpen] = useState(false);
   const region = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const activeRow = useRef<HTMLButtonElement>(null);
+  const focusSelected = useRef<string | undefined>(undefined);
   const panelId = useId();
   const { queue, queueIndex, mode } = settings;
 
@@ -64,6 +103,12 @@ export function CompactPlaybackQueue({ settings, itemsById, failedIds }: {
     setOpen(false);
     trigger.current?.focus();
   }
+
+  useLayoutEffect(() => {
+    if (focusSelected.current === undefined) return;
+    if (focusSelected.current === queue[queueIndex]) activeRow.current?.focus();
+    focusSelected.current = undefined;
+  }, [queue, queueIndex]);
 
   useEffect(() => {
     if (!open) return;
@@ -83,23 +128,24 @@ export function CompactPlaybackQueue({ settings, itemsById, failedIds }: {
     };
   }, [open]);
 
-  function row(id: string) {
+  function row(id: string, index: number) {
     const item = itemsById.get(id);
-    const title = item?.title ?? "Запись удалена";
-    const current = id === queue[queueIndex];
-    const available = item && !failedIds.has(id) && playbackSources(item, mode).length > 0;
-    const state = !item ? "Нет в медиатеке" : available ? undefined
-      : (mode === "audio" && soundUnavailableReason(item)) || "Источник недоступен";
-    const Icon = item?.kind === "video" ? Video : Music2;
+    const current = index === queueIndex;
     return (
-      <li key={id} className="mini-queue-row" aria-current={current ? "true" : undefined}>
-        <Icon size={15} aria-hidden="true" />
-        <span className="mini-queue-name">
-          <span title={title}>{title}</span>
-          {state && <small>{state}</small>}
-        </span>
-        <span className="mini-queue-duration">{formatDuration(item?.duration)}</span>
-      </li>
+      <CompactPlaybackQueueRow
+        key={id}
+        title={item?.title ?? "Запись удалена"}
+        kind={item?.kind}
+        duration={item?.duration}
+        current={current}
+        unavailableReason={queueEntryUnavailableReason(item, mode)}
+        failed={failedIds.has(id)}
+        buttonRef={current ? activeRow : undefined}
+        onSelect={() => {
+          if (!current) focusSelected.current = id;
+          onSelect(index);
+        }}
+      />
     );
   }
 
@@ -137,10 +183,10 @@ export function CompactPlaybackQueue({ settings, itemsById, failedIds }: {
             </header>
             <div className="mini-queue-scroll" tabIndex={0} role="region" aria-label="Записи очереди">
               <h3>Сейчас</h3>
-              <ul>{queue.slice(queueIndex, queueIndex + 1).map(row)}</ul>
+              <ul>{queue.slice(queueIndex, queueIndex + 1).map((id) => row(id, queueIndex))}</ul>
               <h3>Далее</h3>
               {queueIndex + 1 < queue.length
-                ? <ul>{queue.slice(queueIndex + 1).map(row)}</ul>
+                ? <ul>{queue.slice(queueIndex + 1).map((id, index) => row(id, queueIndex + index + 1))}</ul>
                 : <p>Дальше записей нет.</p>}
               {queueIndex > 0 && (
                 <details className="mini-queue-past">
@@ -153,39 +199,5 @@ export function CompactPlaybackQueue({ settings, itemsById, failedIds }: {
         )}
       </section>
     </div>
-  );
-}
-
-const libraryActions = {
-  play: { label: "Воспроизвести", Icon: Play },
-  watch: { label: "Смотреть", Icon: Video },
-  listen: { label: "Слушать", Icon: Headphones },
-};
-
-export function LibraryPlaybackButton({ action, itemTitle, unavailableReason, onActivate }: {
-  action: keyof typeof libraryActions;
-  itemTitle: string;
-  unavailableReason?: string;
-  onActivate: () => void;
-}) {
-  const tooltipId = useId();
-  const { label, Icon } = libraryActions[action];
-  return (
-    <span className="library-playback-action">
-      <button
-        className="library-item-play library-item-play-icon"
-        type="button"
-        aria-label={`${label} ${itemTitle}`}
-        aria-disabled={unavailableReason ? true : undefined}
-        aria-describedby={unavailableReason ? tooltipId : undefined}
-        onClick={() => { if (!unavailableReason) onActivate(); }}
-      >
-        <Icon size={16} fill={action === "play" ? "currentColor" : "none"} aria-hidden="true" />
-      </button>
-      <span className="library-playback-tooltip" id={tooltipId} role="tooltip">
-        {label}
-        {unavailableReason && <><br />{unavailableReason}</>}
-      </span>
-    </span>
   );
 }

@@ -4,9 +4,11 @@ import { describe, expect, it } from "vitest";
 import type { ItemDto, SourceDto } from "@hibiki/contracts";
 import { LibrarySearchControls } from "./LibrarySearchControls";
 import {
+  countLibraryTags,
   defaultLibrarySearch,
   libraryFilterConditions,
   librarySourceBadges,
+  libraryTagChoices,
   matchesSearch,
   resetLibraryFilters,
   searchLibrary,
@@ -116,6 +118,24 @@ describe("library search", () => {
     expect(matchesSearch("ночь город", "Прогулки: город")).toBe(false);
   });
 
+  it("counts each tagged record once", () => {
+    expect(countLibraryTags([
+      item("both"), item("repeat-tag", { tags: [tag, tag] }), item("untagged", { tags: [] }),
+    ])).toEqual(new Map([[tag.id, 2], [extra.id, 1]]));
+  });
+
+  it("prioritizes popular tags in the preview and searches the entire catalog", () => {
+    const catalog = Array.from({ length: 40 }, (_, index) => ({
+      ...tag, id: String(index + 1), name: `Дорога ${index + 1}`,
+    }));
+    const counts = new Map([["8", 15], ["9", 15], ["1", 2]]);
+    expect(libraryTagChoices(catalog, counts, "", false).map(({ id }) => id)).toEqual(["8", "9", "1", "2", "3", "4"]);
+    expect(libraryTagChoices(catalog, counts, " 40 ДОРОГА ", false).map(({ id }) => id)).toEqual(["40"]);
+    const allTags = libraryTagChoices(catalog, counts, "", true);
+    expect(allTags).toHaveLength(40);
+    expect(allTags[39].id).toBe("40");
+  });
+
   it("removes just the requested active condition and counts advanced filters separately", () => {
     const search = {
       ...defaultLibrarySearch, kind: "video", tagIds: [tag.id, extra.id],
@@ -162,7 +182,7 @@ describe("library search", () => {
     }));
     expect(html).toMatch(/<button[^>]*aria-pressed="true"[^>]*>Видео<\/button>/);
     expect(html).toContain('aria-label="Карточки" aria-pressed="true"');
-    expect(html).toMatch(/<button[^>]*aria-expanded="false"[^>]*><svg[^>]*>[^]*?<\/svg> Фильтры \(1\)<\/button>/);
+    expect(html).toMatch(/<button[^>]*aria-label="Фильтры \(1\)"[^>]*aria-expanded="false"[^>]*>/);
     expect(html).toContain('aria-label="Снять фильтр «YouTube»"');
     expect(html).toContain('role="status">Найдено: 3');
     expect(html).toContain("Сбросить фильтры");
@@ -175,5 +195,22 @@ describe("library search", () => {
     }));
     expect(html).toContain("Играть найденное");
     expect(html).toContain("Слушать найденное");
+  });
+
+  it("shows title search, tag search and counted tag choices without opening any filters", () => {
+    const otherTags = Array.from({ length: 7 }, (_, index) => ({ ...extra, id: `tag-${index}`, name: `Тег ${index}` }));
+    const html = renderToStaticMarkup(createElement(LibrarySearchControls, {
+      value: { ...defaultLibrarySearch, tagIds: [tag.id, otherTags[6].id] },
+      tags: [...otherTags, tag], tagCounts: new Map([[tag.id, 12]]), count: 3, view: "list",
+      onViewChange: () => {}, onChange: () => {}, onPlay: () => {},
+    }));
+    expect(html).toContain('aria-label="Поиск по названию, тегам и заметкам" placeholder="Поиск по названию"');
+    expect(html).toContain('type="search" aria-label="Поиск тегов"');
+    expect(html).toMatch(/<button[^>]*aria-expanded="false"[^>]*>Все теги/);
+    const pressedTags = html.match(/<button class="library-tag-choice"[^>]*aria-pressed="true"[^>]*>[^]*?<\/button>/g) ?? [];
+    expect(pressedTags).toHaveLength(1);
+    expect(pressedTags[0]).toMatch(/>Саундтрек<\/span><span[^>]*>12<\/span>/);
+    expect(html).not.toContain('aria-label="Снять фильтр «Саундтрек»"');
+    expect(html).toContain('aria-label="Снять фильтр «Тег 6»"');
   });
 });

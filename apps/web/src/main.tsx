@@ -49,7 +49,6 @@ import {
   KeyRound,
   Copy,
   ExternalLink,
-  Clock3,
   FolderOpen,
   Sparkles,
   CheckCircle2,
@@ -70,9 +69,9 @@ import type {
 } from "@hibiki/contracts";
 import { api, formatDuration, humanDuration, mediaWord } from "./api.ts";
 import { PlayerProvider, usePlayer } from "./player.tsx";
-import { LibraryPlaybackButton } from "./PlaybackControls";
+import { ItemTagList, LibraryVideoAction } from "./LibraryItemControls.tsx";
 import { playbackSources, soundUnavailableReason } from "./player-model.ts";
-import { librarySourceBadges, matchesSearch, searchLibrary, selectLibraryResults, sourceAvailability, type LibraryView } from "./library-search.ts";
+import { countLibraryTags, defaultLibrarySearch, librarySourceBadges, matchesSearch, searchLibrary, selectLibraryResults, sourceAvailability, type LibraryView } from "./library-search.ts";
 import { LibrarySearchControls, useLibrarySearch } from "./LibrarySearchControls.tsx";
 import { NoteEditor, NoteIndicator, NotesContext, NotesLoadError, useNotes, useNotesController } from "./NoteEditor.tsx";
 import { noteFor } from "./note-model.ts";
@@ -197,20 +196,6 @@ function Cover({
       )}
       <div className="cover-grain" />
     </div>
-  );
-}
-function TagPill({ tag, onClick }: { tag: TagDto; onClick?: () => void }) {
-  return (
-    <button
-      type="button"
-      className="tag-pill"
-      style={{ "--tag": tag.color || "#aaa" } as any}
-      onClick={onClick}
-      disabled={!onClick}
-    >
-      <span />
-      {tag.name}
-    </button>
   );
 }
 function EmptyState({
@@ -430,6 +415,11 @@ function Workspace({
   const librarySearch = useLibrarySearch(user.id);
   const seenImports = useRef<Set<string> | null>(null);
   const navigate = useNavigate();
+  function browseTag(id: string) {
+    librarySearch[1]((old) => ({ ...defaultLibrarySearch, sort: old.sort, tagIds: [id] }));
+    navigate("/");
+    window.scrollTo(0, 0);
+  }
   function notify(text: string, error = false) {
     const id = Date.now() + Math.random();
     setToasts((old) => [...old, { id, text, error }]);
@@ -549,24 +539,24 @@ function Workspace({
             </Link>
             <span className="sidebar-label">ВАШЕ ПРОСТРАНСТВО</span>
             <nav className="main-nav">
-              <NavLink to="/" end>
+              <NavLink to="/" end aria-label="Медиатека" title="Медиатека">
                 <Library size={19} />
                 <span>Медиатека</span>
                 <span className="nav-count">{library.items.length}</span>
               </NavLink>
-              <NavLink to="/player" aria-label="Плеер">
+              <NavLink to="/player" aria-label="Плеер" title="Плеер">
                 <AudioLines size={19} />
                 <span>Плеер</span>
               </NavLink>
-              <NavLink to="/playlists">
+              <NavLink to="/playlists" aria-label="Плейлисты" title="Плейлисты">
                 <ListMusic size={19} />
                 <span>Плейлисты</span>
               </NavLink>
-              <NavLink to="/tags">
+              <NavLink to="/tags" aria-label="Теги" title="Теги">
                 <Tags size={19} />
                 <span>Теги</span>
               </NavLink>
-              <NavLink to="/jobs">
+              <NavLink to="/jobs" aria-label="Задания" title="Задания">
                 <Download size={19} />
                 <span>Задания</span>
                 {activeJobs > 0 && (
@@ -602,14 +592,7 @@ function Workspace({
             </nav>
             <div className="sidebar-bottom">
               <YoutubeSyncNotifications reload={refresh} />
-              <div className="local-card">
-                <span className="online-dot" />
-                <span>
-                  Личная медиатека<small>Хранится на вашем сервере</small>
-                </span>
-                <HardDrive size={17} />
-              </div>
-              <NavLink className="settings-link" to="/settings">
+              <NavLink className="settings-link" to="/settings" aria-label="Настройки" title="Настройки">
                 <Settings2 size={18} />
                 Настройки
                 <ChevronRight size={15} />
@@ -641,8 +624,8 @@ function Workspace({
                 path="/playlists"
                 element={<PlaylistsPage query={playlistQuery} onQuery={setPlaylistQuery} onCreate={() => setCreateOpen(true)} />}
               />
-              <Route path="/playlists/:id" element={<PlaylistPage />} />
-              <Route path="/tags" element={<TagsPage query={tagQuery} onQuery={setTagQuery} />} />
+              <Route path="/playlists/:id" element={<PlaylistPage onBrowseTag={browseTag} />} />
+              <Route path="/tags" element={<TagsPage query={tagQuery} onQuery={setTagQuery} onBrowse={browseTag} />} />
               <Route path="/jobs" element={<JobsPage />} />
               <Route path="/settings" element={<SettingsPage user={user} />} />
               <Route
@@ -661,10 +644,6 @@ function Workspace({
               />
             </Routes>
             </div>
-            <footer className="page-footer">
-              <span>響き · Звучание, которое остаётся</span>
-              <span>HIBIKI · ВАША ЛИЧНАЯ МЕДИАТЕКА</span>
-            </footer>
             {miniPlayer}
           </main>
         </div>
@@ -731,6 +710,25 @@ function LibraryPage({ userId, search }: { userId: string; search: ReturnType<ty
   });
   const items = useMemo(() => searchLibrary(library.items, filters, notes), [library.items, filters, notes]);
 
+  const tagCounts = useMemo(() => countLibraryTags(library.items), [library.items]);
+
+  const selectedIds = new Set(selected);
+  const selectedCount = items.filter((item) => selectedIds.has(item.id)).length;
+  const selectAll = (
+    <label className="collection-select-all">
+      <input
+        type="checkbox"
+        aria-label="Выбрать все найденные записи"
+        checked={items.length > 0 && selectedCount === items.length}
+        ref={(input) => {
+          if (input) input.indeterminate = selectedCount > 0 && selectedCount < items.length;
+        }}
+        onChange={(event) => setSelected(selectLibraryResults(selected, items, event.target.checked))}
+      />
+      Выбрать все
+    </label>
+  );
+
   function changeView(next: LibraryView) {
     setView(next);
     try {
@@ -744,9 +742,9 @@ function LibraryPage({ userId, search }: { userId: string; search: ReturnType<ty
     <>
       <div className="title-row library-title-row">
         <h1>Медиатека</h1>
-        <Button className="primary" onClick={openImport}>
+        <Button className="primary" onClick={openImport} aria-label="Добавить медиа" title="Добавить медиа">
           <Plus size={17} />
-          Добавить медиа
+          <span>Добавить медиа</span>
         </Button>
       </div>
       <section className="library-section">
@@ -754,7 +752,9 @@ function LibraryPage({ userId, search }: { userId: string; search: ReturnType<ty
           value={filters}
           onChange={setFilters}
           tags={library.tags}
+          tagCounts={tagCounts}
           count={items.length}
+          selectAll={items.length > 0 ? selectAll : undefined}
           view={view}
           onViewChange={changeView}
           onPlay={(mode) => player.start(items, 0, undefined, { mode, fromLibrary: true })}
@@ -865,19 +865,6 @@ function ItemTable({
   const edit = editTarget ? currentItems.get(editTarget.id) : undefined;
   const inLibrary = view !== undefined;
   const selectedIds = new Set(selected);
-  const selectedCount = selected ? items.filter((item) => selectedIds.has(item.id)).length : 0;
-  const selectAll = selected && (
-    <input
-      type="checkbox"
-      aria-label="Выбрать все найденные записи"
-      checked={items.length > 0 && selectedCount === items.length}
-      ref={(input) => {
-        if (input) input.indeterminate = selectedCount > 0 && selectedCount < items.length;
-      }}
-      onChange={(event) => onSelected?.(selectLibraryResults(selected, items, event.target.checked))}
-    />
-  );
-
   async function job(kind: string, itemId: string, mode?: string) {
     try {
       await api("/jobs", "POST", { kind, input: { itemId, mode } });
@@ -889,27 +876,38 @@ function ItemTable({
   }
 
   const results = items.map((item, index) => {
-    const local = item.sources.some((source) => source.provider === "local" && source.status === "available"),
-      hasLocal = item.sources.some((source) => source.provider === "local"),
-      yt = item.sources.some((source) => source.provider === "youtube"),
-      streamUrl = item.sources.find((source) => source.streamUrl)?.streamUrl,
-      externalUrl = item.sources.find((source) => source.url)?.url,
-      thumbnail = item.sources.find((source) => source.thumbnail)?.thumbnail,
-      available = playbackSources(item).length > 0,
-      active = player.current?.id === item.id,
-      canToggle = active && (!playlistId || player.settings.queuePlaylistIds?.[item.id] === playlistId),
-      canResumeVideo = canToggle && player.waitingForVideo,
-      status = sourceAvailability(item),
-      hasItemNote = !!noteFor(notes, "item", item.id),
-      hasSourceNote = item.sources.some((source) => noteFor(notes, "source", source.id)),
-      kindLabel = item.kind === "video" ? "Видео" : "Аудио",
-      playLabel = item.kind === "video" ? "Смотреть" : "Воспроизвести";
-
-    const artClass = `item-art art-${index % 6}`;
-    const art = <ItemArtwork key={thumbnail} thumbnail={thumbnail} kind={item.kind} />;
+    const streamUrl = item.sources.find((source) => source.streamUrl)?.streamUrl;
+    const externalUrl = item.sources.find((source) => source.url)?.url;
+    const thumbnail = item.sources.find((source) => source.thumbnail)?.thumbnail;
+    const available = playbackSources(item).length > 0;
+    const active = player.current?.id === item.id;
+    const playing = active && player.playing;
+    const status = sourceAvailability(item);
+    const hasItemNote = !!noteFor(notes, "item", item.id);
+    const hasSourceNote = item.sources.some((source) => noteFor(notes, "source", source.id));
+    const video = item.kind === "video";
+    const yt = item.sources.some((source) => source.provider === "youtube");
+    const kindLabel = video ? "Видео" : "Аудио";
+    const playLabel = playing ? "Приостановить"
+      : video && (!active || player.waitingForVideo || player.settings.mode === "original") ? "Смотреть"
+      : "Воспроизвести";
+    const coverLabel = `${playLabel} ${item.title}`;
+    const activate = (mode?: "original" | "audio") => player.activateItem(items, index, playlistId, { fromLibrary: inLibrary, mode });
+    const cover = (
+      <button type="button" className={`item-art entry-cover art-${index % 6}`}
+        aria-label={video ? `${coverLabel} · обложка` : coverLabel} title={available ? coverLabel : "Нет рабочего источника"}
+        disabled={!available} onClick={() => activate()}>
+        <ItemArtwork key={thumbnail} thumbnail={thumbnail} kind={item.kind} />
+        {available && (
+          <span className="entry-cover-control" aria-hidden="true">
+            {playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
+          </span>
+        )}
+      </button>
+    );
     const itemTitle = (
       <>
-        <button className="item-title" onClick={() => setEditTarget({ id: item.id })}>{item.title}</button>
+        <button className="item-title" title={item.title} onClick={() => setEditTarget({ id: item.id })}>{item.title}</button>
         {(hasItemNote || hasSourceNote) && (
           <NoteIndicator label={hasItemNote ? "Есть заметка у записи" : "Есть заметка у источника"} />
         )}
@@ -926,49 +924,15 @@ function ItemTable({
         )}
       />
     );
-    const duration = (
-      <span className="item-duration" title={item.duration === null ? "Длительность неизвестна" : undefined}>
-        {formatDuration(item.duration)}
-      </span>
-    );
-
-    const soundReason = inLibrary && item.kind === "video" ? soundUnavailableReason(item) : undefined;
-    const soundReasonId = `library-sound-reason-${encodeURIComponent(item.id)}`;
-    const play = () => player.start(items, index, undefined, { fromLibrary: true });
-    const listen = () => player.start(items, index, undefined, { fromLibrary: true, mode: "audio" });
-    const playActions = inLibrary && (
-      <div className="library-item-playback">
-        <button
-          className="library-item-play"
-          type="button"
-          aria-label={`${playLabel} ${item.title}`}
-          disabled={!available}
-          title={available ? undefined : "Нет рабочего источника"}
-          onClick={play}
-        >
-          <Play size={13} fill="currentColor" /> {playLabel}
-        </button>
-        {item.kind === "video" && (
-          <div className="library-listen-action">
-            <button
-              className="library-item-play"
-              type="button"
-              aria-label={`Слушать ${item.title}`}
-              aria-disabled={soundReason ? true : undefined}
-              aria-describedby={soundReason ? soundReasonId : undefined}
-              onClick={() => {
-                if (soundReason) {
-                  notify(soundReason, true);
-                  return;
-                }
-                listen();
-              }}
-            >
-              <Headphones size={14} /> Слушать
-            </button>
-            {soundReason && <span className="library-sound-reason" id={soundReasonId} role="tooltip">{soundReason}</span>}
-          </div>
-        )}
+    const showVideoActions = inLibrary && video;
+    const playActions = showVideoActions && (
+      <div className="entry-video-actions">
+        <LibraryVideoAction mode="original" title={item.title}
+          playing={playing && player.settings.mode === "original"} reason={available ? undefined : "Нет рабочего источника"}
+          onClick={() => activate("original")} onUnavailable={(reason) => notify(reason, true)} />
+        <LibraryVideoAction mode="audio" title={item.title}
+          playing={playing && player.settings.mode === "audio"} reason={soundUnavailableReason(item)}
+          onClick={() => activate("audio")} onUnavailable={(reason) => notify(reason, true)} />
       </div>
     );
     const menu = (
@@ -1063,79 +1027,28 @@ function ItemTable({
       </details>
     );
 
-    if (view === "cards") {
-      return (
-        <article className={`library-item-card ${active ? "current" : ""}`} key={item.id} aria-current={active || undefined}>
-          <div className="library-card-main">
-            {selection}
-            <span className={artClass} aria-hidden="true">{art}</span>
-            <div className="library-card-description">
-              <div className="item-name-actions">{itemTitle}</div>
-              <div className="library-card-meta">
-                <span className="item-subtitle">{kindLabel} · {duration}</span>
-                <span className="library-card-sources" role="group" aria-label="Источники">
-                  {librarySourceBadges(item).map(({ provider, status, label }) => {
-                    const Icon = provider === "youtube" ? Youtube : provider === "local" ? HardDrive : CircleAlert;
-                    return (
-                      <span key={provider} className="library-card-source" data-provider={provider} data-status={status}
-                        role="img" aria-label={label} title={label}>
-                        <Icon size={14} aria-hidden="true" />
-                      </span>
-                    );
-                  })}
-                </span>
-              </div>
-              {!available && <span className="item-subtitle">Нет рабочего источника</span>}
-            </div>
-          </div>
-          <div className="library-card-footer">
-            <div className="library-item-playback">
-              <LibraryPlaybackButton action={item.kind === "video" ? "watch" : "play"} itemTitle={item.title}
-                unavailableReason={available ? undefined : "Нет рабочего источника"} onActivate={play} />
-              {item.kind === "video" && (
-                <LibraryPlaybackButton action="listen" itemTitle={item.title} unavailableReason={soundReason} onActivate={listen} />
-              )}
-            </div>
-            <div className="library-card-tools">{favorite}{menu}</div>
-          </div>
-        </article>
-      );
-    }
-
+    const badges = librarySourceBadges(item);
     return (
-      <div
-        className={`item-row ${selected ? "selectable" : ""} ${active ? "current" : ""} ${!available ? "unavailable" : ""}`}
-        key={item.id}
-        aria-current={(inLibrary && active) || undefined}
-      >
-        {selection ?? <span className="row-number">{index + 1}</span>}
-        <div className="item-title-cell">
-          {inLibrary ? <span className={artClass} aria-hidden="true">{art}</span> : (
-            <button
-              className={artClass}
-              aria-label={`${canResumeVideo ? "Смотреть" : canToggle && player.playing ? "Приостановить" : "Воспроизвести"} ${item.title}`}
-              onClick={() => {
-                if (canResumeVideo) player.watchCurrent();
-                else if (canToggle) player.toggle();
-                else player.start(items, index, playlistId);
-              }}
-            >
-              {art}
-              <span className="art-play">
-                {canToggle && player.playing ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}
-              </span>
-            </button>
-          )}
-          <div className="truncate">
-            <div className="item-name-actions">{itemTitle}{favorite}</div>
-            <span className="item-subtitle">
-              {kindLabel}
-              {item.originalTitle !== item.title
-                ? ` · ${item.originalTitle}`
-                : local ? " · Локальная коллекция" : yt ? " · YouTube" : ""}
-              {status === "unavailable" && " · Нет рабочего источника"}
-              {status === "unknown" && " · Доступность не проверена"}
-            </span>
+      <article className={`collection-entry ${showVideoActions ? "with-video-actions" : ""} ${active ? "current" : ""}`}
+        key={item.id} aria-current={active || undefined}>
+        <div className="entry-select">{selection ?? <span className="row-number">{index + 1}</span>}</div>
+        <div className="entry-identity">
+          {cover}
+          <div className="entry-description">
+            <div className="item-name-actions">{itemTitle}</div>
+            <div className="entry-meta">
+              <span>{kindLabel} · {formatDuration(item.duration)}</span>
+              {badges.map(({ provider, status, label }) => {
+                const Icon = provider === "youtube" ? Youtube : provider === "local" ? HardDrive : CircleAlert;
+                return (
+                  <span key={provider} className="entry-source" data-provider={provider} data-status={status}
+                    role="img" aria-label={label} title={label}>
+                    <Icon size={13} aria-hidden="true" />
+                  </span>
+                );
+              })}
+              {!available && <span>Нет рабочего источника</span>}
+            </div>
             {reasons?.[item.id] && (
               <details className="reason-details">
                 <summary>Почему в плейлисте</summary>
@@ -1144,49 +1057,19 @@ function ItemTable({
             )}
           </div>
         </div>
-        <div className="item-tags">
-          {item.tags.slice(0, 2).map((tag) => (
-            <TagPill key={tag.id} tag={tag} onClick={onTag ? () => onTag(tag.id) : undefined} />
-          ))}
-          {item.tags.length > 2 && <span className="small muted">+{item.tags.length - 2}</span>}
-        </div>
-        <span className={`source-badge ${!available ? "missing" : ""}`}>
-          {hasLocal ? <HardDrive size={13} /> : yt ? <Youtube size={14} /> : <CircleAlert size={13} />}
-          <span>
-            {local ? "На устройстве" : hasLocal ? "Есть локальная копия" : yt ? "YouTube" : "Нет источника"}
-          </span>
-        </span>
-        {duration}
         {playActions}
-        {menu}
-      </div>
+        <div className="entry-tools">{favorite}{menu}</div>
+        <ItemTagList tags={item.tags} onTag={onTag} />
+      </article>
     );
   });
 
   return (
     <>
-      {view === "cards" ? (
-        items.length > 0 && (
-          <>
-            <label className="library-card-select-all">{selectAll} Выбрать все найденные записи</label>
-            <div className="library-card-grid">{results}</div>
-          </>
-        )
-      ) : (
-        (!inLibrary || items.length > 0) && (
-          <div className={`item-table ${inLibrary ? "library-item-table" : ""}`}>
-            <div className={`table-heading ${selected ? "selectable" : ""}`}>
-              {selectAll ?? <span>#</span>}
-              <span>НАЗВАНИЕ</span>
-              <span>ТЕГИ</span>
-              <span>ИСТОЧНИК</span>
-              <Clock3 size={14} />
-              {inLibrary && <span className="library-playback-heading" />}
-              <span />
-            </div>
-            {results}
-          </div>
-        )
+      {(!inLibrary || items.length > 0) && (
+        <div className={`item-collection ${view === "cards" ? "collection-cards" : "collection-list"}`}>
+          <div className="collection-results">{results}</div>
+        </div>
       )}
       {edit && (
         <EditItem
@@ -1528,25 +1411,16 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
   );
   return (
     <>
-      <PageTop label="Плейлисты" />
-      <div className="title-row">
-        <div>
-          <span className="eyebrow">ЗВУКИ, КОТОРЫЕ СВЯЗАНЫ</span>
-          <h1>
-            Плейлисты<span className="heading-dot">.</span>
-          </h1>
-          <p className="muted">
-            Любимые записи вместе. По вашему выбору или по вашим правилам.
-          </p>
-        </div>
-        <Button className="primary" onClick={onCreate}>
+      <div className="title-row library-title-row">
+        <h1>Плейлисты</h1>
+        <Button className="primary" onClick={onCreate} aria-label="Создать плейлист" title="Создать плейлист">
           <Plus size={17} />
-          Создать плейлист
+          <span>Создать плейлист</span>
         </Button>
       </div>
       <div className="section-heading">
         <h2>
-          Ваши подборки <span>{playlists.length}</span>
+          Найдено <span>{playlists.length}</span>
         </h2>
         <label className="search-input">
           <Search size={16} />
@@ -1563,13 +1437,6 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
         {playlists.map((p) => (
           <PlaylistCard key={p.id} playlist={p} />
         ))}
-        <button className="create-playlist-card" onClick={onCreate}>
-          <span>
-            <Plus size={28} />
-          </span>
-          <strong>Соберите что-то своё</strong>
-          <p>Из записей, тегов и других плейлистов</p>
-        </button>
       </div>
       {!playlists.length && query && (
         <EmptyState
@@ -1578,16 +1445,9 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
           icon={<ListMusic size={29} />}
         />
       )}
-      <div className="insight-card">
-        <Sparkles size={23} />
-        <div>
-          <h3>Плейлисты могут расти вместе с вашей медиатекой</h3>
-          <p>
-            Добавьте правило по тегу, объедините подборки или исключите лишнее.
-            Состав обновится сам — ваши связи сохранятся.
-          </p>
-        </div>
-      </div>
+      {!playlists.length && !query && (
+        <EmptyState title="Здесь будут ваши плейлисты" text="Соберите плейлист из записей или задайте правила подбора." />
+      )}
     </>
   );
 }
@@ -1668,7 +1528,7 @@ function PlaylistCard({ playlist }: { playlist: PlaylistDto }) {
     </article>
   );
 }
-function PlaylistPage() {
+function PlaylistPage({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
   const { id } = useParams(),
     { library, refresh, notify } = useData(),
     player = usePlayer(),
@@ -1760,14 +1620,8 @@ function PlaylistPage() {
             {playlist.youtubeLinked ? "СВЯЗАН С YOUTUBE" : automatic ? "СОСТАВНОЙ ПЛЕЙЛИСТ" : "ВАШ ПЛЕЙЛИСТ"}
           </span>
           <h1>{playlist.title}</h1>
-          <p className="muted">
-            {playlist.description || "У каждого настроения — своё звучание."}
-          </p>
+          {playlist.description && <p className="muted">{playlist.description}</p>}
           <div className="playlist-meta">
-            <span>
-              <span className="avatar tiny">H</span> Ваша коллекция
-            </span>
-            <i />
             {resolved && (
               <>
                 <span>
@@ -1860,6 +1714,7 @@ function PlaylistPage() {
             reasons={resolved.reasons}
             reorder={playlist.youtubeLinked ? undefined : reorder}
             playlistId={playlist.id}
+            onTag={onBrowseTag}
           />
           {!resolved.items.length && (
             <EmptyState
@@ -2608,7 +2463,11 @@ const TAG_COLORS = [
   "#7cbcb8",
   "#b5b5bc",
 ];
-function TagsPage({ query, onQuery }: { query: string; onQuery: (query: string) => void }) {
+function TagsPage({ query, onQuery, onBrowse }: {
+  query: string;
+  onQuery: (query: string) => void;
+  onBrowse: (id: string) => void;
+}) {
   const { library, refresh, notify } = useData(),
     [edit, setEdit] = useState<TagDto | "new" | null>(null),
     [name, setName] = useState(""),
@@ -2618,6 +2477,7 @@ function TagsPage({ query, onQuery }: { query: string; onQuery: (query: string) 
     [remove, setRemove] = useState<TagDto | null>(null);
   const { notes } = useNotes();
   const tags = library.tags.filter((tag) => matchesSearch(query, tag.name, noteFor(notes, "tag", tag.id)));
+  const counts = useMemo(() => countLibraryTags(library.items), [library.items]);
   function open(tag: TagDto | "new") {
     setEdit(tag);
     setName(tag === "new" ? "" : tag.name);
@@ -2626,24 +2486,15 @@ function TagsPage({ query, onQuery }: { query: string; onQuery: (query: string) 
   }
   return (
     <>
-      <PageTop label="Теги" />
-      <div className="title-row">
-        <div>
-          <span className="eyebrow">ПОРЯДОК БЕЗ ЛИШНИХ ПАПОК</span>
-          <h1>
-            Теги<span className="heading-dot">.</span>
-          </h1>
-          <p className="muted">
-            Отмечайте настроение, жанр или любую важную для вас связь.
-          </p>
-        </div>
-        <Button className="primary" onClick={() => open("new")}>
+      <div className="title-row library-title-row">
+        <h1>Теги</h1>
+        <Button className="primary" onClick={() => open("new")} aria-label="Новый тег" title="Новый тег">
           <Plus size={17} />
-          Новый тег
+          <span>Новый тег</span>
         </Button>
       </div>
       <div className="section-heading">
-        <h2>Ваши теги <span>{tags.length}</span></h2>
+        <h2>Найдено <span>{tags.length}</span></h2>
         <label className="search-input">
           <Search size={16} />
           <input
@@ -2656,25 +2507,22 @@ function TagsPage({ query, onQuery }: { query: string; onQuery: (query: string) 
         </label>
       </div>
       <NotesLoadError />
-      <div className="tag-grid">
+      <div className="tag-grid tag-directory">
         {tags.map((tag) => {
-          const count = library.items.filter((i) =>
-            i.tags.some((t) => t.id === tag.id),
-          ).length;
+          const count = counts.get(tag.id) ?? 0;
           return (
             <article className="tag-card" key={tag.id}>
-              <span
-                className="tag-card-icon"
-                style={{ "--tag": tag.color } as any}
-              >
-                <Tags size={22} />
-              </span>
-              <div>
-                <h3>{tag.name}{noteFor(notes, "tag", tag.id) && <NoteIndicator />}</h3>
-                <p>
-                  {count} {mediaWord(count)}
-                </p>
-              </div>
+              <button className="tag-browse" type="button" onClick={() => onBrowse(tag.id)}
+                aria-label={`Открыть записи с тегом ${tag.name}`} title={tag.name}>
+                <span className="tag-card-icon" style={{ "--tag": tag.color } as React.CSSProperties}>
+                  <Tags size={17} aria-hidden="true" />
+                </span>
+                <span className="tag-browse-description">
+                  <span className="tag-browse-name">{tag.name}{noteFor(notes, "tag", tag.id) && <NoteIndicator />}</span>
+                  <small>{count} {mediaWord(count)}</small>
+                </span>
+                <ChevronRight size={15} aria-hidden="true" />
+              </button>
               <button
                 className="icon-button"
                 aria-label={`Изменить тег ${tag.name}`}
@@ -2711,16 +2559,6 @@ function TagsPage({ query, onQuery }: { query: string; onQuery: (query: string) 
           icon={<Tags size={28} />}
         />
       )}
-      <div className="insight-card">
-        <Tags size={22} />
-        <div>
-          <h3>Одна запись — несколько настроений</h3>
-          <p>
-            Теги не создают копий. Используйте их в правилах плейлистов,
-            комбинируйте и исключайте — как вам удобно.
-          </p>
-        </div>
-      </div>
       {edit && (
         <Modal
           title={edit === "new" ? "Новый тег" : "Изменить тег"}

@@ -27,6 +27,7 @@ import {
   reconcileQueuePlaylistIds,
   canAutoplayPlayback,
   soundUnavailableReason,
+  itemActivation,
 } from "./player-model.ts";
 
 const audio = {
@@ -75,6 +76,22 @@ const lost = {
     },
   ],
 } as any;
+
+describe("activation of an individual item", () => {
+  const state = { queue: [audio.id, video.id, lost.id], queueIndex: 1, mode: "audio" } as const;
+
+  it("toggles the active item in its current mode when no mode was requested", () => {
+    expect(itemActivation({ ...state, queue: [...state.queue] }, video.id)).toBe("toggle");
+  });
+
+  it("changes the presentation of the active item when a different mode was requested", () => {
+    expect(itemActivation({ ...state, queue: [...state.queue] }, video.id, "original")).toBe("changeMode");
+  });
+
+  it("starts the context for a different selected item", () => {
+    expect(itemActivation({ ...state, queue: [...state.queue] }, audio.id, "audio")).toBe("start");
+  });
+});
 
 describe("player listening lifecycle", () => {
   it("requires playback beyond the completed seek before counting a restarted native item", () => {

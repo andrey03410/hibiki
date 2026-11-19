@@ -149,6 +149,31 @@ export function selectLibraryResults(selected: string[], items: ItemDto[], check
 
 const titleOrder = new Intl.Collator("ru", { sensitivity: "base", numeric: true });
 
+export const popularTagLimit = 6;
+
+export function countLibraryTags(items: readonly ItemDto[]) {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    for (const id of new Set(item.tags.map((tag) => tag.id))) {
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+export function libraryTagChoices(
+  tags: readonly TagDto[], counts: ReadonlyMap<string, number> | undefined, query: string, expanded: boolean,
+) {
+  const words = terms(query);
+  const alphabetical = (a: TagDto, b: TagDto) => titleOrder.compare(a.name, b.name);
+  if (expanded || words.length) {
+    return tags.filter((tag) => includesTerms(words, [tag.name])).sort(alphabetical);
+  }
+  return [...tags].sort((a, b) =>
+    (counts?.get(b.id) ?? 0) - (counts?.get(a.id) ?? 0) || alphabetical(a, b),
+  ).slice(0, popularTagLimit);
+}
+
 export function searchLibrary(items: ItemDto[], search: LibrarySearch, notes?: NotesIndex) {
   const words = terms(search.query);
   const min = durationBound(search.minDuration);

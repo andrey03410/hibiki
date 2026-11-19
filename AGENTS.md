@@ -22,6 +22,9 @@ watch layout с очередью справа, audio artwork, fullscreen overlay
 [05. Перемотка и очередь в мини-плеере](.ai/features/05-compact-player-controls/README.md):
 общая шкала, компактная очередь и действия со значками в карточках.
 
+[06. Навигация по медиатеке и управление очередью](.ai/features/06-library-navigation/README.md):
+видимый поиск по тегам, управление с обложки и переходы по очереди.
+
 ## Стек и проверки
 
 TypeScript · Node.js >=22.16 · npm workspaces · Fastify 5 · SQLite + Prisma 7 ·

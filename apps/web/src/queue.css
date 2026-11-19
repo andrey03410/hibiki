@@ -400,10 +400,26 @@ input[type="range"].mini-player-seek::-moz-range-thumb {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
   min-height: 33px;
   padding: 6px 7px;
+  border: 0;
   border-radius: 5px;
+  background: transparent;
   color: #ddcfe5;
+  text-align: start;
+}
+
+.mini-queue-row:not([aria-disabled="true"]):hover {
+  background: #bf9ce51e;
+}
+
+.mini-queue-row[aria-disabled="true"] {
+  cursor: default;
+}
+
+.mini-queue-row:focus-visible {
+  outline-offset: -2px;
 }
 
 .mini-queue-row[aria-current="true"] {
@@ -470,6 +486,33 @@ input[type="range"].mini-player-seek::-moz-range-thumb {
   .mini-player-side > span { display: none; }
   .mini-queue-panel { inset-inline-end: 8px; }
   .watch-player .watch-heading { flex-wrap: wrap; }
+}
+
+@media (width <= 470px) {
+  .mini-player-body {
+    gap: 5px;
+    padding-inline: 9px;
+  }
+
+  .mini-player-track,
+  .mini-player-transport {
+    gap: 4px;
+  }
+
+  .mini-player-art {
+    width: 28px;
+    height: 28px;
+  }
+
+  .mini-player-transport > .icon-button {
+    width: 24px;
+    padding-inline: 2px;
+  }
+
+  .mini-player-transport > .button {
+    padding-inline: 7px;
+    gap: 4px;
+  }
 }
 
 .queue-playlist-dialog form,
