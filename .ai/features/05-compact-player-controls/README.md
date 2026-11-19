@@ -2,7 +2,7 @@
 id: '05'
 title: Перемотка и очередь в мини-плеере
 track: product
-stage: product
+stage: tech
 branch: codex/05-compact-player-controls
 pr:
 started: 2026-11-19
@@ -16,7 +16,7 @@ autonomous: true
 > выдели это в мини-фичу и автономного прогони по флоу автономно вплоть до влития в main
 
 - [x] [Бриф](brief.md).
-- [ ] Продукт
+- [x] [Продукт](product.md).
 - [ ] Техника
 - [ ] План
 - [ ] Реализация и QG
