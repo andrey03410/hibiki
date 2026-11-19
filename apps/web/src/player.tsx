@@ -10,7 +10,7 @@ import {
   type ReactNode,
   type SyntheticEvent,
 } from "react";
-import { Link, useMatch, useNavigate } from "react-router";
+import { Link, useLocation, useMatch, useNavigate } from "react-router";
 import {
   Play,
   Pause,
@@ -37,6 +37,7 @@ import {
 import { moveQueueItem, removeUpcomingItem, undoQueueRemoval, type QueueRemoval } from "@hibiki/core";
 import type { ItemDto, PlaybackMode, PlaylistDto } from "@hibiki/contracts";
 import { api, formatDuration, mediaWord } from "./api.ts";
+import { CompactPlaybackQueue, PlaybackSeekBar } from "./PlaybackControls";
 import { useListeningAttempt } from "./listening-client";
 import "./queue.css";
 import {
@@ -279,6 +280,7 @@ export function PlayerProvider({
   onPlaylistSaved?: (playlist: PlaylistDto) => void;
 }) {
   const navigate = useNavigate();
+  const { key: routeKey } = useLocation();
   const onPlayerScreen = !!useMatch("/player");
   const history = useListeningAttempt(userId);
   const [attempt] = useState(() => createPlaybackAttempt(history));
@@ -1064,6 +1066,13 @@ export function PlayerProvider({
     return () => window.removeEventListener("keydown", keydown);
   }, [current?.id, playing, duration, settings.volume, sourceKey, viewportFullscreen, onPlayerScreen]);
   const total = duration || current?.duration || 0;
+  const seekBar = {
+    position: settings.position,
+    duration: total,
+    onSeek: seekFromSlider,
+    onScrubStart: () => { scrub.current ??= {}; },
+    onScrubEnd: finishScrub,
+  };
   const artwork = playbackArtwork(current, source);
   const showArtwork = artwork && failedArtwork !== artwork;
   const audioFallback = current?.kind === "video" && settings.mode === "original" &&
@@ -1247,26 +1256,7 @@ export function PlayerProvider({
                   <div className="watch-fullscreen-title">{current.title}</div>
                   <div className="seek-row">
                     <span>{formatDuration(settings.position)}</span>
-                    <input
-                      aria-label="Позиция воспроизведения"
-                      aria-valuetext={`${formatDuration(settings.position)} из ${formatDuration(total)}`}
-                      type="range" min="0" max={total || 1} step="0.1"
-                      value={Math.min(settings.position, total || 1)}
-                      onPointerDown={(event) => {
-                        event.currentTarget.setPointerCapture(event.pointerId);
-                        scrub.current = {};
-                      }}
-                      onLostPointerCapture={finishScrub}
-                      onKeyDown={(event) => {
-                        if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key))
-                          scrub.current ??= {};
-                      }}
-                      onKeyUp={finishScrub}
-                      onBlur={finishScrub}
-                      onChange={(event) => seekFromSlider(Number(event.target.value))}
-                      style={{ "--progress": `${total ? (settings.position / total) * 100 : 0}%` } as any}
-                      disabled={!total}
-                    />
+                    <PlaybackSeekBar {...seekBar} />
                     <span>{formatDuration(total)}</span>
                   </div>
                   <div className="watch-control-row">
@@ -1371,6 +1361,7 @@ export function PlayerProvider({
       )}
       {current && (
         <section className="mini-player-body" aria-label="Управление воспроизведением">
+          <PlaybackSeekBar {...seekBar} className="mini-player-seek" />
           <Link className="mini-player-track" to="/player" aria-label={`Открыть плеер: ${current.title}`}>
             <span className={`mini-player-art art-${current.title.length % 6}`}>
               {presentationKind === "video" ? <Video size={18} /> : <Music2 size={18} />}
@@ -1400,9 +1391,8 @@ export function PlayerProvider({
           </div>
           <div className="mini-player-side">
             <span>{formatDuration(settings.position)} / {formatDuration(total)}</span>
-            <Link className="icon-button" to="/player" aria-label="Открыть очередь" title="Открыть очередь"><ListMusic size={20} /></Link>
+            <CompactPlaybackQueue key={routeKey} settings={settings} itemsById={itemsById} failedIds={failed.current} />
           </div>
-          <span className="mini-player-progress" aria-hidden="true" style={{ width: `${total ? Math.min(100, settings.position / total * 100) : 0}%` }} />
         </section>
       )}
     </div>
