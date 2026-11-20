@@ -2,11 +2,11 @@
 id: 08
 title: Прослушивание и прокрутка медиатеки
 track: product
-stage: review
+stage: merged
 branch: codex/08-library-listening
-pr:
+pr: https://github.com/andrey03410/hibiki/pull/8
 started: 2026-11-20
-merged:
+merged: 2026-11-20
 ---
 
 # 08. Прослушивание и прокрутка медиатеки
@@ -18,4 +18,5 @@ merged:
 - [x] [Техника](tech.md)
 - [x] [План](plan.md)
 - [x] [Проверка](verify.md)
-- [ ] Вливание и деплой
+- [x] [Вливание в main](https://github.com/andrey03410/hibiki/pull/8)
+- Деплой — запуск [Production](https://github.com/andrey03410/hibiki/actions/workflows/production.yml) для SHA в main.
