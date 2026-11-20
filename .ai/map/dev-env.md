@@ -73,3 +73,9 @@ ROLLBACK после неуспешного COMMIT, чтобы следующие
 Linux-сборка может завершить muxing до аудио. Подавай готовый одиночный PNG
 отдельным input с `-c:v copy`, проверяй hasAudio/duration перед дальнейшими
 изменениями контейнера. Регрессия и большой MP4 free-box — artwork.test.ts.
+
+## Деплой
+
+`Dockerfile` собирает Linux-образ hibiki. Workflow `Production` проверяет запуск, публикует тег полного SHA в GHCR и выкатывает его по команде [deploy](../../.claude/skills/deploy/SKILL.md). Данные SQLite и медиа находятся в отдельном каталоге данных на сервере. HTTPS обслуживает Caddy на порту `8443`.
+
+Образ включает режим `PROVISIONED_ACCOUNTS_ONLY=1`. Новые аккаунты создаёт администратор через `scripts/provision-account.ts`. Пароль передаётся через stdin.

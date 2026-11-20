@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createApp } from "./app";
 import { AuthService } from "./auth";
 import { testContext } from "./test-utils";
 describe("account credentials", () => {
@@ -8,6 +9,17 @@ describe("account credentials", () => {
   });
   afterEach(async () => {
     await ctx.close();
+  });
+  it("blocks HTTP registration when accounts are provisioned", async () => {
+    vi.stubEnv("PROVISIONED_ACCOUNTS_ONLY", "1");
+    const app = await createApp({ db: ctx.db, storageRoot: ctx.root });
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/auth/register", payload: {
+        login: "listener", password: "test-password-123",
+      } });
+      expect(response.statusCode).toBe(403);
+      expect(await ctx.db.user.findUnique({ where: { login: "listener" } })).toBeNull();
+    } finally { await app.close(); vi.unstubAllEnvs(); }
   });
   it("hashes passwords, checks sessions and revokes personal tokens", async () => {
     const auth = new AuthService(ctx.db);

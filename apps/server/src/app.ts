@@ -169,6 +169,8 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
   }));
   for (const action of ["register", "login"] as const)
     app.post(`/api/auth/${action}`, async (request, reply) => {
+      if (action === "register" && process.env.PROVISIONED_ACCOUNTS_ONLY === "1")
+        throw new HttpError(403, "registration_closed", "Аккаунты создаёт администратор");
       const input = z
         .object({ login: z.string().max(100), password: z.string().max(200) })
         .parse(request.body);

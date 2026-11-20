@@ -7,7 +7,7 @@ const digest = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 export class AuthService {
   constructor(private db: Db) {}
-  async register(login: string, password: string) {
+  async register(login: string, password: string, { provisioned = false } = {}) {
     login = login.trim().toLowerCase();
     invariant(
       /^[a-z0-9_-]{3,40}$/.test(login),
@@ -16,7 +16,7 @@ export class AuthService {
       "Логин: от 3 до 40 латинских букв, цифр, дефисов или подчёркиваний",
     );
     invariant(
-      password.length >= 10 && password.length <= 200,
+      password.length >= (provisioned ? 1 : 10) && password.length <= 200,
       400,
       "invalid_password",
       "Пароль: от 10 до 200 символов",
