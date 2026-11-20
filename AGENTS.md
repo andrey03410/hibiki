@@ -25,6 +25,8 @@ watch layout с очередью справа, audio artwork, fullscreen overlay
 [06. Навигация по медиатеке и управление очередью](.ai/features/06-library-navigation/README.md):
 видимый поиск по тегам, управление с обложки и переходы по очереди.
 
+[08. Прослушивание и прокрутка медиатеки](.ai/features/08-library-listening/README.md) — звуковой запуск, видео из мини-плеера, компактные обложки, меню тегов и выдача по 100 записей.
+
 ## Стек и проверки
 
 TypeScript · Node.js >=22.16 · npm workspaces · Fastify 5 · SQLite + Prisma 7 ·
