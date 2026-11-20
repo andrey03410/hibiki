@@ -296,6 +296,7 @@ export function PlayerProvider({
   const [queueOpen, setQueueOpen] = useState(false);
   const [queueLoadError, setQueueLoadError] = useState("");
   const [queueRetry, setQueueRetry] = useState(0);
+  const retryNavigation = useRef<(() => void) | undefined>(undefined);
   const history = useListeningAttempt(userId);
   const [attempt] = useState(() => createPlaybackAttempt(history));
   const serverSignature = useRef<string | undefined>(undefined);
@@ -547,20 +548,24 @@ export function PlayerProvider({
         else toggle();
     }
   }
-  async function findNext(direction: 1 | -1, state: PlaybackSettings, token: number, retry = false, wrap = state.repeat === "all") {
+  async function findNext(direction: 1 | -1, state: PlaybackSettings, token: number, retry = false, wrap = state.repeat === "all", onError = setError) {
     try {
       return await catalog.findPlayable(state.queue, state.queueIndex, direction, wrap, state.mode,
         retry ? undefined : failed.current, () => intent.current === token);
     } catch (e) {
-      if (intent.current === token) setError((e as Error).message);
+      if (intent.current === token) onError((e as Error).message);
     }
   }
-  async function advanceTarget(direction: 1 | -1, ended = false) {
+  async function advanceTarget(direction: 1 | -1, ended: boolean, retry: () => void) {
     const token = ++intent.current;
     try {
       return await catalog.nextInQueue(() => live.current, direction, ended, failed.current, () => token === intent.current);
     } catch (e) {
-      if (intent.current === token) setError((e as Error).message);
+      if (intent.current === token) {
+        mediaKey.current = sourceKey;
+        retryNavigation.current = () => {if (intent.current === token) retry();};
+        setQueueLoadError((e as Error).message);
+      }
     }
   }
   function showSkipped(state: PlaybackSettings, startIndex: number, endIndex: number) {
@@ -580,7 +585,7 @@ export function PlayerProvider({
   async function next(direction: 1 | -1 = 1, ended = false) {
     if (!currentMedia()) return;
     finishAttempt(ended ? "ended" : "manual");
-    const target = await advanceTarget(direction, ended);
+    const target = await advanceTarget(direction, ended, () => void next(direction, ended));
     if (!target) return;
     const {state, index} = target;
     if (index < 0) {
@@ -609,7 +614,7 @@ export function PlayerProvider({
     }
     finishAttempt("error");
     if (current) failed.current.add(current.id);
-    const target = await advanceTarget(1);
+    const target = await advanceTarget(1, false, () => void sourceError());
     if (!target) return;
     const {state, index} = target;
     if (index >= 0) playEntry(state, index, "advance", { autoplay: playingRef.current });
@@ -913,6 +918,7 @@ export function PlayerProvider({
     // Fetch the current entry first, including on reload in the middle of a long queue.
     const id = queue[queueIndex];
     setQueueLoadError("");
+    retryNavigation.current = undefined;
     if (id) void catalog.ensure([id]).then(() => catalog.ensure(visible, () => active))
       .catch(e => {if (active) setQueueLoadError(e.message);});
     return () => {active = false;};
@@ -932,8 +938,8 @@ export function PlayerProvider({
     const token = ++intent.current;
     let active = true;
     void (async () => {
-      let candidate = await findNext(1, state, token, false, false);
-      if (candidate === -1) candidate = await findNext(-1, state, token, false, false);
+      let candidate = await findNext(1, state, token, false, false, setQueueLoadError);
+      if (candidate === -1) candidate = await findNext(-1, state, token, false, false, setQueueLoadError);
       if (!active || token !== intent.current || candidate === undefined) return;
       finishAttempt("interrupted");
       const queue = state.queue.filter(entry => !catalog.deleted(entry));
@@ -988,7 +994,7 @@ export function PlayerProvider({
       fetch("/api/settings", {
         method: "PUT",
         credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Hibiki-Workspace": userId },
         body: JSON.stringify(live.current),
         keepalive: true,
       }).catch(() => {});
@@ -1255,7 +1261,13 @@ export function PlayerProvider({
   const queueRetryNotice = queueLoadError && (
     <div className="mini-player-notice" role="alert">
       <span>{queueLoadError}</span>
-      <button className="text-button" onClick={() => setQueueRetry(value => value + 1)}>Повторить загрузку очереди</button>
+      <button className="text-button" onClick={() => {
+        const retry = retryNavigation.current;
+        retryNavigation.current = undefined;
+        setQueueLoadError("");
+        if (retry) retry();
+        else setQueueRetry(value => value + 1);
+      }}>Повторить загрузку очереди</button>
     </div>
   );
   const player = onPlayerScreen && (

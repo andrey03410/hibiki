@@ -69,7 +69,7 @@ import type {
   TagDto,
   UserDto,
 } from "@hibiki/contracts";
-import { api, formatDuration, humanDuration, mediaWord } from "./api.ts";
+import { api, setWorkspaceOwner, formatDuration, humanDuration, mediaWord } from "./api.ts";
 import { ItemArtwork } from "./ItemArtwork.tsx";
 import { LibraryPages, fetchItems, searchBody } from "./library-pages";
 import { PlayerProvider, usePlayer } from "./player.tsx";
@@ -355,11 +355,15 @@ function App() {
     [setup, setSetup] = useState(false),
     [loading, setLoading] = useState(true),
     [loadError, setLoadError] = useState("");
+  function enter(user: UserDto | null) {
+    setWorkspaceOwner(user?.id);
+    setUser(user);
+  }
   async function check() {
     setLoading(true);
     try {
       const data = await api("/me");
-      setUser(data.user);
+      enter(data.user);
       setSetup(data.setupRequired);
       setLoadError("");
     } catch (e) {
@@ -394,11 +398,11 @@ function App() {
       user={user}
       logout={async () => {
         await api("/auth/logout", "POST");
-        setUser(null);
+        enter(null);
       }}
     />
   ) : (
-    <Auth setup={setup} onLogin={setUser} />
+    <Auth setup={setup} onLogin={enter} />
   );
 }
 function Workspace({

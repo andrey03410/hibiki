@@ -147,6 +147,10 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     request.user = header?.startsWith("Bearer ")
       ? await auth.userByToken(header.slice(7))
       : await auth.userBySession(request.cookies.hibiki_session);
+    const workspace = request.headers["x-hibiki-workspace"];
+    if (workspace !== undefined && workspace !== request.user?.id) {
+      throw new HttpError(409, "workspace_changed", "Аккаунт изменился. Открываем его медиатеку.");
+    }
     const publicRoute =
       request.url.split("?")[0] === "/api/me" ||
       request.url.startsWith("/api/auth/") ||

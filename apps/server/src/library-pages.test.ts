@@ -158,3 +158,13 @@ it("excludes foreign nested records even if a stored link crosses account bounda
   const response = await post("items", { ids: ["a"] });
   expect(response.json().items[0]).toMatchObject({ id: "a", sources: [], tags: [] });
 });
+
+it("asks a stale tab to reopen its workspace before reading pages or saving into another account", async () => {
+  const headers = {cookie, "x-hibiki-workspace": ctx.otherUserId};
+  const page = await app.inject({method:"GET",url:"/api/library/overview",headers});
+  expect(page.statusCode).toBe(409);
+  expect(page.json().error.code).toBe("workspace_changed");
+  const save = await app.inject({method:"PUT",url:"/api/settings",headers,payload:{volume:0.123}});
+  expect(save.statusCode).toBe(409);
+  expect((await ctx.library.getSettings(ctx.userId)).volume).not.toBe(0.123);
+});
