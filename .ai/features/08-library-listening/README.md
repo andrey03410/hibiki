@@ -2,7 +2,7 @@
 id: 08
 title: Прослушивание и прокрутка медиатеки
 track: product
-stage: plan
+stage: build
 branch: codex/08-library-listening
 pr:
 started: 2026-11-20
@@ -16,6 +16,6 @@ merged:
 - [x] [Бриф](brief.md)
 - [x] [Продукт](product.md)
 - [x] [Техника](tech.md)
-- [ ] [План](plan.md)
+- [x] [План](plan.md)
 - [ ] [Проверка](verify.md)
 - [ ] Вливание и деплой
