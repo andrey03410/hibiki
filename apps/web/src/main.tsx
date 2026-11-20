@@ -226,7 +226,8 @@ function Auth({
   setup: boolean;
   onLogin: (user: UserDto) => void;
 }) {
-  const [register, setRegister] = useState(setup),
+  const registrationEnabled = import.meta.env.VITE_PROVISIONED_ACCOUNTS_ONLY !== "1";
+  const [register, setRegister] = useState(registrationEnabled && setup),
     [login, setLogin] = useState(""),
     [password, setPassword] = useState(""),
     [busy, setBusy] = useState(false),
@@ -306,9 +307,9 @@ function Auth({
                 autoComplete={register ? "new-password" : "current-password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                minLength={10}
+                minLength={register ? 10 : undefined}
                 maxLength={200}
-                placeholder="Не менее 10 символов"
+                placeholder={register ? "Не менее 10 символов" : undefined}
                 required
               />
             </label>
@@ -318,7 +319,7 @@ function Auth({
               <ArrowUpRight size={17} />
             </Button>
           </form>
-          <p className="auth-switch">
+          {registrationEnabled && <p className="auth-switch">
             {register ? "Уже есть аккаунт?" : "Первый раз здесь?"}{" "}
             <button
               onClick={() => {
@@ -328,7 +329,7 @@ function Auth({
             >
               {register ? "Войти" : "Создать аккаунт"}
             </button>
-          </p>
+          </p>}
           <div className="auth-privacy">
             <HardDrive size={16} />
             <span>
