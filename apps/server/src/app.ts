@@ -21,6 +21,7 @@ import { registerMcp } from "./mcp";
 import { uploadPolicy } from "./upload-policy";
 import { ArtworkService } from "./artwork";
 import { registerNotes } from "./notes";
+import { registerLibraryPages } from "./library-pages";
 import { registerReplacement } from "./replacement";
 import { registerHistory } from "./history";
 import { registerYoutubeSync } from "./youtube-sync";
@@ -146,6 +147,10 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     request.user = header?.startsWith("Bearer ")
       ? await auth.userByToken(header.slice(7))
       : await auth.userBySession(request.cookies.hibiki_session);
+    const workspace = request.headers["x-hibiki-workspace"];
+    if (workspace !== undefined && workspace !== request.user?.id) {
+      throw new HttpError(409, "workspace_changed", "Аккаунт изменился. Открываем его медиатеку.");
+    }
     const publicRoute =
       request.url.split("?")[0] === "/api/me" ||
       request.url.startsWith("/api/auth/") ||
@@ -223,7 +228,13 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       .header("cache-control", "private, no-cache")
       .header("vary", "Cookie, Authorization")
       .header("x-content-type-options", "nosniff");
-    const cover = await artwork.get(request.user!.id, idOf(request));
+    const { size } = z.object({ size: z.literal("thumb").optional() }).parse(request.query);
+    const cover = await artwork.get(request.user!.id, idOf(request), size);
+    if (cover.etag) {
+      reply.header("etag", cover.etag);
+      const validators = request.headers["if-none-match"]?.split(",").map(tag => tag.trim().replace(/^W\//, ""));
+      if (validators?.includes("*") || validators?.includes(cover.etag)) return reply.code(304).send();
+    }
     return reply.type(cover.mime).send(cover.bytes);
   });
   app.patch("/api/items/:id", (request) =>
@@ -518,6 +529,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     return reply.send(createReadStream(path));
   });
   registerNotes(app, db);
+  registerLibraryPages(app, db);
   registerReplacement(app, db, library, storageRoot);
   registerHistory(app, db);
   registerYoutubeSync(app, db, library);

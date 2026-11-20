@@ -4,8 +4,10 @@ import {
   useContext,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type FormEvent,
   type ReactNode,
   type SyntheticEvent,
@@ -37,13 +39,16 @@ import {
 import { moveQueueItem, removeUpcomingItem, undoQueueRemoval, type QueueRemoval } from "@hibiki/core";
 import type { ItemDto, PlaybackMode, PlaylistDto } from "@hibiki/contracts";
 import { api, formatDuration, mediaWord } from "./api.ts";
+import { ItemArtwork } from "./ItemArtwork.tsx";
+import { fetchItems } from "./library-pages";
+import { QueueCatalog } from "./queue-catalog";
 import { CompactPlaybackQueue, PlaybackSeekBar } from "./PlaybackControls";
 import { useListeningAttempt } from "./listening-client";
 import "./queue.css";
 import {
-  nextPlayableIndex,
-  firstPlayableIndex,
   playbackSources,
+  playableVideoSource,
+  canStartSelectedItem,
   sourceLoadPosition,
   restorePlayback,
   playbackShortcut,
@@ -68,7 +73,6 @@ import {
   prepareYoutubePlayback,
   nativeRestartHasProgress,
   createYoutubeRestartConfirmation,
-  recoverDeletedQueueEntry,
   reconcileQueuePlaylistIds,
   type PlaybackFinish,
   type PlaybackReading,
@@ -80,7 +84,7 @@ interface Controller {
   current?: ItemDto;
   playing: boolean;
   waitingForVideo: boolean;
-  settings: PlaybackSettings;
+  mode: PlaybackMode;
   start: (items: ItemDto[], index?: number, playlistId?: string, options?: StartOptions) => void;
   activateItem: (items: ItemDto[], index: number, playlistId?: string, options?: StartOptions) => void;
   enqueue: (item: ItemDto, playlistId?: string) => void;
@@ -88,7 +92,7 @@ interface Controller {
   toggle: () => void;
   watchCurrent: () => void;
 }
-type StartOptions = { mode?: PlaybackMode; fromLibrary?: boolean };
+type StartOptions = { mode?: PlaybackMode; fromLibrary?: boolean; queueIds?: string[] };
 const PlayerContext = createContext<Controller | null>(null);
 export const usePlayer = () => useContext(PlayerContext)!;
 
@@ -268,14 +272,14 @@ function QueuePlaylistDialog({
 }
 
 export function PlayerProvider({
-  items,
+  revision,
   initialSettings,
   userId,
   children,
   suspendSaving = false,
   onPlaylistSaved,
 }: {
-  items: ItemDto[];
+  revision: string;
   initialSettings: any;
   userId: string;
   children: (player: ReactNode, miniPlayer: ReactNode) => ReactNode;
@@ -285,6 +289,14 @@ export function PlayerProvider({
   const navigate = useNavigate();
   const { key: routeKey } = useLocation();
   const onPlayerScreen = !!useMatch("/player");
+  const [catalog] = useState(() => new QueueCatalog(fetchItems));
+  useSyncExternalStore(catalog.subscribe, catalog.snapshot);
+  const itemsById = catalog.rows;
+  const intent = useRef(0);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [queueLoadError, setQueueLoadError] = useState("");
+  const [queueRetry, setQueueRetry] = useState(0);
+  const retryNavigation = useRef<(() => void) | undefined>(undefined);
   const history = useListeningAttempt(userId);
   const [attempt] = useState(() => createPlaybackAttempt(history));
   const serverSignature = useRef<string | undefined>(undefined);
@@ -294,8 +306,8 @@ export function PlayerProvider({
     try {
       cached = JSON.parse(localStorage.getItem(storageKey) || "null");
     } catch {}
-    serverSignature.current = playbackSettingsSignature(restorePlayback(initialSettings ?? {}, items));
-    return restoreCachedPlayback(initialSettings, cached, items);
+    serverSignature.current = playbackSettingsSignature(restorePlayback(initialSettings ?? {}));
+    return restoreCachedPlayback(initialSettings, cached);
   });
   const [playing, setPlaying] = useState(false),
     [duration, setDuration] = useState(0),
@@ -321,8 +333,8 @@ export function PlayerProvider({
     seekOnLoad = useRef(settings.position),
     live = useRef(settings),
     playOnPlayerOpen = useRef<string | undefined>(undefined),
+    requestedVideoSourceId = useRef<string | undefined>(undefined),
     playingRef = useRef(playing),
-    itemsRef = useRef(items),
     failed = useRef(new Set<string>()),
     nativeStarted = useRef(new WeakSet<HTMLMediaElement>()),
     nativePositionReady = useRef(new WeakSet<HTMLMediaElement>()),
@@ -330,16 +342,17 @@ export function PlayerProvider({
     youtubeRestart = useRef<ReturnType<typeof createYoutubeRestartConfirmation> | null>(null),
     draggingId = useRef<string | undefined>(undefined),
     scrub = useRef<{ target?: number } | null>(null);
-  itemsRef.current = items;
   const attachNative = useCallback((element: HTMLMediaElement | null) => {
     if (!element) return;
     native.current = element;
     return () => {
-      element.pause();
       if (native.current === element) native.current = null;
+      queueMicrotask(() => {
+        // A ref can detach and reattach to the same live element in one commit.
+        if (native.current !== element) element.pause();
+      });
     };
   }, []);
-  const itemsById = new Map(items.map((item) => [item.id, item]));
   const current = itemsById.get(settings.queue[settings.queueIndex]!);
   const sourceIdentity = useRef<{ itemId?: string; sourceId?: string; preferredSourceId?: string }>(undefined);
   const previousSource = sourceIdentity.current;
@@ -350,14 +363,16 @@ export function PlayerProvider({
       ? { sourceId: previousSource.sourceId, preferredSourceId: previousSource.preferredSourceId }
       : undefined,
     settings.mode,
+    requestedVideoSourceId.current,
   ) : undefined;
+  const videoSource = current && playableVideoSource(current, failedSources);
   const isYoutube = source?.provider === "youtube";
   const youtubeId = isYoutube
     ? source.externalId || new URL(source.url!).searchParams.get("v") || source.url!.split("/").pop()
     : undefined;
   const presentationKind = current ? playbackKind(current, source, settings.mode) : undefined;
-  const waitingForVideo = !!current && !!source &&
-    !canAutoplayPlayback(current, source, settings.mode, onPlayerScreen);
+  const needsVideoForPlayback = !!videoSource && settings.mode === "audio" && !source;
+  const waitingForVideo = !onPlayerScreen && (!!source && presentationKind === "video" || needsVideoForPlayback);
   const identity = { itemId: current?.id, sourceId: source?.id };
   const sourceKey = JSON.stringify([identity, presentationKind, waitingForVideo]);
   const mediaKey = useRef(sourceKey);
@@ -411,13 +426,14 @@ export function PlayerProvider({
     nativeRestart.current = null;
     youtubeRestart.current = null;
   }
-  function selectAttempt(state: PlaybackSettings, trigger: PlaybackTrigger, list = itemsRef.current) {
+  function selectAttempt(state: PlaybackSettings, trigger: PlaybackTrigger) {
     const id = state.queue[state.queueIndex];
-    const item = list.find((entry) => entry.id === id);
+    const item = id ? itemsById.get(id) : undefined;
     const playlistIds = state.queuePlaylistIds;
     attempt.select(item ?? null, id && playlistIds && Object.hasOwn(playlistIds, id) ? playlistIds[id] : undefined, trigger);
   }
   function resetSources() {
+    requestedVideoSourceId.current = undefined;
     setFailedSources(new Set());
     sourceIdentity.current = undefined;
     seekOnLoad.current = 0;
@@ -426,10 +442,10 @@ export function PlayerProvider({
     state: PlaybackSettings,
     index: number,
     trigger: PlaybackTrigger,
-    { list = itemsRef.current, autoplay = true }: { list?: ItemDto[]; autoplay?: boolean } = {},
+    { autoplay = true }: { autoplay?: boolean } = {},
   ) {
     const id = state.queue[index];
-    const entry = list.find((item) => item.id === id);
+    const entry = id ? itemsById.get(id) : undefined;
     const preferred = entry && playbackSources(entry, state.mode)[0];
     const canPlay = !!entry && canAutoplayPlayback(entry, preferred, state.mode, onPlayerScreen);
     const shouldPlay = autoplay && canPlay;
@@ -438,7 +454,7 @@ export function PlayerProvider({
     playOnPlayerOpen.current = undefined;
     resetSources();
     patch({ ...state, queueIndex: index, position: 0 });
-    selectAttempt(live.current, trigger, list);
+    selectAttempt(live.current, trigger);
     setError("");
     setOfferAudioSkip(false);
     playIntent(shouldPlay);
@@ -465,6 +481,7 @@ export function PlayerProvider({
     }
   }
   function switchTo(index: number) {
+    intent.current++;
     const state = live.current;
     const item = itemsById.get(state.queue[index]!);
     if (!item || queueEntryUnavailableReason(item, state.mode)) return;
@@ -476,18 +493,30 @@ export function PlayerProvider({
     failed.current.delete(item.id);
     playEntry(state, index, "manual");
   }
-  function start(entries: ItemDto[], index = 0, playlistId?: string, options: StartOptions = {}) {
+  async function start(entries: ItemDto[], index = 0, playlistId?: string, options: StartOptions = {}, selectedItem = false) {
     if (!entries.length) return;
-    // Playlist results can predate the latest availability/track metadata refresh.
-    const list = entries.map((item) => itemsById.get(item.id) ?? item);
-    const { mode = "original", fromLibrary = false } = options;
+    const token = ++intent.current;
+    catalog.put(entries);
+    const ids = options.queueIds;
+    const selected = entries[index];
+    if (!selected) return;
+    const order = ids ? ids.map(id => ({id})) : entries;
+    const selectedIndex = ids ? ids.indexOf(selected.id) : index;
+    if (selectedIndex < 0) return;
+    const { fromLibrary = false } = options;
+    const mode = fromLibrary ? "audio" : options.mode ?? "original";
     const shuffle = !fromLibrary && live.current.shuffle;
+    const previousQueue = live.current.queue;
+    const newOrder = startPlaybackQueue(order, selectedIndex, shuffle, playlistId);
     const state = {
       ...live.current,
-      ...startPlaybackQueue(list, index, shuffle, playlistId),
+      ...newOrder,
       mode, shuffle,
     };
-    const playable = firstPlayableIndex(state.queue, state.queueIndex, list, mode, !fromLibrary);
+    const playSelected = canStartSelectedItem(selected, mode, fromLibrary && selectedItem);
+    const playable = playSelected ? state.queueIndex
+      : await findNext(1, state, token, true, !fromLibrary);
+    if (token !== intent.current || previousQueue !== live.current.queue || playable === undefined) return;
     if (playable < 0) {
       setOfferAudioSkip(false);
       setError(mode === "audio"
@@ -495,14 +524,14 @@ export function PlayerProvider({
         : "В этой очереди нет доступных источников.");
       return;
     }
-    const entry = list.find((item) => item.id === state.queue[playable])!;
+    const entry = itemsById.get(state.queue[playable]!)!;
     const chosenSource = playbackSources(entry, mode)[0];
     const opensPlayer = mode === "original" &&
       (!!playlistId || entry.kind === "video" || playbackKind(entry, chosenSource, mode) === "video");
     finishAttempt("manual");
     failed.current.clear();
     setRemoval(undefined);
-    playEntry(state, playable, playable === state.queueIndex ? "manual" : "advance", { list });
+    playEntry({...live.current, ...newOrder, mode, shuffle}, playable, playable === state.queueIndex ? "manual" : "advance");
     if (opensPlayer && !onPlayerScreen) openAndPlay(entry.id);
     if (playable !== state.queueIndex) showSkipped(state, state.queueIndex, playable);
   }
@@ -510,22 +539,34 @@ export function PlayerProvider({
     const item = entries[index];
     if (!item) return;
     const state = live.current;
-    const mode = options.mode ?? state.mode;
+    const mode = options.fromLibrary ? "audio" : options.mode ?? state.mode;
     switch (itemActivation(state, item.id, mode)) {
-      case "start": start(entries, index, playlistId, options); break;
-      case "changeMode": changeMode(mode, { activate: true }); break;
+      case "start": start(entries, index, playlistId, options, true); break;
+      case "changeMode": changeMode(mode, { activate: true, keepSelectedVideo: options.fromLibrary }); break;
       case "toggle":
-        if (waitingForVideo) watchCurrent();
+        if (waitingForVideo && !options.fromLibrary) watchCurrent();
         else toggle();
     }
   }
-  function nextIndex(direction: 1 | -1, state = live.current, retry = false) {
-    const { queue, queueIndex, repeat, mode } = state;
-    return nextPlayableIndex(
-      queue, queueIndex,
-      retry ? itemsRef.current : itemsRef.current.filter((item) => !failed.current.has(item.id)),
-      direction, repeat === "all", mode,
-    );
+  async function findNext(direction: 1 | -1, state: PlaybackSettings, token: number, retry = false, wrap = state.repeat === "all", onError = setError) {
+    try {
+      return await catalog.findPlayable(state.queue, state.queueIndex, direction, wrap, state.mode,
+        retry ? undefined : failed.current, () => intent.current === token);
+    } catch (e) {
+      if (intent.current === token) onError((e as Error).message);
+    }
+  }
+  async function advanceTarget(direction: 1 | -1, ended: boolean, retry: () => void) {
+    const token = ++intent.current;
+    try {
+      return await catalog.nextInQueue(() => live.current, direction, ended, failed.current, () => token === intent.current);
+    } catch (e) {
+      if (intent.current === token) {
+        mediaKey.current = sourceKey;
+        retryNavigation.current = () => {if (intent.current === token) retry();};
+        setQueueLoadError((e as Error).message);
+      }
+    }
   }
   function showSkipped(state: PlaybackSettings, startIndex: number, endIndex: number) {
     if (startIndex === endIndex) return;
@@ -541,11 +582,12 @@ export function PlayerProvider({
       setError(`Пропущено: «${skipped.title}». ${reason}.`);
     }
   }
-  function next(direction: 1 | -1 = 1, ended = false) {
+  async function next(direction: 1 | -1 = 1, ended = false) {
     if (!currentMedia()) return;
     finishAttempt(ended ? "ended" : "manual");
-    const state = live.current;
-    const index = ended && state.repeat === "one" ? state.queueIndex : nextIndex(direction);
+    const target = await advanceTarget(direction, ended, () => void next(direction, ended));
+    if (!target) return;
+    const {state, index} = target;
     if (index < 0) {
       playIntent(false);
       if (ended) seek(0, false);
@@ -558,7 +600,7 @@ export function PlayerProvider({
     if (direction === 1 && index !== state.queueIndex)
       showSkipped(state, (state.queueIndex + 1) % state.queue.length, index);
   }
-  function sourceError() {
+  async function sourceError() {
     if (!currentMedia()) return;
     mediaKey.current = "";
     const unsuccessful = new Set(failedSources);
@@ -572,8 +614,10 @@ export function PlayerProvider({
     }
     finishAttempt("error");
     if (current) failed.current.add(current.id);
-    const index = nextIndex(1);
-    if (index >= 0) playEntry(live.current, index, "advance", { autoplay: playingRef.current });
+    const target = await advanceTarget(1, false, () => void sourceError());
+    if (!target) return;
+    const {state, index} = target;
+    if (index >= 0) playEntry(state, index, "advance", { autoplay: playingRef.current });
     else {
       setFailedSources(unsuccessful);
       playIntent(false);
@@ -695,6 +739,7 @@ export function PlayerProvider({
     onError: sourceError,
   };
   function toggle() {
+    intent.current++;
     if (!current || waitingForVideo) return;
     if (!source) {
       if (playbackSources(current, settings.mode).length) {
@@ -730,22 +775,28 @@ export function PlayerProvider({
     navigate("/player");
   }
   function watchCurrent() {
-    if (current && waitingForVideo) openAndPlay(current.id);
+    if (!current || !videoSource) return;
+    if (settings.mode === "original" && source?.id === videoSource.id) openAndPlay(current.id);
+    else changeMode("original", { activate: true, videoSourceId: videoSource.id });
   }
-  function changeMode(mode: PlaybackMode, { skipCurrent = false, activate = false } = {}) {
+  async function changeMode(mode: PlaybackMode, {
+    skipCurrent = false, activate = false, keepSelectedVideo = false, videoSourceId,
+  }: { skipCurrent?: boolean; activate?: boolean; keepSelectedVideo?: boolean; videoSourceId?: string } = {}) {
     const state = live.current;
-    if (state.mode === mode || !current) {
+    if (!current || (state.mode === mode && !videoSourceId)) {
       setOfferAudioSkip(false);
       return;
     }
+    const token = ++intent.current;
     const updated = { ...state, mode };
-    const candidate = playbackSources(current, mode)[0];
-    if (!candidate) {
-      const nextEntry = nextIndex(1, updated, true);
+    const candidate = videoSourceId ? videoSource : playbackSources(current, mode)[0];
+    if (!candidate && !(keepSelectedVideo && videoSource)) {
+      const nextEntry = await findNext(1, updated, token, true);
+      if (token !== intent.current || state.queue !== live.current.queue || nextEntry === undefined) return;
       if (mode === "audio" && skipCurrent && nextEntry >= 0) {
         finishAttempt("manual");
         failed.current.clear();
-        playEntry(updated, nextEntry, "manual");
+        playEntry({...live.current, mode}, nextEntry, "manual");
         showSkipped(updated, state.queueIndex, nextEntry);
         return;
       }
@@ -761,8 +812,9 @@ export function PlayerProvider({
     failed.current.clear();
     setFailedSources(new Set());
     sourceIdentity.current = undefined;
+    requestedVideoSourceId.current = videoSourceId;
     const position = readPosition() ?? state.position;
-    const needsReattach = source?.id !== candidate.id || presentationKind !== playbackKind(current, candidate, mode);
+    const needsReattach = source?.id !== candidate?.id || presentationKind !== playbackKind(current, candidate, mode);
     if (needsReattach) {
       measureProgress();
       attempt.paused();
@@ -773,9 +825,10 @@ export function PlayerProvider({
     const canPlay = canAutoplayPlayback(current, candidate, mode, onPlayerScreen);
     playIntent((activate || playingRef.current) && canPlay);
     patch({ mode, position });
-    if (activate && !canPlay) openAndPlay(current.id);
+    if (activate && !canPlay && mode === "original") openAndPlay(current.id);
   }
   function watchQueueVideo(index: number) {
+    intent.current++;
     const state = live.current;
     const item = itemsById.get(state.queue[index]!);
     if (!item || playbackKind(item, playbackSources(item)[0]) !== "video") return;
@@ -784,6 +837,7 @@ export function PlayerProvider({
     playEntry({ ...state, mode: "original" }, index, "manual");
   }
   function addToQueue(item: ItemDto, placement: "next" | "last", playlistId?: string) {
+    catalog.put([item]);
     const wasEmpty = !live.current.queue.length;
     const updated = addToPlaybackQueue(live.current, item.id, placement, playlistId);
     if (updated === live.current) return;
@@ -821,6 +875,7 @@ export function PlayerProvider({
     setRemoval(undefined);
   }
   function clearQueue() {
+    intent.current++;
     finishAttempt("manual");
     attempt.select(null);
     playIntent(false);
@@ -853,22 +908,49 @@ export function PlayerProvider({
     playIntent(false);
   }, [onPlayerScreen, waitingForVideo, sourceKey]);
   useEffect(() => {
-    if (!live.current.queue.length || current) return;
-    finishAttempt("interrupted");
-    const recovered = recoverDeletedQueueEntry(live.current, itemsRef.current, failed.current);
-    const item = itemsById.get(recovered.queue[recovered.queueIndex]!);
-    if (item) {
-      const autoplay = playingRef.current && !failed.current.has(item.id) && playbackSources(item, recovered.mode).length > 0;
-      playEntry(recovered, recovered.queueIndex, "advance", { autoplay });
-      setError("Текущая запись удалена. Выбрана другая запись из очереди.");
-    } else {
-      resetSources();
-      patch(recovered);
-      attempt.select(null);
-      playIntent(false);
-      setError("В очереди больше нет доступных записей.");
+    catalog.invalidate();
+  }, [catalog, revision]);
+  useEffect(() => () => {intent.current++;}, []);
+  useEffect(() => {
+    let active = true;
+    const {queue, queueIndex} = settings;
+    const visible = onPlayerScreen || queueOpen ? queue : queue.slice(Math.max(0, queueIndex - 1), queueIndex + 3);
+    // Fetch the current entry first, including on reload in the middle of a long queue.
+    const id = queue[queueIndex];
+    setQueueLoadError("");
+    retryNavigation.current = undefined;
+    if (id) void catalog.ensure([id]).then(() => catalog.ensure(visible, () => active))
+      .catch(e => {if (active) setQueueLoadError(e.message);});
+    return () => {active = false;};
+  }, [catalog, revision, settings.queue, settings.queueIndex, onPlayerScreen, queueOpen, queueRetry]);
+  const pendingEntry = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const state = live.current;
+    const id = state.queue[state.queueIndex];
+    if (!id) return;
+    if (current) {
+      if (pendingEntry.current === id) selectAttempt(state, "manual");
+      pendingEntry.current = undefined;
+      return;
     }
-  }, [current?.id, items.length]);
+    if (!catalog.deleted(id)) {pendingEntry.current = id; return;}
+    // Find a surviving neighbor without dropping IDs that haven't been loaded yet.
+    const token = ++intent.current;
+    let active = true;
+    void (async () => {
+      let candidate = await findNext(1, state, token, false, false, setQueueLoadError);
+      if (candidate === -1) candidate = await findNext(-1, state, token, false, false, setQueueLoadError);
+      if (!active || token !== intent.current || candidate === undefined) return;
+      finishAttempt("interrupted");
+      const queue = state.queue.filter(entry => !catalog.deleted(entry));
+      if (!queue.length) {clearQueue(); setError("В очереди больше нет доступных записей."); return;}
+      const nextId = candidate >= 0 ? state.queue[candidate] : queue[Math.min(queue.length - 1, state.queueIndex)];
+      const index = queue.indexOf(nextId!);
+      playEntry({...live.current, queue}, index, "advance", {autoplay: candidate >= 0 && playingRef.current});
+      setError("Текущая запись удалена. Выбрана другая запись из очереди.");
+    })();
+    return () => {active = false;};
+  }, [current?.id, settings.queue, settings.queueIndex, revision, queueRetry, catalog.deleted(settings.queue[settings.queueIndex]!)]);
   useEffect(() => {
     if (native.current) {
       native.current.volume = settings.volume;
@@ -884,7 +966,7 @@ export function PlayerProvider({
     if (lastInitialSettings.current !== initialSettings) {
       lastInitialSettings.current = initialSettings;
       finishAttempt("interrupted");
-      const restored = restorePlayback(initialSettings ?? {}, itemsRef.current);
+      const restored = restorePlayback(initialSettings ?? {});
       playOnPlayerOpen.current = undefined;
       serverSignature.current = playbackSettingsSignature(restored);
       resetSources();
@@ -912,7 +994,7 @@ export function PlayerProvider({
       fetch("/api/settings", {
         method: "PUT",
         credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Hibiki-Workspace": userId },
         body: JSON.stringify(live.current),
         keepalive: true,
       }).catch(() => {});
@@ -937,7 +1019,7 @@ export function PlayerProvider({
       api<Partial<PlaybackSettings>>("/settings", "PUT", submitted)
         .then((saved) => {
           if (!responseIsCurrent()) return;
-          serverSignature.current = playbackSettingsSignature(restorePlayback(saved, itemsRef.current));
+          serverSignature.current = playbackSettingsSignature(restorePlayback(saved));
           const current = live.current;
           const queuePlaylistIds = reconcileQueuePlaylistIds(
             current.queuePlaylistIds, submitted.queuePlaylistIds, saved.queuePlaylistIds,
@@ -1109,8 +1191,8 @@ export function PlayerProvider({
   const sourceLabel = isYoutube ? "YouTube" : source ? "Локальный файл" : "Источник недоступен";
   function queueRow(id: string, index: number, editable = false) {
     const item = itemsById.get(id);
-    const title = item?.title ?? "Запись удалена";
-    const thumbnail = playbackArtwork(item);
+    const title = item?.title ?? (catalog.deleted(id) ? "Запись удалена" : "Загружаем запись…");
+    const artworkSource = item?.sources.find(candidate => candidate.thumbnail);
     const active = index === settings.queueIndex;
     const unavailableReason = queueEntryUnavailableReason(item, settings.mode);
     const failedReason = failed.current.has(id) ? "Источник недоступен" : undefined;
@@ -1153,8 +1235,7 @@ export function PlayerProvider({
         <button type="button" className={`watch-queue-row ${active ? "active" : ""}`} aria-current={active ? "true" : undefined} aria-disabled={!!unavailableReason} onClick={() => switchTo(index)}>
           <span className="watch-queue-number">{active && playing ? <span className="equalizer" aria-hidden="true"><i /><i /><i /></span> : index + 1}</span>
           <span className={`watch-queue-art art-${title.length % 6}`}>
-            {item?.kind === "video" ? <Video size={18} /> : <Music2 size={18} />}
-            {thumbnail && <img src={thumbnail} alt="" loading="lazy" onError={(event) => { event.currentTarget.style.display = "none"; }} />}
+            <ItemArtwork source={artworkSource} kind={item?.kind ?? "audio"} />
             <span className="watch-queue-duration">{formatDuration(item?.duration)}</span>
           </span>
           <span className="watch-queue-info">
@@ -1177,8 +1258,21 @@ export function PlayerProvider({
       </div>
     );
   }
+  const queueRetryNotice = queueLoadError && (
+    <div className="mini-player-notice" role="alert">
+      <span>{queueLoadError}</span>
+      <button className="text-button" onClick={() => {
+        const retry = retryNavigation.current;
+        retryNavigation.current = undefined;
+        setQueueLoadError("");
+        if (retry) retry();
+        else setQueueRetry(value => value + 1);
+      }}>Повторить загрузку очереди</button>
+    </div>
+  );
   const player = onPlayerScreen && (
     <section className={`watch-player ${current ? "" : "is-empty"}`} aria-label="Плеер">
+      {queueRetryNotice}
       {!current ? (
         <div className="watch-welcome">
           <span className="watch-welcome-icon"><AudioLines size={25} /></span>
@@ -1379,8 +1473,9 @@ export function PlayerProvider({
     setSaveError("");
     setOfferAudioSkip(false);
   }
-  const miniPlayer = !onPlayerScreen && (current || error || saveError) ? (
+  const miniPlayer = !onPlayerScreen && (current || error || saveError || queueLoadError) ? (
     <div className="mini-player">
+      {queueRetryNotice}
       {(error || saveError) && (
         <div className="mini-player-notice" role="status">
           <CircleAlert size={16} /><span>{error || saveError}</span>
@@ -1392,12 +1487,13 @@ export function PlayerProvider({
           <PlaybackSeekBar {...seekBar} className="mini-player-seek" />
           <Link className="mini-player-track" to="/player" aria-label={`Открыть плеер: ${current.title}`}>
             <span className={`mini-player-art art-${current.title.length % 6}`}>
-              {presentationKind === "video" ? <Video size={18} /> : <Music2 size={18} />}
-              {showArtwork && <img src={artwork} alt="" onError={() => setFailedArtwork(artwork)} />}
+              <ItemArtwork source={source?.thumbnail ? source : current.sources.find(candidate => candidate.thumbnail)}
+                kind={presentationKind ?? current.kind} />
             </span>
             <span className="mini-player-info">
               <strong>{current.title}</strong>
-              <small>{waitingForVideo ? "Видео готово к просмотру"
+              <small>{needsVideoForPlayback ? soundUnavailableReason(current) ?? "Источник звука недоступен"
+                : waitingForVideo ? "Видео готово к просмотру"
                 : audioFallback ? "Доступен только звук"
                 : settings.mode === "audio" ? "Только звук" : playing ? "Сейчас играет" : "На паузе"}</small>
             </span>
@@ -1406,11 +1502,14 @@ export function PlayerProvider({
             <button className="icon-button" aria-label="Предыдущая запись" onClick={() => live.current.position > 3 ? seek(0) : next(-1)}>
               <SkipBack size={17} fill="currentColor" />
             </button>
-            {waitingForVideo ? (
-              <button className="button primary compact" onClick={watchCurrent}><Video size={16} /> Смотреть</button>
-            ) : (
+            {!waitingForVideo && (
               <button className="mini-player-play" aria-label={playing ? "Приостановить" : "Воспроизвести"} onClick={toggle}>
                 {playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}
+              </button>
+            )}
+            {videoSource && (
+              <button type="button" className="icon-button" aria-label="Открыть видео" title="Открыть видео" onClick={watchCurrent}>
+                <Video size={18} aria-hidden="true" />
               </button>
             )}
             <button className="icon-button" aria-label="Следующая запись" onClick={() => next()}>
@@ -1419,18 +1518,27 @@ export function PlayerProvider({
           </div>
           <div className="mini-player-side">
             <span>{formatDuration(settings.position)} / {formatDuration(total)}</span>
-            <CompactPlaybackQueue key={routeKey} settings={settings} itemsById={itemsById} failedIds={failed.current} onSelect={switchTo} />
+            <CompactPlaybackQueue key={routeKey} onOpenChange={setQueueOpen} deleted={catalog.deleted} settings={settings} itemsById={itemsById} failedIds={failed.current} onSelect={switchTo} />
           </div>
         </section>
       )}
     </div>
   ) : null;
+  // Media time updates are frequent. Library rows subscribe only to changes
+  // that affect their buttons and cover, while commands use the latest state.
+  const commands = useRef({start, activateItem, toggle, watchCurrent, addToQueue});
+  useLayoutEffect(() => {commands.current = {start, activateItem, toggle, watchCurrent, addToQueue};});
+  const controller = useMemo<Controller>(() => ({
+    current, playing, waitingForVideo, mode: settings.mode,
+    start: (...args) => {void commands.current.start(...args);},
+    activateItem: (...args) => commands.current.activateItem(...args),
+    toggle: () => commands.current.toggle(),
+    watchCurrent: () => commands.current.watchCurrent(),
+    enqueue: (item, playlistId) => commands.current.addToQueue(item, "last", playlistId),
+    playNext: (item, playlistId) => commands.current.addToQueue(item, "next", playlistId),
+  }), [current, playing, waitingForVideo, settings.mode]);
   return (
-    <PlayerContext.Provider value={{
-      current, playing, waitingForVideo, settings, start, activateItem, toggle, watchCurrent,
-      enqueue: (item, playlistId) => addToQueue(item, "last", playlistId),
-      playNext: (item, playlistId) => addToQueue(item, "next", playlistId),
-    }}>
+    <PlayerContext.Provider value={controller}>
       {children(player, miniPlayer)}
       {source && presentationKind === "audio" && (
         <audio key={sourceKey} ref={attachNative} src={source.streamUrl!} {...nativeEvents} />

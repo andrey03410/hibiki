@@ -54,7 +54,7 @@
 
 .collection-entry {
   display: grid;
-  grid-template: "select identity actions tools" auto / 20px minmax(0, 1fr) auto auto;
+  grid-template: "select identity tools" auto / 20px minmax(0, 1fr) auto;
   align-items: center;
   column-gap: 9px;
   min-width: 0;
@@ -80,7 +80,7 @@
 }
 
 .collection-entry:has(.entry-tags) {
-  grid-template-areas: "select identity actions tools" ". tags tags tags";
+  grid-template-areas: "select identity tools" ". tags tags";
   row-gap: 6px;
 }
 
@@ -99,15 +99,6 @@
 
 .collection-cards .collection-entry:has(.entry-tags) {
   grid-template-areas: "select identity tools" ". tags tags";
-}
-
-.collection-cards .with-video-actions {
-  grid-template-areas: "select identity tools" ". actions actions";
-  row-gap: 8px;
-}
-
-.collection-cards .with-video-actions:has(.entry-tags) {
-  grid-template-areas: "select identity tools" ". actions actions" ". tags tags";
 }
 
 .entry-select {
@@ -209,15 +200,10 @@
   color: #d4b18e;
 }
 
-.entry-video-actions,
 .entry-tools {
   display: flex;
   align-items: center;
   gap: 4px;
-}
-
-.entry-video-actions {
-  grid-area: actions;
 }
 
 .entry-tools {
@@ -239,62 +225,8 @@
   color: #9d8eab;
 }
 
-.entry-video-action-wrap {
-  position: relative;
-}
-
-.entry-video-reason {
-  visibility: hidden;
-  position: absolute;
-  z-index: 46;
-  inset-inline-end: 0;
-  inset-block-end: calc(100% + 4px);
-  width: max-content;
-  max-width: 144px;
-  padding: 5px 8px;
-  border: 1px solid #4b3f55;
-  border-radius: 6px;
-  background: #242029;
-  color: #eee3fb;
-  font-size: 11px;
-  pointer-events: none;
-}
-
-.entry-video-action-wrap:is(:hover, :focus-within) .entry-video-reason {
-  visibility: visible;
-}
-
-.entry-video-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  min-height: 32px;
-  min-width: 79px;
-  padding: 0 6px;
-  border: 1px solid #ffffff19;
-  border-radius: 6px;
-  background: #ffffff04;
-  color: #d3c5e0;
-  font-size: 11px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.entry-video-action:hover:not([aria-disabled="true"]) {
-  border-color: #c0a9f44a;
-  color: #f2e5ff;
-  background: #c0a9f41a;
-}
-
-.entry-video-action[aria-disabled="true"] {
-  color: #a197ab;
-  border-color: #ffffff0f;
-  cursor: default;
-}
-
 .entry-tags,
-.entry-tags-expanded {
+.entry-tags-popup:popover-open {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -306,18 +238,7 @@
   grid-area: tags;
 }
 
-.entry-tags-extra {
-  min-width: 0;
-}
-
-.entry-tags-extra[open] {
-  display: flex;
-  flex: 1 1 100%;
-  align-items: baseline;
-  gap: 5px;
-}
-
-.entry-tags-extra > summary,
+.entry-tags-more,
 .entry-tag {
   min-height: 22px;
   max-width: min(140px, 100%);
@@ -343,23 +264,29 @@
   background: var(--tag-color, #aaa);
 }
 
-.entry-tags-extra > summary {
-  display: grid;
-  align-items: center;
-  list-style: none;
-  cursor: pointer;
+.entry-tags-popup {
+  width: min(225px, calc(100vw - 24px));
+  max-height: min(240px, 45vh);
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid #574963;
+  border-radius: 8px;
+  background: #242029;
+  box-shadow: 0 6px 20px #08060b80;
 }
 
-.entry-tags-extra > summary::-webkit-details-marker {
-  display: none;
-}
-
-.entry-tags-expanded {
-  margin-block-start: 4px;
+@supports (position-area: block-end) {
+  .entry-tags-popup {
+    inset: auto;
+    margin: 4px 0;
+    position-area: block-end span-all;
+    justify-self: anchor-center;
+    position-try-fallbacks: flip-block;
+  }
 }
 
 button.entry-tag:hover,
-.entry-tags-extra > summary:hover {
+.entry-tags-more:hover {
   background: #c0a9f41b;
   color: #eee3fb;
 }
@@ -427,13 +354,9 @@ button.entry-tag:hover,
 }
 
 @container (width >= 720px) {
-  .collection-list .collection-results:has(.with-video-actions) {
-    --entry-actions-width: 184px;
-  }
-
   .collection-list .collection-entry,
   .collection-list .collection-entry:has(.entry-tags) {
-    grid-template: "select identity tags actions tools" auto / 20px minmax(0, 1fr) minmax(0, 25%) var(--entry-actions-width, 0px) auto;
+    grid-template: "select identity tags tools" auto / 20px minmax(0, 1fr) minmax(0, 38%) auto;
   }
 }
 
@@ -448,14 +371,6 @@ button.entry-tag:hover,
     grid-template-areas: "select identity tools" ". tags tags";
   }
 
-  .collection-list .with-video-actions {
-    grid-template-areas: "select identity tools" ". actions actions";
-    row-gap: 6px;
-  }
-
-  .collection-list .with-video-actions:has(.entry-tags) {
-    grid-template-areas: "select identity tools" ". actions actions" ". tags tags";
-  }
 }
 
 @media (width <= 440px) {

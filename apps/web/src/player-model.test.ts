@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   playbackSources,
+  playableVideoSource,
+  canStartSelectedItem,
   sourceLoadPosition,
   restorePlayback,
   nextPlayableIndex,
@@ -252,6 +254,21 @@ describe("browser playback model", () => {
     expect(soundUnavailableReason(silent)).toBe("В видео нет звуковой дорожки");
     expect(soundUnavailableReason(youtubeOnly)).toBe("Для прослушивания нужна локальная копия");
     expect(soundUnavailableReason(video)).toBe("Звуковая дорожка ещё не проверена");
+  });
+
+  it.each([youtubeOnly, silent])("keeps a video selected by cover when its audio is unavailable ($id)", (selected) => {
+    expect(canStartSelectedItem(selected, "audio", true)).toBe(true);
+    expect(canStartSelectedItem(selected, "audio")).toBe(false);
+  });
+
+  it("locates the available video even when audio mode uses another source", () => {
+    const unavailableMovie = { ...videoWithSound, sources: [videoWithSound.sources[0], { ...videoWithSound.sources[1], status: "unavailable" }] };
+    expect(playableVideoSource(videoWithSound)?.id).toBe("movie");
+    expect(playableVideoSource(videoWithSound, new Set(["movie"]))?.id).toBe("youtube");
+    expect(playableVideoSource(silent)?.id).toBe("movie");
+    expect(playableVideoSource(youtubeOnly)?.id).toBe("youtube");
+    expect(playableVideoSource(unavailableMovie)).toBeUndefined();
+    expect(playableVideoSource(lost)).toBeUndefined();
   });
 
   it("waits to play video outside the player, including YouTube, and allows local audio", () => {

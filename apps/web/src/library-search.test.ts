@@ -188,13 +188,13 @@ describe("library search", () => {
     expect(html).toContain("Сбросить фильтры");
   });
 
-  it("offers both playback modes for a filtered collection", () => {
+  it("offers one direct playback action for a filtered collection", () => {
     const html = renderToStaticMarkup(createElement(LibrarySearchControls, {
       value: defaultLibrarySearch, tags: [], count: 3, view: "list",
       onViewChange: () => {}, onChange: () => {}, onPlay: () => {},
     }));
-    expect(html).toContain("Играть найденное");
-    expect(html).toContain("Слушать найденное");
+    expect(html).toMatch(/<button[^>]+aria-label="Играть выдачу"[^>]*>/);
+    expect(html).not.toContain("Слушать найденное");
   });
 
   it("shows title search, tag search and counted tag choices without opening any filters", () => {

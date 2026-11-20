@@ -100,6 +100,46 @@ describe("embedded audio artwork", () => {
   const get = (url: string) =>
     app.inject({ url, cookies: { hibiki_session: cookie } });
 
+  it("delivers a small decodable library cover and retains the full image for the player", async () => {
+    const { stdout: original } = await promisify(execFile)(String(ffmpeg), [
+      "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+      "testsrc2=size=1536x1024,noise=alls=16:all_seed=1",
+      "-frames:v", "1", "-threads", "1", "-c:v", "png", "-f", "image2pipe", "pipe:1",
+    ], { encoding: "buffer", maxBuffer: 5 * 1024 ** 2, timeout: 10_000 });
+    const item = await importCover(original);
+    const url = artworkUrl(item.id);
+    const small = await get(url + "?size=thumb");
+    expect(small.statusCode).toBe(200);
+    expect(small.rawPayload.length).toBeLessThan(32 * 1024);
+    expect(small.headers["content-type"]).toBe("image/webp");
+    const path = join(ctx.root, "thumb.webp");
+    await writeFile(path, small.rawPayload);
+    const { stdout: decoded } = await promisify(execFile)(String(ffmpeg), [
+      "-hide_banner", "-loglevel", "error", "-i", path,
+      "-frames:v", "1", "-threads", "1", "-c:v", "png", "-f", "image2pipe", "pipe:1",
+    ], { encoding: "buffer", timeout: 10_000 });
+    expect([decoded.readUInt32BE(16), decoded.readUInt32BE(20)]).toEqual([96, 64]);
+    expect((await get(url)).rawPayload.equals(original)).toBe(true);
+
+    const etag = small.headers.etag;
+    expect(typeof etag).toBe("string");
+    const revalidate = (session: string) => app.inject({
+      url: url + "?size=thumb", cookies: { hibiki_session: session },
+      headers: { "if-none-match": String(etag) },
+    });
+    const unchanged = await revalidate(cookie);
+    expect(unchanged.statusCode).toBe(304);
+    expect(unchanged.rawPayload.length).toBe(0);
+    expect((await revalidate(await app.auth.createSession(ctx.otherUserId))).statusCode).toBe(404);
+    await ctx.library.deleteItem(ctx.userId, item.id);
+    expect((await revalidate(cookie)).statusCode).toBe(404);
+  });
+  it("uses the library fallback when a raster signature has no decodable image", async () => {
+    const item = await importCover(png.subarray(0, 12));
+    const response = await get(artworkUrl(item.id) + "?size=thumb");
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error.code).toBe("artwork_not_found");
+  });
   it("serves PNG and WebP bytes using their actual image type", async () => {
     for (const [bytes, mime] of [
       [png, "image/png"], [webp, "image/webp"],

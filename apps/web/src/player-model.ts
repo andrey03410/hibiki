@@ -164,6 +164,14 @@ export function playbackSources<T extends PlaybackSource>(item: {
     );
 }
 
+export function playableVideoSource(item: PlayableItem, failed?: ReadonlySet<string>) {
+  return playbackSources(item).find((source) => playbackKind(item, source) === "video" && !failed?.has(source.id));
+}
+
+export function canStartSelectedItem(item: PlayableItem, mode: PlaybackMode, keepSelectedVideo = false): boolean {
+  return playbackSources(item, mode).length > 0 || (keepSelectedVideo && !!playableVideoSource(item));
+}
+
 export function soundUnavailableReason(item: PlayableItem): string | undefined {
   if (playbackSources(item, "audio").length) return;
   const sources = playbackSources(item);
@@ -187,8 +195,11 @@ export function playbackSourceForAttempt<T extends PlaybackSource>(
   failed: ReadonlySet<string>,
   active?: { sourceId: string; preferredSourceId?: string },
   mode: PlaybackMode = "original",
+  requestedSourceId?: string,
 ): T | undefined {
   const sources = playbackSources(item, mode).filter((source) => !failed.has(source.id));
+  const requested = requestedSourceId && sources.find((source) => source.id === requestedSourceId);
+  if (requested) return requested;
   if (active && active.preferredSourceId !== item.preferredSourceId) {
     const retained = sources.find((source) => source.id === active.sourceId);
     if (retained) return retained;
@@ -259,14 +270,15 @@ export function queuePlaylistInput(
 
 export function restorePlayback(
   settings: Partial<PlaybackSettings>,
-  items: PlayableItem[],
+  items?: PlayableItem[],
 ): PlaybackSettings {
   const oldQueue = Array.isArray(settings.queue)
     ? settings.queue
     : [];
   const currentId = oldQueue[settings.queueIndex ?? 0];
-  const valid = new Set(items.map((i) => i.id));
-  const queue = [...new Set(oldQueue.filter((id) => valid.has(id)))];
+  const valid = items && new Set(items.map(i => i.id));
+  const retainedId = (id: unknown): id is string => typeof id === "string" && (!valid || valid.has(id));
+  const queue = [...new Set(oldQueue.filter(retainedId))];
   const inQueue = new Set(queue);
   const retained = queue.indexOf(currentId ?? "");
   return {
@@ -284,7 +296,7 @@ export function restorePlayback(
     shuffle: !!settings.shuffle,
     mode: settings.mode === "audio" ? "audio" : "original",
     originalQueue: Array.isArray(settings.originalQueue)
-      ? settings.originalQueue.filter((id) => valid.has(id))
+      ? settings.originalQueue.filter(retainedId)
       : undefined,
     queuePlaylistIds: Object.fromEntries(
       Object.entries(settings.queuePlaylistIds ?? {}).filter(
@@ -319,7 +331,7 @@ export function reconcileQueuePlaylistIds(
 export function restoreCachedPlayback(
   initial: Partial<PlaybackSettings> | undefined,
   cached: (Partial<PlaybackSettings> & { serverSignature?: string }) | null,
-  items: PlayableItem[],
+  items?: PlayableItem[],
 ): PlaybackSettings {
   // When the server still has the last known settings, keep edits made after that save.
   const server = restorePlayback(initial ?? {}, items);

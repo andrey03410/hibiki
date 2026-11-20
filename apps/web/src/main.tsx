@@ -1,6 +1,7 @@
 import React, {
   useEffect,
   useMemo,
+  useSyncExternalStore,
   useRef,
   useState,
   useContext,
@@ -60,6 +61,7 @@ import {
 import type {
   ItemDto,
   LibraryDto,
+  LibraryOverviewDto,
   PlaylistDto,
   Rule,
   PlaylistDefinition,
@@ -67,11 +69,13 @@ import type {
   TagDto,
   UserDto,
 } from "@hibiki/contracts";
-import { api, formatDuration, humanDuration, mediaWord } from "./api.ts";
+import { api, setWorkspaceOwner, formatDuration, humanDuration, mediaWord } from "./api.ts";
+import { ItemArtwork } from "./ItemArtwork.tsx";
+import { LibraryPages, fetchItems, searchBody } from "./library-pages";
 import { PlayerProvider, usePlayer } from "./player.tsx";
-import { ItemTagList, LibraryVideoAction } from "./LibraryItemControls.tsx";
-import { playbackSources, soundUnavailableReason } from "./player-model.ts";
-import { countLibraryTags, defaultLibrarySearch, librarySourceBadges, matchesSearch, searchLibrary, selectLibraryResults, sourceAvailability, type LibraryView } from "./library-search.ts";
+import { ItemTagList } from "./LibraryItemControls.tsx";
+import { playbackSources } from "./player-model.ts";
+import { defaultLibrarySearch, librarySourceBadges, matchesSearch, sourceAvailability, type LibraryView } from "./library-search.ts";
 import { LibrarySearchControls, useLibrarySearch } from "./LibrarySearchControls.tsx";
 import { NoteEditor, NoteIndicator, NotesContext, NotesLoadError, useNotes, useNotesController } from "./NoteEditor.tsx";
 import { noteFor } from "./note-model.ts";
@@ -87,11 +91,13 @@ const EMPTY: LibraryDto = { items: [], tags: [], playlists: [], jobs: [] };
 type Toast = { id: number; text: string; error?: boolean };
 const DataContext = createContext<{
   library: LibraryDto;
+  overview: LibraryOverviewDto;
   refresh: () => Promise<void>;
   notify: (text: string, error?: boolean) => void;
   openImport: () => void;
 }>({
   library: EMPTY,
+  overview: {...EMPTY, total: 0, tagCounts: {}, revision: ""},
   refresh: async () => {},
   notify: () => {},
   openImport: () => {},
@@ -349,11 +355,15 @@ function App() {
     [setup, setSetup] = useState(false),
     [loading, setLoading] = useState(true),
     [loadError, setLoadError] = useState("");
+  function enter(user: UserDto | null) {
+    setWorkspaceOwner(user?.id);
+    setUser(user);
+  }
   async function check() {
     setLoading(true);
     try {
       const data = await api("/me");
-      setUser(data.user);
+      enter(data.user);
       setSetup(data.setupRequired);
       setLoadError("");
     } catch (e) {
@@ -388,11 +398,11 @@ function App() {
       user={user}
       logout={async () => {
         await api("/auth/logout", "POST");
-        setUser(null);
+        enter(null);
       }}
     />
   ) : (
-    <Auth setup={setup} onLogin={setUser} />
+    <Auth setup={setup} onLogin={enter} />
   );
 }
 function Workspace({
@@ -402,7 +412,7 @@ function Workspace({
   user: UserDto;
   logout: () => Promise<void>;
 }) {
-  const [library, setLibrary] = useState<LibraryDto>(EMPTY),
+  const [overview, setOverview] = useState<LibraryOverviewDto>({...EMPTY, total: 0, tagCounts: {}, revision: ""}),
     [settings, setSettings] = useState<any>(null),
     [ready, setReady] = useState(false),
     [error, setError] = useState(""),
@@ -412,6 +422,9 @@ function Workspace({
     [importSettingsLoading, setImportSettingsLoading] = useState(false),
     [playlistQuery, setPlaylistQuery] = useState(""),
     [tagQuery, setTagQuery] = useState("");
+  const library: LibraryDto = useMemo(() => ({...overview, items: []}), [overview]);
+  const request = useRef(0);
+  const overviewSignature = useRef("");
   const notes = useNotesController();
   const librarySearch = useLibrarySearch(user.id);
   const seenImports = useRef<Set<string> | null>(null);
@@ -427,16 +440,18 @@ function Workspace({
     setTimeout(() => setToasts((old) => old.filter((t) => t.id !== id)), 6000);
   }
   async function refresh() {
-    const result = await api<LibraryDto>("/library");
-    setLibrary(result);
+    const sequence = ++request.current;
+    const result = await api<LibraryOverviewDto>("/library/overview");
+    if (sequence !== request.current) return;
+    const signature = JSON.stringify(result);
+    if (signature !== overviewSignature.current) {
+      overviewSignature.current = signature;
+      setOverview(result);
+    }
   }
   async function load() {
     try {
-      const [data, preferences] = await Promise.all([
-        api<LibraryDto>("/library"),
-        api("/settings"),
-      ]);
-      setLibrary(data);
+      const [, preferences] = await Promise.all([refresh(), api("/settings")]);
       setSettings(preferences);
       setReady(true);
       setError("");
@@ -446,11 +461,19 @@ function Workspace({
   }
   useEffect(() => {
     void load();
-    const interval = setInterval(() => {
-      void refresh().catch(() => {});
+    return () => {request.current++;};
+  }, []);
+  useEffect(() => {
+    if (!ready) return;
+    let running = false;
+    const interval = setInterval(async () => {
+      if (running) return;
+      running = true;
+      try { await refresh(); } catch { /* The next polling tick retries. */ }
+      finally { running = false; }
     }, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [ready]);
   useEffect(() => {
     if (!ready) return;
     const completed = library.jobs.filter(
@@ -502,14 +525,14 @@ function Workspace({
     <NotesContext.Provider value={notes}>
     <DataContext.Provider
       value={{
-        library,
+        library, overview,
         refresh,
         notify,
         openImport: () => setImportOpen(true),
       }}
     >
       <PlayerProvider
-        items={library.items}
+        revision={overview.revision}
         initialSettings={settings}
         userId={user.id}
         onPlaylistSaved={() => { void refresh().catch((e) => notify(e.message, true)); }}
@@ -543,7 +566,7 @@ function Workspace({
               <NavLink to="/" end aria-label="Медиатека" title="Медиатека">
                 <Library size={19} />
                 <span>Медиатека</span>
-                <span className="nav-count">{library.items.length}</span>
+                <span className="nav-count">{overview.total}</span>
               </NavLink>
               <NavLink to="/player" aria-label="Плеер" title="Плеер">
                 <AudioLines size={19} />
@@ -628,7 +651,7 @@ function Workspace({
               <Route path="/playlists/:id" element={<PlaylistPage onBrowseTag={browseTag} />} />
               <Route path="/tags" element={<TagsPage query={tagQuery} onQuery={setTagQuery} onBrowse={browseTag} />} />
               <Route path="/jobs" element={<JobsPage />} />
-              <Route path="/settings" element={<SettingsPage user={user} />} />
+              <Route path="/settings" element={<WithCatalog><SettingsPage user={user} /></WithCatalog>} />
               <Route
                 path="*"
                 element={
@@ -693,11 +716,27 @@ function PageTop({ label, children }: { label: string; children?: ReactNode }) {
     </div>
   );
 }
-function LibraryPage({ userId, search }: { userId: string; search: ReturnType<typeof useLibrarySearch> }) {
-  const { library, openImport } = useData(),
+function WithCatalog({children}: {children: ReactNode}) {
+  const context = useData();
+  const [items, setItems] = useState<ItemDto[]>();
+  const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let current = true;
+    setError("");
+    api<LibraryDto>("/library").then(data => {if (current) setItems(data.items);})
+      .catch(e => {if (current) setError(e.message);});
+    return () => {current = false;};
+  }, [context.overview.revision, retry]);
+  if (error) return <div role="alert"><ErrorMessage error={error} /><Button onClick={() => setRetry(n => n + 1)}>Повторить</Button></div>;
+  if (!items) return <div role="status" className="loading-inline">Загружаем каталог…</div>;
+  return <DataContext.Provider value={{...context, library: {...context.library, items}}}>{children}</DataContext.Provider>;
+}
+
+const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId: string; search: ReturnType<typeof useLibrarySearch> }) {
+  const { library, overview, notify, openImport } = useData(),
     player = usePlayer();
   const [filters, setFilters] = search;
-  const { notes } = useNotes();
   const [selected, setSelected] = useState<string[]>([]),
     [playlistOpen, setPlaylistOpen] = useState(false),
     [batchOpen, setBatchOpen] = useState(false);
@@ -709,23 +748,72 @@ function LibraryPage({ userId, search }: { userId: string; search: ReturnType<ty
       return "list";
     }
   });
-  const items = useMemo(() => searchLibrary(library.items, filters, notes), [library.items, filters, notes]);
-
-  const tagCounts = useMemo(() => countLibraryTags(library.items), [library.items]);
-
+  const pages = useMemo(() => new LibraryPages(cursor => api("/library/page", "POST", {...searchBody(filters), cursor})), [filters]);
+  const {items, loading, error, nextCursor, total} = useSyncExternalStore(pages.subscribe, pages.snapshot);
+  const sentinel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    void pages.refresh();
+    return pages.cancel;
+  }, [pages, overview.revision]);
+  useEffect(() => {
+    if (!nextCursor || loading || error || !sentinel.current) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) void pages.more();
+    }, {rootMargin: "400px"});
+    observer.observe(sentinel.current);
+    return () => observer.disconnect();
+  }, [pages, nextCursor, loading, error]);
+  const actions = useRef(0);
+  useEffect(() => () => {actions.current++;}, [pages, overview.revision]);
+  const idQuery = useMemo(() => {
+    let pending: Promise<string[]> | undefined;
+    return () => pending ??= api<{ids: string[]}>("/library/ids", "POST", searchBody(filters))
+      .then(result => result.ids).catch(e => {pending = undefined; throw e;});
+  }, [filters, overview.revision]);
+  const pageComplete = !loading && !nextCursor && !error && items.length === total;
+  const pageIds = useMemo(() => items.map(item => item.id), [items]);
+  const allIds = () => pageComplete ? Promise.resolve(pageIds) : idQuery();
+  async function play(item?: ItemDto) {
+    const request = ++actions.current;
+    const index = item ? items.findIndex(entry => entry.id === item.id) : 0;
+    if (item && player.current?.id === item.id) {
+      player.activateItem(items, index, undefined, {fromLibrary: true});
+      return;
+    }
+    try {
+      const queueIds = await allIds();
+      if (request !== actions.current || (item && !queueIds.includes(item.id))) return;
+      const options = {fromLibrary: true, queueIds};
+      if (item) player.activateItem(items, index, undefined, options);
+      else player.start(items, 0, undefined, options);
+    } catch (e) { if (request === actions.current) notify((e as Error).message, true); }
+  }
+  const tagCounts = useMemo(() => new Map(Object.entries(overview.tagCounts)), [overview.tagCounts]);
   const selectedIds = new Set(selected);
-  const selectedCount = items.filter((item) => selectedIds.has(item.id)).length;
+  const hasSelection = selected.length > 0;
+  const [selectionScope, setSelectionScope] = useState<{query: typeof idQuery; ids: string[]}>();
+  useEffect(() => {
+    if (!hasSelection || pageComplete) return;
+    let active = true;
+    void idQuery().then(ids => {if (active) setSelectionScope({query: idQuery, ids});}).catch(() => {});
+    return () => {active = false;};
+  }, [hasSelection, pageComplete, idQuery]);
+  const scope = pageComplete ? pageIds : selectionScope?.query === idQuery ? selectionScope.ids : undefined;
+  const allSelected = !!scope?.length && hasSelection && scope.every(id => selectedIds.has(id));
   const selectAll = (
     <label className="collection-select-all">
-      <input
-        type="checkbox"
-        aria-label="Выбрать все найденные записи"
-        checked={items.length > 0 && selectedCount === items.length}
-        ref={(input) => {
-          if (input) input.indeterminate = selectedCount > 0 && selectedCount < items.length;
-        }}
-        onChange={(event) => setSelected(selectLibraryResults(selected, items, event.target.checked))}
-      />
+      <input type="checkbox" aria-label="Выбрать все найденные записи" checked={allSelected}
+        ref={input => { if (input) input.indeterminate = !allSelected && (scope ?? pageIds).some(id => selectedIds.has(id)); }}
+        onChange={async event => {
+          const checked = event.target.checked;
+          const request = ++actions.current;
+          try {
+            const ids = new Set(await allIds());
+            if (request !== actions.current) return;
+            setSelected(old => checked ? [...new Set([...old, ...ids])] : old.filter(id => !ids.has(id)));
+            setSelectionScope({query: idQuery, ids: [...ids]});
+          } catch (e) { notify((e as Error).message, true); }
+        }} />
       Выбрать все
     </label>
   );
@@ -754,11 +842,11 @@ function LibraryPage({ userId, search }: { userId: string; search: ReturnType<ty
           onChange={setFilters}
           tags={library.tags}
           tagCounts={tagCounts}
-          count={items.length}
-          selectAll={items.length > 0 ? selectAll : undefined}
+          count={total}
+          selectAll={total > 0 ? selectAll : undefined}
           view={view}
           onViewChange={changeView}
-          onPlay={(mode) => player.start(items, 0, undefined, { mode, fromLibrary: true })}
+          onPlay={() => void play()}
         />
         <NotesLoadError />
         {selected.length > 0 && (
@@ -788,24 +876,28 @@ function LibraryPage({ userId, search }: { userId: string; search: ReturnType<ty
           view={view}
           selected={selected}
           onSelected={setSelected}
+          onActivate={item => void play(item)}
           onTag={(id) => setFilters((old) => (
             old.tagIds.includes(id) ? old : { ...old, tagIds: [...old.tagIds, id] }
           ))}
         />
-        {!items.length && (
+        <div ref={sentinel} aria-hidden="true" />
+        {loading && <div role="status" className="loading-inline"><LoaderCircle className="spin" size={18} /> Загружаем записи…</div>}
+        {error && <div role="alert"><ErrorMessage error={error} /><Button onClick={() => void pages.retry()}>Повторить загрузку</Button></div>}
+        {!loading && !error && !items.length && (
           <EmptyState
             title={
-              library.items.length
+              overview.total
                 ? "Ничего не найдено"
                 : "Начнём вашу коллекцию"
             }
             text={
-              library.items.length
+              overview.total
                 ? "Измените условия поиска или сбросьте фильтры."
                 : "Загрузите любимые аудио и видео или добавьте ссылку с YouTube."
             }
             action={
-              !library.items.length && (
+              !overview.total && (
                 <Button className="primary" onClick={openImport}>
                   <Plus size={16} />
                   Добавить медиа
@@ -830,18 +922,13 @@ function LibraryPage({ userId, search }: { userId: string; search: ReturnType<ty
       )}
     </>
   );
-}
-function ItemArtwork({ thumbnail, kind }: { thumbnail?: string; kind: ItemDto["kind"] }) {
-  const [failed, setFailed] = useState(false);
-  if (thumbnail && !failed) return <img src={thumbnail} alt="" loading="lazy" onError={() => setFailed(true)} />;
-  return kind === "video" ? <Video size={19} /> : <Music2 size={19} />;
-}
-
+});
 function ItemTable({
   items,
   reasons,
   selected,
   onSelected,
+  onActivate,
   onTag,
   reorder,
   playlistId,
@@ -851,18 +938,19 @@ function ItemTable({
   reasons?: Record<string, string[]>;
   selected?: string[];
   onSelected?: (ids: string[]) => void;
+  onActivate?: (item: ItemDto) => void;
   onTag?: (id: string) => void;
   reorder?: (id: string, direction: number) => void;
   playlistId?: string;
   view?: LibraryView;
 }) {
   const player = usePlayer(),
-    { library, refresh, notify } = useData();
+    { refresh, notify } = useData();
   const { notes } = useNotes();
   const [editTarget, setEditTarget] = useState<{ id: string; focusSource?: boolean }>(),
     [remove, setRemove] = useState<ItemDto | null>(null),
     [busy, setBusy] = useState(false);
-  const currentItems = useMemo(() => new Map(library.items.map((item) => [item.id, item])), [library.items]);
+  const currentItems = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
   const edit = editTarget ? currentItems.get(editTarget.id) : undefined;
   const inLibrary = view !== undefined;
   const selectedIds = new Set(selected);
@@ -879,7 +967,7 @@ function ItemTable({
   const results = items.map((item, index) => {
     const streamUrl = item.sources.find((source) => source.streamUrl)?.streamUrl;
     const externalUrl = item.sources.find((source) => source.url)?.url;
-    const thumbnail = item.sources.find((source) => source.thumbnail)?.thumbnail;
+    const artworkSource = item.sources.find((source) => source.thumbnail);
     const available = playbackSources(item).length > 0;
     const active = player.current?.id === item.id;
     const playing = active && player.playing;
@@ -890,15 +978,15 @@ function ItemTable({
     const yt = item.sources.some((source) => source.provider === "youtube");
     const kindLabel = video ? "Видео" : "Аудио";
     const playLabel = playing ? "Приостановить"
-      : video && (!active || player.waitingForVideo || player.settings.mode === "original") ? "Смотреть"
+      : !inLibrary && video && (!active || player.waitingForVideo || player.mode === "original") ? "Смотреть"
       : "Воспроизвести";
     const coverLabel = `${playLabel} ${item.title}`;
-    const activate = (mode?: "original" | "audio") => player.activateItem(items, index, playlistId, { fromLibrary: inLibrary, mode });
+    const activate = () => onActivate ? onActivate(item) : player.activateItem(items, index, playlistId, { fromLibrary: inLibrary });
     const cover = (
       <button type="button" className={`item-art entry-cover art-${index % 6}`}
         aria-label={video ? `${coverLabel} · обложка` : coverLabel} title={available ? coverLabel : "Нет рабочего источника"}
-        disabled={!available} onClick={() => activate()}>
-        <ItemArtwork key={thumbnail} thumbnail={thumbnail} kind={item.kind} />
+        disabled={!available} onClick={activate}>
+        <ItemArtwork source={artworkSource} kind={item.kind} />
         {available && (
           <span className="entry-cover-control" aria-hidden="true">
             {playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
@@ -924,17 +1012,6 @@ function ItemTable({
           event.target.checked ? [...selected, item.id] : selected.filter((id) => id !== item.id),
         )}
       />
-    );
-    const showVideoActions = inLibrary && video;
-    const playActions = showVideoActions && (
-      <div className="entry-video-actions">
-        <LibraryVideoAction mode="original" title={item.title}
-          playing={playing && player.settings.mode === "original"} reason={available ? undefined : "Нет рабочего источника"}
-          onClick={() => activate("original")} onUnavailable={(reason) => notify(reason, true)} />
-        <LibraryVideoAction mode="audio" title={item.title}
-          playing={playing && player.settings.mode === "audio"} reason={soundUnavailableReason(item)}
-          onClick={() => activate("audio")} onUnavailable={(reason) => notify(reason, true)} />
-      </div>
     );
     const menu = (
       <details className="row-menu" name={inLibrary ? "library-item-actions" : undefined}
@@ -1030,7 +1107,7 @@ function ItemTable({
 
     const badges = librarySourceBadges(item);
     return (
-      <article className={`collection-entry ${showVideoActions ? "with-video-actions" : ""} ${active ? "current" : ""}`}
+      <article className={`collection-entry ${active ? "current" : ""}`}
         key={item.id} aria-current={active || undefined}>
         <div className="entry-select">{selection ?? <span className="row-number">{index + 1}</span>}</div>
         <div className="entry-identity">
@@ -1058,7 +1135,6 @@ function ItemTable({
             )}
           </div>
         </div>
-        {playActions}
         <div className="entry-tools">{favorite}{menu}</div>
         <ItemTagList tags={item.tags} onTag={onTag} />
       </article>
@@ -1367,23 +1443,17 @@ function BatchTags({ ids, close }: { ids: string[]; close: () => void }) {
           onClick={async () => {
             setBusy(true);
             try {
-              await api("/items/batch", "POST", {
-                changes: ids.map((id) => {
-                  const old =
-                    library.items
-                      .find((i) => i.id === id)
-                      ?.tags.map((t) => t.id) ?? [];
-                  return {
-                    id,
-                    tagIds:
-                      mode === "replace"
-                        ? tags
-                        : mode === "remove"
-                          ? old.filter((t) => !tags.includes(t))
-                          : [...new Set([...old, ...tags])],
-                  };
-                }),
-              });
+              for (let start = 0; start < ids.length; start += 100) {
+                const records = await fetchItems(ids.slice(start, start + 100));
+                await api("/items/batch", "POST", {
+                  changes: records.map(item => {
+                    const old = item.tags.map(tag => tag.id);
+                    const tagIds = mode === "replace" ? tags : mode === "remove"
+                      ? old.filter(id => !tags.includes(id)) : [...new Set([...old, ...tags])];
+                    return {id: item.id, tagIds};
+                  }),
+                });
+              }
               await refresh();
               notify("Теги обновлены");
               close();
@@ -1453,7 +1523,7 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
   );
 }
 function PlaylistCard({ playlist }: { playlist: PlaylistDto }) {
-  const { library } = useData(),
+  const { library, overview } = useData(),
     player = usePlayer(),
     [resolved, setResolved] = useState<ResolvedPlaylist | null>(null);
   const { notes } = useNotes();
@@ -1474,7 +1544,7 @@ function PlaylistCard({ playlist }: { playlist: PlaylistDto }) {
     playlist.id,
     playlist.revision,
     historyRevision,
-    library.items.map((i) => i.updatedAt).join(","),
+    overview.revision,
     library.playlists.map((p) => p.revision).join(","),
   ]);
   return (
@@ -1529,9 +1599,12 @@ function PlaylistCard({ playlist }: { playlist: PlaylistDto }) {
     </article>
   );
 }
+function LinkedPlaylistCatalog(props: Omit<React.ComponentProps<typeof YoutubeLinkedPlaylist>, "items">) {
+  return <YoutubeLinkedPlaylist {...props} items={useData().library.items} />;
+}
 function PlaylistPage({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
   const { id } = useParams(),
-    { library, refresh, notify } = useData(),
+    { library, overview, refresh, notify } = useData(),
     player = usePlayer(),
     navigate = useNavigate();
   const playlist = library.playlists.find((p) => p.id === id),
@@ -1558,7 +1631,7 @@ function PlaylistPage({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
     }
   }
   const contentKey =
-    library.items.map((i) => i.updatedAt).join(",") +
+    overview.revision +
     library.playlists.map((p) => p.revision).join(",");
   useEffect(() => {
     setResolved(null);
@@ -1671,16 +1744,15 @@ function PlaylistPage({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
       </section>
       <NoteEditor key={playlist.id} kind="playlist" id={playlist.id} />
       {playlist.youtubeLinked && (
-        <YoutubeLinkedPlaylist
+        <WithCatalog><LinkedPlaylistCatalog
           key={playlist.id}
           playlist={playlist}
-          items={library.items}
           tags={library.tags}
           reload={async () => {
             await refresh();
             await resolve();
           }}
-        />
+        /></WithCatalog>
       )}
       {automatic && !playlist.youtubeLinked && (
         <div className="rule-summary">
@@ -2205,7 +2277,10 @@ function RuleEditor({
     </div>
   );
 }
-function PlaylistEditor({
+function PlaylistEditor(props: React.ComponentProps<typeof PlaylistEditorForm>) {
+  return <WithCatalog><PlaylistEditorForm {...props} /></WithCatalog>;
+}
+function PlaylistEditorForm({
   playlist,
   initialIds,
   close,
@@ -2469,7 +2544,7 @@ function TagsPage({ query, onQuery, onBrowse }: {
   onQuery: (query: string) => void;
   onBrowse: (id: string) => void;
 }) {
-  const { library, refresh, notify } = useData(),
+  const { library, overview, refresh, notify } = useData(),
     [edit, setEdit] = useState<TagDto | "new" | null>(null),
     [name, setName] = useState(""),
     [color, setColor] = useState(TAG_COLORS[0]!),
@@ -2478,7 +2553,7 @@ function TagsPage({ query, onQuery, onBrowse }: {
     [remove, setRemove] = useState<TagDto | null>(null);
   const { notes } = useNotes();
   const tags = library.tags.filter((tag) => matchesSearch(query, tag.name, noteFor(notes, "tag", tag.id)));
-  const counts = useMemo(() => countLibraryTags(library.items), [library.items]);
+  const counts = useMemo(() => new Map(Object.entries(overview.tagCounts)), [overview.tagCounts]);
   function open(tag: TagDto | "new") {
     setEdit(tag);
     setName(tag === "new" ? "" : tag.name);

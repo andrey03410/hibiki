@@ -8,14 +8,14 @@ const noteTarget = z.object({ type: z.enum(["item", "source", "playlist", "tag"]
 const noteInput = z.object({ text: z.string().max(4000).nullable() }).strict();
 const favoriteInput = z.object({ favorite: z.boolean() }).strict();
 
-export function registerNotes(app: FastifyInstance, db: Db) {
-  function browserOwner(request: FastifyRequest, reply: FastifyReply) {
-    reply.header("Cache-Control", "private, no-store");
-    invariant(!request.headers.authorization, 403, "browser_session_required", "Войдите в Hibiki через браузер");
-    invariant(request.user && request.cookies.hibiki_session, 401, "unauthorized", "Войдите в Hibiki");
-    return request.user.id;
-  }
+export function browserOwner(request: FastifyRequest, reply: FastifyReply) {
+  reply.header("Cache-Control", "private, no-store");
+  invariant(!request.headers.authorization, 403, "browser_session_required", "Войдите в Hibiki через браузер");
+  invariant(request.user && request.cookies.hibiki_session, 401, "unauthorized", "Войдите в Hibiki");
+  return request.user.id;
+}
 
+export function registerNotes(app: FastifyInstance, db: Db) {
   app.get("/api/notes", async (request, reply) => {
     const ownerId = browserOwner(request, reply);
     const where = { ownerId, note: { not: null } };

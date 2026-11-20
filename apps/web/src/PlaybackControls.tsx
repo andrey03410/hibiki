@@ -85,13 +85,19 @@ export function CompactPlaybackQueueRow({ title, kind, duration, current, unavai
   );
 }
 
-export function CompactPlaybackQueue({ settings, itemsById, failedIds, onSelect }: {
+export function CompactPlaybackQueue({ settings, itemsById, failedIds, onSelect, onOpenChange, deleted }: {
   settings: Pick<PlaybackSettings, "queue" | "queueIndex" | "mode">;
   itemsById: ReadonlyMap<string, ItemDto>;
   failedIds: ReadonlySet<string>;
   onSelect: (index: number) => void;
+  onOpenChange?: (open: boolean) => void;
+  deleted?: (id: string) => boolean;
 }) {
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    onOpenChange?.(open);
+    return () => onOpenChange?.(false);
+  }, [open, onOpenChange]);
   const region = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const activeRow = useRef<HTMLButtonElement>(null);
@@ -134,7 +140,7 @@ export function CompactPlaybackQueue({ settings, itemsById, failedIds, onSelect 
     return (
       <CompactPlaybackQueueRow
         key={id}
-        title={item?.title ?? "Запись удалена"}
+        title={item?.title ?? (deleted && !deleted(id) ? "Загружаем запись…" : "Запись удалена")}
         kind={item?.kind}
         duration={item?.duration}
         current={current}
