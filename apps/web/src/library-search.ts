@@ -1,19 +1,8 @@
 import type { ItemDto, SourceDto, TagDto } from "@hibiki/contracts";
 import { noteFor, type NotesIndex } from "./note-model";
 
-export type LibrarySearch = {
-  query: string;
-  kind: "" | "audio" | "video";
-  tagIds: string[];
-  minDuration: string;
-  maxDuration: string;
-  addedFrom: string;
-  addedThrough: string;
-  provider: "" | "youtube" | "local" | "working-local";
-  availability: "" | "available" | "unknown" | "unavailable";
-  favoriteOnly: boolean;
-  sort: "title-asc" | "title-desc" | "duration-asc" | "duration-desc" | "added-asc" | "added-desc";
-};
+import type { LibrarySearch } from "@hibiki/contracts";
+export type { LibrarySearch } from "@hibiki/contracts";
 
 export const defaultLibrarySearch: LibrarySearch = {
   query: "", kind: "", tagIds: [], minDuration: "", maxDuration: "",

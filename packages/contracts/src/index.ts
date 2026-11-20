@@ -89,6 +89,32 @@ export interface LibraryDto {
   playlists: PlaylistDto[];
   jobs: JobDto[];
 }
+export interface LibraryOverviewDto extends Omit<LibraryDto, "items"> {
+  total: number;
+  tagCounts: Record<string, number>;
+  revision: string;
+}
+export interface LibraryPageDto {
+  items: ItemDto[];
+  total: number;
+  nextCursor: string | null;
+}
+
+export const librarySearchSchema = z.object({
+  query: z.string().default(""),
+  kind: z.enum(["", "audio", "video"]).default(""),
+  tagIds: z.array(z.string().min(1).max(256)).default([]),
+  minDuration: z.string().default(""),
+  maxDuration: z.string().default(""),
+  addedFrom: z.string().default(""),
+  addedThrough: z.string().default(""),
+  provider: z.enum(["", "youtube", "local", "working-local"]).default(""),
+  availability: z.enum(["", "available", "unknown", "unavailable"]).default(""),
+  favoriteOnly: z.boolean().default(false),
+  sort: z.enum(["title-asc", "title-desc", "duration-asc", "duration-desc", "added-asc", "added-desc"]).default("added-desc"),
+});
+export type LibrarySearch = z.infer<typeof librarySearchSchema>;
+
 export interface UserDto {
   id: string;
   login: string;

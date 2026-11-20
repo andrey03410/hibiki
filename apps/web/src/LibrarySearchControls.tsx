@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { ChevronDown, Headphones, Heart, LayoutGrid, List, Play, Search, SlidersHorizontal, Tags, X } from "lucide-react";
-import type { PlaybackMode, TagDto } from "@hibiki/contracts";
+import { ChevronDown, Heart, LayoutGrid, List, Play, Search, SlidersHorizontal, Tags, X } from "lucide-react";
+import type { TagDto } from "@hibiki/contracts";
 import {
   defaultLibrarySearch, libraryFilterConditions, libraryKinds, libraryProviders, libraryStatuses,
   libraryTagChoices, popularTagLimit, resetLibraryFilters, type LibrarySearch, type LibraryView,
@@ -53,18 +53,12 @@ export function LibrarySearchControls({ value, onChange, tags, tagCounts, count,
   selectAll?: ReactNode;
   view: LibraryView;
   onViewChange: (view: LibraryView) => void;
-  onPlay: (mode?: PlaybackMode) => void;
+  onPlay: () => void;
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [tagsOpen, setTagsOpen] = useState(false);
   const [tagQuery, setTagQuery] = useState("");
   const tagSearch = useRef<HTMLInputElement>(null);
-  const resultsMenu = useRef<HTMLDetailsElement>(null);
-
-  function playResults(mode?: PlaybackMode) {
-    if (resultsMenu.current) resultsMenu.current.open = false;
-    onPlay(mode);
-  }
   const advancedId = useId(), tagPickerId = useId();
 
   function set<K extends keyof LibrarySearch>(field: K, next: LibrarySearch[K]) {
@@ -188,21 +182,10 @@ export function LibrarySearchControls({ value, onChange, tags, tagCounts, count,
         >
           <SlidersHorizontal size={15} /> <span>Фильтры</span>{advancedCount > 0 && ` ${advancedCount}`}
         </button>
-        <details className="library-result-playback" ref={resultsMenu} onKeyDown={(event) => {
-          if (event.key !== "Escape" || !event.currentTarget.open) return;
-          event.currentTarget.open = false;
-          event.currentTarget.querySelector("summary")?.focus();
-        }}>
-          <summary className="library-filter-button" aria-label="Играть выдачу" title="Играть выдачу"><Play size={14} /> <span>Играть выдачу</span> <ChevronDown size={14} /></summary>
-          <div className="dropdown">
-            <button type="button" disabled={!count} onClick={() => playResults()}>
-              <Play size={15} fill="currentColor" /> Играть найденное
-            </button>
-            <button type="button" disabled={!count} onClick={() => playResults("audio")}>
-              <Headphones size={15} /> Слушать найденное
-            </button>
-          </div>
-        </details>
+        <button type="button" className="library-filter-button" aria-label="Играть выдачу" title="Играть выдачу"
+          disabled={!count} onClick={onPlay}>
+          <Play size={14} /> <span>Играть выдачу</span>
+        </button>
       </div>
       <div className="library-filter-fields" id={advancedId} hidden={!advancedOpen}>
         <div className="library-filter-selects">

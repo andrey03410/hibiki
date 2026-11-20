@@ -1,4 +1,8 @@
 import { stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { promisify } from "node:util";
+import ffmpeg from "ffmpeg-static";
 import { parseFromTokenizer } from "music-metadata";
 import { fromFile } from "strtok3";
 import type { Db } from "./db";
@@ -8,10 +12,14 @@ import { storagePath } from "./media";
 const maxArtworkBytes = 5 * 1024 ** 2;
 const maxMetadataBytes = 8 * 1024 ** 2;
 const maxMetadataReads = 4096;
-const maxCachedFiles = 8;
+const maxThumbBytes = 32 * 1024;
+// Two 100-item pages can arrive together over HTTP/2 during a fast scroll.
+const maxQueuedFiles = 256;
+const runFfmpeg = promisify(execFile);
 interface Artwork {
   mime: "image/jpeg" | "image/png" | "image/webp";
   bytes: Buffer;
+  etag?: string;
 }
 
 // The embedded MIME tag is untrusted; only these raster signatures are served.
@@ -89,15 +97,84 @@ async function readArtwork(path: string): Promise<Artwork | undefined> {
   }
 }
 
+async function makeThumbnail(original: Artwork): Promise<Artwork | undefined> {
+  const codec = { "image/jpeg": "mjpeg", "image/png": "png", "image/webp": "webp" }[original.mime];
+  const encoding = runFfmpeg(String(ffmpeg), [
+    "-hide_banner", "-loglevel", "error", "-max_alloc", String(64 * 1024 ** 2),
+    "-filter_threads", "1", "-threads", "1", "-max_pixels", String(16 * 1024 ** 2),
+    "-protocol_whitelist", "pipe", "-f", "image2pipe", "-c:v", codec, "-i", "pipe:0",
+    "-frames:v", "1", "-vf", "scale='min(96,iw)':'min(96,ih)':force_original_aspect_ratio=decrease",
+    "-threads", "1", "-c:v", "libwebp", "-quality", "72", "-f", "image2pipe", "pipe:1",
+  ], { encoding: "buffer", timeout: 5_000, killSignal: "SIGKILL", maxBuffer: maxThumbBytes });
+  // A malformed image or an early decoder exit can close stdin during the write.
+  encoding.child.stdin?.on("error", () => {});
+  encoding.child.stdin?.end(original.bytes);
+  try {
+    const { stdout } = await encoding;
+    if (imageMime(stdout) !== "image/webp") return;
+    return {
+      bytes: stdout, mime: "image/webp",
+      etag: `"${createHash("sha256").update(stdout).digest("base64url")}"`,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export class ArtworkCache {
+  private results = new Map<string, Artwork | undefined>();
+  private pending = new Map<string, Promise<Artwork | undefined>>();
+  private waiting: Array<() => void> = [];
+  private active = 0;
+
+  constructor(private capacity: number, private concurrency: number) {}
+
+  async get(key: string, load: () => Promise<Artwork | undefined>) {
+    if (this.results.has(key)) {
+      const result = this.results.get(key);
+      this.results.delete(key);
+      this.results.set(key, result);
+      return result;
+    }
+    const existing = this.pending.get(key);
+    if (existing) return existing;
+    const request = this.run(key, load);
+    this.pending.set(key, request);
+    try {
+      return await request;
+    } finally {
+      this.pending.delete(key);
+    }
+  }
+
+  private async run(key: string, load: () => Promise<Artwork | undefined>) {
+    if (this.active < this.concurrency) this.active++;
+    else {
+      invariant(this.waiting.length < maxQueuedFiles, 503, "artwork_busy", "Обработка обложек занята");
+      await new Promise<void>(resolve => this.waiting.push(resolve));
+    }
+    try {
+      const result = await load();
+      this.results.set(key, result);
+      if (this.results.size > this.capacity) this.results.delete(this.results.keys().next().value!);
+      return result;
+    } finally {
+      const next = this.waiting.shift();
+      if (next) next();
+      else this.active--;
+    }
+  }
+}
+
 export class ArtworkService {
-  // At most 40 MiB of image bytes; pending requests for the same file share work.
-  private cache = new Map<string, Promise<Artwork | undefined>>();
+  private originals = new ArtworkCache(8, 2);
+  private thumbnails = new ArtworkCache(512, 2);
   constructor(
     private db: Db,
     private storageRoot: string,
   ) {}
 
-  async get(ownerId: string, itemId: string): Promise<Artwork> {
+  async get(ownerId: string, itemId: string, size?: "thumb"): Promise<Artwork> {
     // Never authorize through the cache: ownership is checked on every request.
     const item = await this.db.item.findFirst({
       where: { id: itemId, ownerId },
@@ -123,13 +200,13 @@ export class ArtworkService {
       const info = await stat(path).catch(() => undefined);
       if (!info?.isFile()) continue;
       const key = `${path}:${file.hash}:${info.size}:${info.mtimeMs}`;
-      let artwork = this.cache.get(key);
-      if (artwork) this.cache.delete(key);
-      else artwork = readArtwork(path);
-      this.cache.set(key, artwork);
-      if (this.cache.size > maxCachedFiles)
-        this.cache.delete(this.cache.keys().next().value!);
-      const result = await artwork;
+      const original = () => this.originals.get(key, () => readArtwork(path));
+      const result = size === "thumb"
+        ? await this.thumbnails.get(key, async () => {
+          const cover = await original();
+          return cover && makeThumbnail(cover);
+        })
+        : await original();
       if (result) return result;
     }
     invariant(false, 404, "artwork_not_found", "Обложка не найдена");

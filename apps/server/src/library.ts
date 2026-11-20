@@ -24,7 +24,7 @@ import type {
 import { playbackModeSchema, playlistDefinitionSchema } from "@hibiki/contracts";
 import { collectReferences, resolvePlaylist, usesPrivateHistory } from "@hibiki/core";
 
-const itemInclude = {
+export const itemInclude = {
   sources: { include: { file: true } },
   tags: { include: { tag: true } },
 } as const;

@@ -10,6 +10,7 @@ model User {
   id String @id
   login String @unique
   passwordHash String
+  libraryRevision Int @default(0)
   createdAt DateTime @default(now())
   sessions Session[]
   tokens ApiToken[]
@@ -60,6 +61,7 @@ model Item {
   tags ItemTag[]
   sourceProposals SourceProposal[]
   @@index([ownerId, createdAt])
+  @@index([ownerId, id])
 }
 
 model Source {
@@ -78,6 +80,7 @@ model Source {
   note String?
   item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
   file MediaFile? @relation(fields: [fileId], references: [id], onDelete: Restrict)
+  @@index([itemId])
   @@unique([ownerId, key])
 }
 
@@ -112,6 +115,7 @@ model ItemTag {
   tagId String
   item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
   tag Tag @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  @@index([tagId])
   @@id([itemId, tagId])
 }
 
