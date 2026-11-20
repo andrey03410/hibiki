@@ -2,7 +2,7 @@
 id: 08
 title: Прослушивание и прокрутка медиатеки
 track: product
-stage: product
+stage: tech
 branch: codex/08-library-listening
 pr:
 started: 2026-11-20
@@ -14,7 +14,7 @@ merged:
 Режим работы по поручению владельца — «действуй полностб автономно до деплоя».
 
 - [x] [Бриф](brief.md)
-- [ ] [Продукт](product.md)
+- [x] [Продукт](product.md)
 - [ ] [Техника](tech.md)
 - [ ] [План](plan.md)
 - [ ] [Проверка](verify.md)
