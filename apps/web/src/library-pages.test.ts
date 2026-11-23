@@ -20,6 +20,18 @@ describe("library pages", () => {
     expect(pages.snapshot().items.map(row => row.id)).toEqual(rows(1, 201).map(row => row.id));
   });
 
+  it("retains fresh first-page facet counts when refreshing several loaded pages", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce({...first, tagCounts: {artist: 3}})
+      .mockResolvedValueOnce({items: rows(101, 1), total: 101, nextCursor: null})
+      .mockResolvedValueOnce({...first, tagCounts: {artist: 2}})
+      .mockResolvedValueOnce({items: rows(101, 1), total: 101, nextCursor: null});
+    const pages = new LibraryPages(fetch);
+    await pages.refresh();
+    await pages.more();
+    await pages.refresh();
+    expect(pages.snapshot().tagCounts).toEqual({artist: 2});
+  });
+
   it("keeps successful pages when appending fails and retries the failed cursor", async () => {
     const fetch = vi.fn().mockResolvedValueOnce(first).mockRejectedValueOnce(Error("offline"))
       .mockResolvedValueOnce({items: rows(101, 1), total: 101, nextCursor: null});

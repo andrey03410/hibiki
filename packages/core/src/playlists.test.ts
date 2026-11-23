@@ -66,6 +66,24 @@ const ids = (result: ReturnType<typeof resolvePlaylist>) =>
   result.items.map((entry) => entry.id);
 
 describe("playlist resolution", () => {
+  it("preserves exact membership in existing rules and expands descendants on request", () => {
+    const child = { ...ending, parentIds: [opening.id] };
+    const catalog = { ...library, tags: [opening, child] };
+    expect(
+      ids(
+        resolvePlaylist(definition({ type: "tag", id: opening.id }), catalog),
+      ),
+    ).toEqual(["a", "b"]);
+    expect(
+      ids(
+        resolvePlaylist(
+          definition({ type: "tag", id: opening.id, descendants: true }),
+          catalog,
+        ),
+      ),
+    ).toEqual(["a", "b", "c"]);
+  });
+
   it("composes favorite/history rules using private summaries without leaking them", () => {
     const listeningLibrary = {
       ...library,

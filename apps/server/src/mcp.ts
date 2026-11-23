@@ -7,12 +7,18 @@ import type { FastifyInstance } from "fastify";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { playlistDefinitionSchema, itemPatchSchema } from "@hibiki/contracts";
+import {
+  playlistDefinitionSchema,
+  itemPatchSchema,
+  tagInputSchema,
+  librarySearchSchema,
+} from "@hibiki/contracts";
 import { validatePlaylist } from "@hibiki/core";
 import type { Services } from "./app";
 import { allowedLocalPath } from "./media";
 import { HttpError, invariant } from "./errors";
 import { proposeReplacement } from "./replacement";
+import { hydrateLibraryItems, searchLibraryIds } from "./library-pages";
 import { requireHistoryAccess } from "./library";
 
 const id = z.string().min(1).max(256);
@@ -115,7 +121,14 @@ export function buildMcp(ownerId: string, s: Services) {
           io: "output",
           unrepresentable: "any",
         }),
-        tags: library.tags,
+        tags: library.tags.filter((t) => !t.archived),
+        classification: {
+          groups: ["source", "artist", "genre", "mood", "extra"],
+          filters:
+            "media_list: tagIds, tagMode=and/or, performanceFilter, needsClassification, missingGroup. Иерархия только у источников; псевдонимы и предки доступны при поиске.",
+          editing:
+            "tag_save: group, aliases, parentIds; media_update_many: performance, voices, completeClassification. Для готовой записи нужны источник, исполнитель, жанр, настроение и исполнение.",
+        },
         playlists: library.playlists.map(({ id, title }) => ({ id, title })),
         guide:
           "union объединяет, intersection оставляет общие, difference исключает. items/playlist/tag/filter — источники. Исключения побеждают добавления, дубли убираются, циклы запрещены. Все виды медиа совместимы в одном плейлисте. sort: source/title/newest/duration. Локальные файлы приоритетны.",
@@ -156,30 +169,40 @@ export function buildMcp(ownerId: string, s: Services) {
     "media_list",
     "Свои медиа с поиском и пагинацией",
     {
-      query: z.string().optional(),
+      ...librarySearchSchema.partial().shape,
       tagId: id.optional(),
-      kind: z.enum(["audio", "video"]).optional(),
       cursor: id.optional(),
       limit: z.number().int().min(1).max(200).default(50),
     },
     async (args) => {
-      let items = (await s.library.snapshot(ownerId)).items.filter(
-        (i) =>
-          (!args.query ||
-            i.title.toLowerCase().includes(args.query.toLowerCase())) &&
-          (!args.kind || i.kind === args.kind) &&
-          (!args.tagId || i.tags.some((t) => t.id === args.tagId)),
-      );
-      if (args.cursor) {
-        const index = items.findIndex((i) => i.id === args.cursor);
-        invariant(index >= 0, 400, "cursor", "Курсор не найден");
-        items = items.slice(index + 1);
-      }
-      const page = items.slice(0, args.limit);
-      return {
-        items: page,
-        nextCursor: items.length > page.length ? page.at(-1)?.id : null,
-      };
+      const { cursor, limit, tagId, ...search } = args;
+      const tagIds = [
+        ...new Set([...(search.tagIds ?? []), ...(tagId ? [tagId] : [])]),
+      ];
+      const filters = librarySearchSchema.parse({ ...search, tagIds });
+      return s.db.$transaction(async (tx) => {
+        const ids = await searchLibraryIds(
+          tx,
+          ownerId,
+          filters,
+          filters.timeZone,
+        );
+        const index = cursor ? ids.indexOf(cursor) : -1;
+        invariant(!cursor || index >= 0, 400, "cursor", "Курсор не найден");
+        const end = index + 1 + limit;
+        const items = await hydrateLibraryItems(
+          tx,
+          ownerId,
+          ids.slice(index + 1, end),
+        );
+        return {
+          items: items.map((item) => ({
+            ...item,
+            tags: item.tags.filter((tag) => !tag.archived),
+          })),
+          nextCursor: end < ids.length ? ids[end - 1] : null,
+        };
+      });
     },
     true,
   );
@@ -269,27 +292,9 @@ export function buildMcp(ownerId: string, s: Services) {
         .min(1)
         .max(200),
     },
-    async (args) => {
-      for (const change of args.changes) {
-        await s.library.getItem(ownerId, change.id);
-        if (change.tagIds)
-          invariant(
-            (await s.db.tag.count({
-              where: {
-                ownerId,
-                id: { in: [...new Set<string>(change.tagIds)] },
-              },
-            })) === new Set(change.tagIds).size,
-            404,
-            "tag_not_found",
-            "Тег не найден",
-          );
-      }
-      const items = [];
-      for (const change of args.changes)
-        items.push(await s.library.updateItem(ownerId, change.id, change));
-      return { items };
-    },
+    async (args) => ({
+      items: await s.library.updateItems(ownerId, args.changes),
+    }),
   );
   tool(
     "media_delete",
@@ -304,7 +309,7 @@ export function buildMcp(ownerId: string, s: Services) {
     "tags_list",
     "Предустановленные и свои теги",
     {},
-    async () => ({ tags: (await s.library.snapshot(ownerId)).tags }),
+    async () => ({ tags: await s.library.listTags(ownerId) }),
     true,
   );
   tool(
@@ -312,16 +317,12 @@ export function buildMcp(ownerId: string, s: Services) {
     "Создать или изменить свой тег",
     {
       tagId: id.optional(),
-      name: z.string().min(1).max(80),
-      color: z
-        .string()
-        .regex(/^#[0-9a-f]{6}$/i)
-        .optional(),
+      ...tagInputSchema.shape,
     },
-    (args) =>
-      args.tagId
-        ? s.library.updateTag(ownerId, args.tagId, args)
-        : s.library.createTag(ownerId, args),
+    ({ tagId, ...tag }) =>
+      tagId
+        ? s.library.updateTag(ownerId, tagId, tag)
+        : s.library.createTag(ownerId, tag),
   );
   tool(
     "tag_delete",

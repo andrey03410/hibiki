@@ -18,6 +18,7 @@ import {
 } from "./youtube.js";
 import {
   applyArchive,
+  planArchiveTags,
   archiveRequiresBrowser,
   exportLibrary,
   fileChecksum,
@@ -695,11 +696,16 @@ export class JobsService {
                 );
             }
           }
+          let duplicateTags = 0;
+          try {
+            duplicateTags = planArchiveTags(job.ownerId, checked.manifest, existing.tags).filter(t => t.existing).length;
+          } catch (error) {
+            checked.preview.canApply = false;
+            checked.preview.issues.push("Конфликт каталога тегов: " + (error as Error).message);
+          }
           checked.preview.duplicates = {
             items: duplicateItems,
-            tags: checked.manifest.tags.filter((tag) =>
-              existing.tags.some((value) => value.name === tag.name),
-            ).length,
+            tags: duplicateTags,
             playlists: checked.manifest.playlists.filter((playlist) =>
               existing.playlists.some(
                 (value) => value.title === playlist.title,

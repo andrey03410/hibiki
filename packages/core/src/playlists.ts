@@ -244,6 +244,15 @@ export function resolvePlaylist(
   const playlists = new Map(
     library.playlists.map((playlist) => [playlist.id, playlist]),
   );
+  const children = new Map<string, string[]>();
+  for (const tag of library.tags) {
+    if (tag.archived) continue;
+    for (const parent of tag.parentIds ?? []) {
+      const siblings = children.get(parent) ?? [];
+      siblings.push(tag.id);
+      children.set(parent, siblings);
+    }
+  }
   const now = library.now?.getTime() ?? Date.now();
   const privatePlaylists = new Map<string, boolean>();
   const evaluateDefinition = (input: PlaylistDefinition): Evaluation => {
@@ -261,8 +270,13 @@ export function resolvePlaylist(
         break;
       case "tag": {
         const tag = tags.get(rule.id)!;
+        const accepted = new Set([rule.id]);
+        if (rule.descendants && !tag.archived) {
+          for (const id of accepted)
+            for (const child of children.get(id) ?? []) accepted.add(child);
+        }
         for (const item of items.values()) {
-          if (item.tags.some((entry) => entry.id === rule.id))
+          if (item.tags.some((entry) => accepted.has(entry.id)))
             addReasons(result.selected, item.id, [`Тег «${tag.name}»`]);
         }
         break;

@@ -152,6 +152,13 @@ describe("library search", () => {
     expect(conditions.find(({ key }) => key === `tag:${tag.id}`)!.clear(updated).tagIds).toEqual([extra.id]);
   });
 
+  it("clears the entire missing-field selection with its single filter chip", () => {
+    const search = {...defaultLibrarySearch, needsClassification:true, missingGroup:"voice" as const};
+    const chips = libraryFilterConditions(search, []);
+    expect(chips.map(c => c.key)).toEqual(["missingGroup"]);
+    expect(chips[0].clear(search)).toMatchObject({needsClassification:false,missingGroup:undefined});
+  });
+
   it("resets filters while keeping the query and selected sort", () => {
     const cleared = resetLibraryFilters({
       ...defaultLibrarySearch,
@@ -197,20 +204,15 @@ describe("library search", () => {
     expect(html).not.toContain("Слушать найденное");
   });
 
-  it("shows title search, tag search and counted tag choices without opening any filters", () => {
-    const otherTags = Array.from({ length: 7 }, (_, index) => ({ ...extra, id: `tag-${index}`, name: `Тег ${index}` }));
+  it("shows the three independent performance controls and a filter for incomplete records", () => {
     const html = renderToStaticMarkup(createElement(LibrarySearchControls, {
-      value: { ...defaultLibrarySearch, tagIds: [tag.id, otherTags[6].id] },
-      tags: [...otherTags, tag], tagCounts: new Map([[tag.id, 12]]), count: 3, view: "list",
+      value: { ...defaultLibrarySearch, performanceFilter: "vocal" }, tags: [], count: 3, view: "list",
       onViewChange: () => {}, onChange: () => {}, onPlay: () => {},
     }));
-    expect(html).toContain('aria-label="Поиск по названию, тегам и заметкам" placeholder="Поиск по названию"');
-    expect(html).toContain('type="search" aria-label="Поиск тегов"');
-    expect(html).toMatch(/<button[^>]*aria-expanded="false"[^>]*>Все теги/);
-    const pressedTags = html.match(/<button class="library-tag-choice"[^>]*aria-pressed="true"[^>]*>[^]*?<\/button>/g) ?? [];
-    expect(pressedTags).toHaveLength(1);
-    expect(pressedTags[0]).toMatch(/>Саундтрек<\/span><span[^>]*>12<\/span>/);
-    expect(html).not.toContain('aria-label="Снять фильтр «Саундтрек»"');
-    expect(html).toContain('aria-label="Снять фильтр «Тег 6»"');
+    expect(html).toMatch(/aria-pressed="true"[^>]*>Мужской/);
+    expect(html).toMatch(/aria-pressed="true"[^>]*>Женский/);
+    expect(html).toMatch(/aria-pressed="false"[^>]*>OST/);
+    expect(html).toContain("Требуют разметки");
+    expect(html).toContain("Где доступно");
   });
 });

@@ -8,14 +8,18 @@ import { ZipFile } from "yazl";
 import * as yauzl from "yauzl";
 import { z } from "zod";
 import {
+  validateCatalog,
+  tagInputSchema,
   playlistDefinitionSchema,
   settingsSchema,
   type Rule,
+  type TagDto,
   type PlaylistDefinition,
   type Settings,
 } from "@hibiki/contracts";
 import { usesPrivateHistory } from "@hibiki/core";
 import type { Db } from "./db.js";
+import { tagDto } from "./taxonomy";
 import { inspectFile } from "./media.js";
 
 const id = z.string().min(1).max(200);
@@ -23,22 +27,24 @@ const title = z.string().max(2000);
 const note = z.string().max(10_000).optional();
 const queueContexts = z.record(id, id);
 const counter = z.number().int().nonnegative().max(2_147_483_647);
-const summarySchema = z.object({
-  launches: counter,
-  completed: counter,
-  partial: counter,
-  skipped: counter,
-  errors: counter,
-  listened: z.number().nonnegative(),
-  seeks: counter,
-  fromPlaylist: counter,
-  direct: counter,
-  manual: counter,
-  advance: counter,
-  repeat: counter,
-  lastStartedAt: z.iso.datetime().nullable(),
-  lastCompletedAt: z.iso.datetime().nullable(),
-}).strict();
+const summarySchema = z
+  .object({
+    launches: counter,
+    completed: counter,
+    partial: counter,
+    skipped: counter,
+    errors: counter,
+    listened: z.number().nonnegative(),
+    seeks: counter,
+    fromPlaylist: counter,
+    direct: counter,
+    manual: counter,
+    advance: counter,
+    repeat: counter,
+    lastStartedAt: z.iso.datetime().nullable(),
+    lastCompletedAt: z.iso.datetime().nullable(),
+  })
+  .strict();
 const sourceSchema = z
   .object({
     id,
@@ -114,6 +120,11 @@ const manifestSchema = z
             sources: z.array(sourceSchema).max(100),
             tagIds: z.array(id).max(10000),
             favorite: z.boolean().optional(),
+            performance: z.enum(["unknown", "ost", "vocal"]).optional(),
+            voices: z
+              .array(z.enum(["male", "female"]))
+              .max(2)
+              .optional(),
             note,
             preferredSourceId: id.optional(),
             listeningSummary: summarySchema.optional(),
@@ -122,7 +133,24 @@ const manifestSchema = z
       )
       .max(100000),
     tags: z
-      .array(z.object({ id, name: title, color: z.string().max(100), note }).strict())
+      .array(
+        z
+          .object({
+            id,
+            name: title,
+            label: tagInputSchema.shape.name.optional(),
+            color: z.string().max(100),
+            note,
+            group: z
+              .enum(["source", "artist", "genre", "mood", "extra"])
+              .optional(),
+            aliases: tagInputSchema.shape.aliases,
+            parentIds: tagInputSchema.shape.parentIds,
+            archived: z.boolean().optional(),
+            legacyFlat: z.boolean().optional(),
+          })
+          .strict(),
+      )
       .max(10000),
     playlists: z
       .array(
@@ -143,11 +171,19 @@ const manifestSchema = z
   .strict();
 export type PortableManifest = z.infer<typeof manifestSchema>;
 export function archiveRequiresBrowser(manifest: PortableManifest): boolean {
-  return manifest.items.some((item) =>
-    item.note !== undefined || item.listeningSummary !== undefined ||
-    item.sources.some((source) => source.note !== undefined),
-  ) || manifest.tags.some((tag) => tag.note !== undefined) ||
-    manifest.playlists.some((playlist) => playlist.note !== undefined || usesPrivateHistory(playlist.definition));
+  return (
+    manifest.items.some(
+      (item) =>
+        item.note !== undefined ||
+        item.listeningSummary !== undefined ||
+        item.sources.some((source) => source.note !== undefined),
+    ) ||
+    manifest.tags.some((tag) => tag.note !== undefined) ||
+    manifest.playlists.some(
+      (playlist) =>
+        playlist.note !== undefined || usesPrivateHistory(playlist.definition),
+    )
+  );
 }
 export interface ImportPreview {
   canApply: boolean;
@@ -162,7 +198,12 @@ export interface CheckedArchive {
   files: Map<string, ExtractedFile>;
   archiveHash: string;
 }
-type ExtractedFile = { path: string; hash: string; bytes: number; hasAudio?: boolean };
+type ExtractedFile = {
+  path: string;
+  hash: string;
+  bytes: number;
+  hasAudio?: boolean;
+};
 const MAX_TOTAL = 20 * 1024 ** 3;
 const MAX_MANIFEST = 16 * 1024 ** 2;
 const MAX_ENTRIES = 100_001;
@@ -173,7 +214,8 @@ const safeSettings = (value: unknown): Settings => {
       : {};
   if (raw.originalQueue !== undefined)
     z.array(id).max(100000).parse(raw.originalQueue);
-  if (raw.queuePlaylistIds !== undefined) queueContexts.parse(raw.queuePlaylistIds);
+  if (raw.queuePlaylistIds !== undefined)
+    queueContexts.parse(raw.queuePlaylistIds);
   return settingsSchema.parse({
     ...{ volume: 0.8, repeat: "off", shuffle: false, queue: [], queueIndex: 0 },
     ...Object.fromEntries(
@@ -261,10 +303,22 @@ export async function exportLibrary(
       : [],
   }));
   const history = new Map(
-    snapshot.history.map(({ itemId, ownerId: _ownerId, lastStartedAt, lastCompletedAt, ...values }) => [
-      itemId,
-      { ...values, lastStartedAt: lastStartedAt?.toISOString() ?? null, lastCompletedAt: lastCompletedAt?.toISOString() ?? null },
-    ]),
+    snapshot.history.map(
+      ({
+        itemId,
+        ownerId: _ownerId,
+        lastStartedAt,
+        lastCompletedAt,
+        ...values
+      }) => [
+        itemId,
+        {
+          ...values,
+          lastStartedAt: lastStartedAt?.toISOString() ?? null,
+          lastCompletedAt: lastCompletedAt?.toISOString() ?? null,
+        },
+      ],
+    ),
   );
   const usedFiles = new Set(
     snapshot.items.flatMap((i) =>
@@ -299,13 +353,19 @@ export async function exportLibrary(
       included,
     });
   }
-  const settings = safeSettings(snapshot.setting ? JSON.parse(snapshot.setting.json) : {});
+  const settings = safeSettings(
+    snapshot.setting ? JSON.parse(snapshot.setting.json) : {},
+  );
   if (settings.queuePlaylistIds) {
-    const playlistIds = new Set(snapshot.playlists.map((playlist) => playlist.id));
+    const playlistIds = new Set(
+      snapshot.playlists.map((playlist) => playlist.id),
+    );
     const queueIds = new Set(settings.queue);
     settings.queuePlaylistIds = Object.fromEntries(
-      Object.entries(queueContexts.parse(settings.queuePlaylistIds)).filter(([itemId, playlistId]) =>
-        queueIds.has(itemId) && playlistIds.has(playlistId)),
+      Object.entries(queueContexts.parse(settings.queuePlaylistIds)).filter(
+        ([itemId, playlistId]) =>
+          queueIds.has(itemId) && playlistIds.has(playlistId),
+      ),
     );
   }
   const manifest: PortableManifest = {
@@ -321,12 +381,21 @@ export async function exportLibrary(
       duration: item.duration,
       createdAt: item.createdAt.toISOString(),
       tagIds: item.tags.map((t) => t.tagId),
+      ...(item.performance !== "unknown"
+        ? {
+            performance: item.performance as "vocal" | "ost",
+            voices: JSON.parse(item.voices),
+          }
+        : {}),
       ...(item.favorite ? { favorite: true } : {}),
       ...(options.includeNotes && item.note ? { note: item.note } : {}),
-      ...(item.preferredSourceId && item.sources.some((source) => source.id === item.preferredSourceId)
+      ...(item.preferredSourceId &&
+      item.sources.some((source) => source.id === item.preferredSourceId)
         ? { preferredSourceId: item.preferredSourceId }
         : {}),
-      ...(history.has(item.id) ? { listeningSummary: history.get(item.id)! } : {}),
+      ...(history.has(item.id)
+        ? { listeningSummary: history.get(item.id)! }
+        : {}),
       sources: item.sources.map((s) => ({
         id: s.id,
         provider: s.provider as "youtube" | "local",
@@ -341,6 +410,12 @@ export async function exportLibrary(
     tags: snapshot.tags.map((t) => ({
       id: t.id,
       name: t.name,
+      ...(t.label !== null ? { label: t.label } : {}),
+      group: t.group as NonNullable<PortableManifest["tags"][number]["group"]>,
+      aliases: JSON.parse(t.aliases),
+      parentIds: JSON.parse(t.parentIds),
+      archived: t.archived,
+      legacyFlat: t.legacyFlat,
       color: t.color,
       ...(options.includeNotes && t.note ? { note: t.note } : {}),
     })),
@@ -405,6 +480,17 @@ function validateManifest(input: unknown): PortableManifest {
     manifest.tags.map((i) => i.id),
     "tags",
   );
+  unique(
+    manifest.tags.map((t) => t.name),
+    "ключи тегов",
+  );
+  validateCatalog(
+    manifest.tags.map((t) => ({
+      ...t,
+      name: t.label ?? t.name,
+      legacyFlat: isLegacyFlat(t),
+    })),
+  );
   const playlists = unique(
     manifest.playlists.map((i) => i.id),
     "playlists",
@@ -433,7 +519,15 @@ function validateManifest(input: unknown): PortableManifest {
     if (!set.has(value)) throw new Error(`Неизвестная ссылка: ${value}`);
   };
   for (const item of manifest.items) {
-    if (item.preferredSourceId && !item.sources.some((source) => source.id === item.preferredSourceId))
+    if (
+      (item.voices?.length && item.performance !== "vocal") ||
+      new Set(item.voices).size !== (item.voices?.length ?? 0)
+    )
+      throw new Error("Некорректное исполнение композиции в архиве");
+    if (
+      item.preferredSourceId &&
+      !item.sources.some((source) => source.id === item.preferredSourceId)
+    )
       throw new Error("Предпочтительный источник не принадлежит записи");
     for (const tag of item.tagIds) requireRef(tags, tag);
     for (const source of item.sources) {
@@ -497,7 +591,9 @@ function validateManifest(input: unknown): PortableManifest {
     requireRef(items, value);
   if (settings.queuePlaylistIds) {
     const queueIds = new Set(settings.queue);
-    for (const [itemId, playlistId] of Object.entries(queueContexts.parse(settings.queuePlaylistIds))) {
+    for (const [itemId, playlistId] of Object.entries(
+      queueContexts.parse(settings.queuePlaylistIds),
+    )) {
       requireRef(queueIds, itemId);
       requireRef(playlists, playlistId);
     }
@@ -692,6 +788,150 @@ const mappedId = (
     .update(JSON.stringify([ownerId, origin, kind, oldId]))
     .digest("hex")
     .slice(0, 32)}`;
+type ArchiveTag = PortableManifest["tags"][number];
+// A v1 archive from before grouped catalogs has no label or group fields.
+function isLegacyFlat(tag: ArchiveTag) {
+  return (
+    (tag.legacyFlat ?? (tag.label === undefined && tag.group === undefined)) &&
+    (tag.group ?? "extra") === "extra" &&
+    !tag.parentIds?.length
+  );
+}
+
+type TagMapping = {
+  tag: ArchiveTag;
+  id: string;
+  parentIds: string[];
+  existing: boolean;
+  markLegacy: boolean;
+  mergedAliases?: string[];
+};
+
+/** Map parents before children. Compare display paths because unrelated tags may share a label. */
+export function planArchiveTags(
+  ownerId: string,
+  manifest: Pick<PortableManifest, "origin" | "tags">,
+  destination: TagDto[],
+): TagMapping[] {
+  const key = (
+    name: string,
+    group: string,
+    archived: boolean,
+    parents: string[],
+  ) =>
+    JSON.stringify([
+      name.trim().normalize("NFC").toLowerCase(),
+      group,
+      archived,
+      [...parents].sort(),
+    ]);
+  const sameOwner =
+    manifest.origin === createHash("sha256").update(ownerId).digest("hex");
+  const byId = new Map(destination.map((tag) => [tag.id, tag]));
+  const aliasesById = new Map(
+    destination.map((tag) => [tag.id, tag.aliases ?? []]),
+  );
+  const byPath = new Map<string, Map<string, string>>();
+  const indexPath = (path: string, name: string, id: string) => {
+    const variants = byPath.get(path) ?? new Map<string, string>();
+    variants.set(name, id);
+    byPath.set(path, variants);
+  };
+  for (const tag of destination)
+    indexPath(
+      key(tag.name, tag.group ?? "extra", !!tag.archived, tag.parentIds ?? []),
+      tag.name,
+      tag.id,
+    );
+  const remaining = new Map(
+    manifest.tags.map((t) => [t.id, t.parentIds?.length ?? 0]),
+  );
+  const children = new Map<string, ArchiveTag[]>();
+  for (const tag of manifest.tags) {
+    for (const id of tag.parentIds ?? []) {
+      const list = children.get(id) ?? [];
+      list.push(tag);
+      children.set(id, list);
+    }
+  }
+  const queue = manifest.tags.filter((t) => !remaining.get(t.id));
+  const mapped = new Map<string, string>();
+  const plan: TagMapping[] = [];
+  for (const tag of queue) {
+    const parentIds = (tag.parentIds ?? []).map((id) => mapped.get(id)!);
+    const stable = mappedId(ownerId, manifest.origin, "tag", tag.id);
+    const identity = key(
+      tag.label ?? tag.name,
+      tag.group ?? "extra",
+      !!tag.archived,
+      parentIds,
+    );
+    // An archived label may have been reused for several unrelated exact playlist rules.
+    const variants = byPath.get(identity);
+    const name = tag.label ?? tag.name;
+    let existing = tag.archived ? undefined : variants?.get(name);
+    if (
+      !existing &&
+      !tag.archived &&
+      !isLegacyFlat(tag) &&
+      variants?.size === 1
+    )
+      existing = variants.values().next().value;
+    if (byId.has(stable)) existing = stable;
+    if (sameOwner && byId.has(tag.id)) existing = tag.id;
+    const id = existing ?? stable;
+    mapped.set(tag.id, id);
+    indexPath(identity, name, id);
+    const prior = existing === undefined ? undefined : byId.get(existing);
+    const markLegacy =
+      !!prior &&
+      !prior.legacyFlat &&
+      isLegacyFlat(tag) &&
+      (prior.group ?? "extra") === "extra" &&
+      prior.name === name;
+    const currentAliases = aliasesById.get(id) ?? [];
+    const aliases = [...new Set([...currentAliases, ...(tag.aliases ?? [])])];
+    if (aliases.length > 100)
+      throw new Error("После слияния у тега больше 100 псевдонимов");
+    aliasesById.set(id, aliases);
+    plan.push({
+      tag,
+      id,
+      parentIds,
+      existing: existing !== undefined,
+      markLegacy,
+      mergedAliases:
+        aliases.length > currentAliases.length ? aliases : undefined,
+    });
+
+    for (const child of children.get(tag.id) ?? []) {
+      const count = remaining.get(child.id)! - 1;
+      remaining.set(child.id, count);
+      if (!count) queue.push(child);
+    }
+  }
+  if (plan.length !== manifest.tags.length)
+    throw new Error("Некорректная иерархия тегов в архиве");
+  const added = plan
+    .filter((t) => !t.existing)
+    .map(({ tag, id, parentIds }) => ({
+      ...tag,
+      id,
+      parentIds,
+      name: tag.label ?? tag.name,
+      legacyFlat: isLegacyFlat(tag),
+    }));
+  const exactMatches = new Set(
+    plan.filter((p) => p.markLegacy).map((p) => p.id),
+  );
+  validateCatalog([
+    ...destination.map((tag) =>
+      exactMatches.has(tag.id) ? { ...tag, legacyFlat: true } : tag,
+    ),
+    ...added,
+  ]);
+  return plan;
+}
 function rewriteRule(
   rule: Rule,
   maps: {
@@ -851,19 +1091,56 @@ export async function applyArchive(
           availability.set(file.id, usable);
           usedPaths.add(path.join(storageRoot, stored.path));
         }
-        for (const tag of manifest.tags) {
-          const existing = await tx.tag.findUnique({
-            where: { ownerId_name: { ownerId, name: tag.name } },
-          });
-          const newId =
-            existing?.id ?? mappedId(ownerId, manifest.origin, "tag", tag.id);
-          maps.tags.set(tag.id, newId);
-          if (!existing)
+        const destinationTags = await tx.tag.findMany({ where: { ownerId } });
+        const internalNames = new Set(destinationTags.map((t) => t.name));
+        for (const {
+          tag,
+          id,
+          parentIds,
+          existing,
+          markLegacy,
+          mergedAliases,
+        } of planArchiveTags(ownerId, manifest, destinationTags.map(tagDto))) {
+          if (!existing) {
+            let name = tag.name;
+            if (internalNames.has(name)) {
+              name = id;
+              while (internalNames.has(name)) name = randomUUID();
+            }
             await tx.tag.create({
-              data: { id: newId, ownerId, name: tag.name, color: tag.color, note: tag.note },
+              data: {
+                id,
+                ownerId,
+                name,
+                label: tag.label ?? (name !== tag.name ? tag.name : null),
+                group: tag.group ?? "extra",
+                archived: tag.archived ?? false,
+                legacyFlat: isLegacyFlat(tag),
+                aliases: JSON.stringify(tag.aliases ?? []),
+                parentIds: JSON.stringify(parentIds),
+                color: tag.color,
+                note: tag.note,
+              },
             });
-          else if (tag.note && !existing.note)
-            await tx.tag.update({ where: { id: newId }, data: { note: tag.note } });
+            internalNames.add(name);
+          } else {
+            if (markLegacy || mergedAliases)
+              await tx.tag.update({
+                where: { id },
+                data: {
+                  ...(markLegacy && { legacyFlat: true }),
+                  ...(mergedAliases && {
+                    aliases: JSON.stringify(mergedAliases),
+                  }),
+                },
+              });
+            if (tag.note)
+              await tx.tag.updateMany({
+                where: { id, ownerId, note: null },
+                data: { note: tag.note },
+              });
+          }
+          maps.tags.set(tag.id, id);
         }
         for (const playlist of manifest.playlists)
           maps.playlists.set(
@@ -919,6 +1196,8 @@ export async function applyArchive(
                 kind: item.kind,
                 duration: item.duration,
                 favorite: item.favorite,
+                performance: item.performance,
+                voices: JSON.stringify(item.voices ?? []),
                 note: item.note,
                 createdAt: new Date(item.createdAt),
               },
@@ -926,18 +1205,33 @@ export async function applyArchive(
             added++;
           } else {
             reused++;
+            if (item.performance && item.performance !== "unknown")
+              await tx.item.updateMany({
+                where: { id: newId, ownerId, performance: "unknown" },
+                data: {
+                  performance: item.performance,
+                  voices: JSON.stringify(item.voices ?? []),
+                },
+              });
             if (item.note)
               await tx.item.updateMany({
-                where: { id: newId, ownerId, OR: [{ note: null }, { note: "" }] },
+                where: {
+                  id: newId,
+                  ownerId,
+                  OR: [{ note: null }, { note: "" }],
+                },
                 data: { note: item.note },
               });
           }
           if (item.listeningSummary) {
-            const { lastStartedAt, lastCompletedAt, ...values } = item.listeningSummary;
+            const { lastStartedAt, lastCompletedAt, ...values } =
+              item.listeningSummary;
             await tx.listeningSummary.upsert({
               where: { itemId: newId },
               create: {
-                itemId: newId, ownerId, ...values,
+                itemId: newId,
+                ownerId,
+                ...values,
                 lastStartedAt: lastStartedAt && new Date(lastStartedAt),
                 lastCompletedAt: lastCompletedAt && new Date(lastCompletedAt),
               },
@@ -1003,7 +1297,9 @@ export async function applyArchive(
                   : (source.reason ?? null),
               fileId,
               thumbnail: source.thumbnail,
-              ...(source.note && !(previousImport ?? existing)?.note ? { note: source.note } : {}),
+              ...(source.note && !(previousImport ?? existing)?.note
+                ? { note: source.note }
+                : {}),
             };
             if (
               previousImport &&
@@ -1022,13 +1318,20 @@ export async function applyArchive(
               });
             else if (source.note && !(previousImport ?? existing)?.note)
               await tx.source.updateMany({
-                where: { id: (previousImport ?? existing)!.id, ownerId, itemId: newId },
+                where: {
+                  id: (previousImport ?? existing)!.id,
+                  ownerId,
+                  itemId: newId,
+                },
                 data: { note: source.note },
               });
             if (source.id === item.preferredSourceId)
               await tx.item.updateMany({
                 where: { id: newId, ownerId, preferredSourceId: null },
-                data: { preferredSourceId: (previousImport ?? existing)?.id ?? sourceId },
+                data: {
+                  preferredSourceId:
+                    (previousImport ?? existing)?.id ?? sourceId,
+                },
               });
           }
         }
@@ -1074,11 +1377,16 @@ export async function applyArchive(
               }
             : {}),
           ...(manifest.settings.queuePlaylistIds
-            ? { queuePlaylistIds: Object.fromEntries(
-                Object.entries(queueContexts.parse(manifest.settings.queuePlaylistIds)).map(([itemId, playlistId]) => [
-                  maps.items.get(itemId)!, maps.playlists.get(playlistId)!,
-                ]),
-              ) }
+            ? {
+                queuePlaylistIds: Object.fromEntries(
+                  Object.entries(
+                    queueContexts.parse(manifest.settings.queuePlaylistIds),
+                  ).map(([itemId, playlistId]) => [
+                    maps.items.get(itemId)!,
+                    maps.playlists.get(playlistId)!,
+                  ]),
+                ),
+              }
             : {}),
         };
         await tx.setting.upsert({

@@ -5,7 +5,12 @@ import { createHash } from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 import { ZipFile } from "yazl";
-import { exportLibrary, inspectArchive, applyArchive } from "./portability.js";
+import {
+  exportLibrary,
+  inspectArchive,
+  applyArchive,
+  planArchiveTags,
+} from "./portability.js";
 import { testContext, wav } from "./test-utils.js";
 
 async function zip(
@@ -29,32 +34,212 @@ describe("portable library", () => {
   });
   it("exports private notes and summary only on opt-in and preserves populated targets", async () => {
     const { item } = await ctx.library.upsertYoutube(ctx.userId, {
-      externalId: "abcdefghijk", title: "Song",
+      externalId: "abcdefghijk",
+      title: "Song",
     });
-    await ctx.db.item.update({ where: { id: item.id }, data: {
-      note: "my private note", favorite: true, preferredSourceId: item.sources[0].id,
-    } });
-    await ctx.db.source.update({ where: { id: item.sources[0].id }, data: { note: "source note" } });
-    await ctx.db.listeningSummary.create({ data: { ownerId: ctx.userId, itemId: item.id, launches: 3 } });
+    await ctx.db.item.update({
+      where: { id: item.id },
+      data: {
+        note: "my private note",
+        favorite: true,
+        preferredSourceId: item.sources[0].id,
+      },
+    });
+    await ctx.db.source.update({
+      where: { id: item.sources[0].id },
+      data: { note: "source note" },
+    });
+    await ctx.db.listeningSummary.create({
+      data: { ownerId: ctx.userId, itemId: item.id, launches: 3 },
+    });
     for (const includePrivate of [false, true]) {
       const archive = join(ctx.root, `summary-${includePrivate}.zip`);
       await exportLibrary(ctx.db, ctx.userId, ctx.root, archive, {
-        includeFiles: false, includeNotes: includePrivate, includeHistorySummary: includePrivate,
+        includeFiles: false,
+        includeNotes: includePrivate,
+        includeHistorySummary: includePrivate,
       });
-      const checked = await inspectArchive(archive, join(ctx.root, `check-${includePrivate}`));
-      expect(checked.manifest.items[0].note).toBe(includePrivate ? "my private note" : undefined);
-      expect(checked.manifest.items[0].listeningSummary?.launches).toBe(includePrivate ? 3 : undefined);
+      const checked = await inspectArchive(
+        archive,
+        join(ctx.root, `check-${includePrivate}`),
+      );
+      expect(checked.manifest.items[0].note).toBe(
+        includePrivate ? "my private note" : undefined,
+      );
+      expect(checked.manifest.items[0].listeningSummary?.launches).toBe(
+        includePrivate ? 3 : undefined,
+      );
       if (!includePrivate) continue;
       await applyArchive(ctx.db, ctx.otherUserId, ctx.root, checked);
-      const target = await ctx.db.item.findFirstOrThrow({ where: { ownerId: ctx.otherUserId }, include: { sources: true } });
-      expect(target).toMatchObject({ note: "my private note", favorite: true, preferredSourceId: target.sources[0].id });
+      const target = await ctx.db.item.findFirstOrThrow({
+        where: { ownerId: ctx.otherUserId },
+        include: { sources: true },
+      });
+      expect(target).toMatchObject({
+        note: "my private note",
+        favorite: true,
+        preferredSourceId: target.sources[0].id,
+      });
       expect(target.sources[0].note).toBe("source note");
-      expect((await ctx.db.listeningSummary.findUniqueOrThrow({ where: { itemId: target.id } })).launches).toBe(3);
-      await ctx.db.item.update({ where: { id: target.id }, data: { note: "my newer note" } });
+      expect(
+        (
+          await ctx.db.listeningSummary.findUniqueOrThrow({
+            where: { itemId: target.id },
+          })
+        ).launches,
+      ).toBe(3);
+      await ctx.db.item.update({
+        where: { id: target.id },
+        data: { note: "my newer note" },
+      });
       await applyArchive(ctx.db, ctx.otherUserId, ctx.root, checked);
-      expect((await ctx.db.item.findUniqueOrThrow({ where: { id: target.id } })).note).toBe("my newer note");
-      expect((await ctx.db.listeningSummary.findUniqueOrThrow({ where: { itemId: target.id } })).launches).toBe(3);
+      expect(
+        (await ctx.db.item.findUniqueOrThrow({ where: { id: target.id } }))
+          .note,
+      ).toBe("my newer note");
+      expect(
+        (
+          await ctx.db.listeningSummary.findUniqueOrThrow({
+            where: { itemId: target.id },
+          })
+        ).launches,
+      ).toBe(3);
     }
+  });
+  it("keeps two archived memberships with the same former label distinct on a new account", () => {
+    const first = {
+      id: "a",
+      name: "first",
+      label: "Theme",
+      color: "#eeeeee",
+      archived: true,
+    };
+    const second = { ...first, id: "b", name: "second" };
+    const plan = planArchiveTags(
+      "owner",
+      { origin: "old-account", tags: [first, second] },
+      [],
+    );
+    expect(new Set(plan.map((entry) => entry.id)).size).toBe(2);
+    expect(plan.filter((entry) => entry.existing)).toHaveLength(0);
+  });
+  it("rejects an import that would duplicate a child under one shared parent", () => {
+    const source = (id: string, name: string, parentIds: string[] = []) => ({
+      id,
+      name,
+      parentIds,
+      group: "source" as const,
+      color: "#dddddd",
+    });
+    const dest = [source("a", "A"), source("child", "Work", ["a"])];
+    const tags = [
+      source("1", "A"),
+      source("2", "B"),
+      source("3", "Work", ["1", "2"]),
+    ];
+    expect(() =>
+      planArchiveTags("owner", { origin: "elsewhere", tags }, dest),
+    ).toThrow();
+  });
+  it("checks the combined alias limit during import preview", () => {
+    const tag = {
+      id: "one",
+      name: "Studio",
+      color: "#dddddd",
+      group: "source" as const,
+    };
+    const existing = {
+      ...tag,
+      id: "current",
+      aliases: Array.from({ length: 100 }, (_, n) => String(n)),
+    };
+    expect(() =>
+      planArchiveTags(
+        "owner",
+        { origin: "another", tags: [{ ...tag, aliases: ["new"] }] },
+        [existing],
+      ),
+    ).toThrow("100");
+  });
+  it("round-trips typed homonyms, mapped parent IDs, aliases, old playlist memberships and vocal credits", async () => {
+    const { db, userId, otherUserId, root } = ctx;
+    await db.tag.createMany({
+      data: [
+        {
+          id: "studio",
+          ownerId: userId,
+          name: "opaque-studio",
+          label: "Kyoto Animation",
+          group: "source",
+          aliases: '["KyoAni"]',
+        },
+        {
+          id: "work",
+          ownerId: userId,
+          name: "opaque-work",
+          label: "CLANNAD",
+          group: "source",
+          parentIds: '["studio"]',
+        },
+        {
+          id: "vn",
+          ownerId: userId,
+          name: "opaque-vn",
+          label: "CLANNAD",
+          group: "source",
+        },
+        { id: "legacy", ownerId: userId, name: "OST", archived: true },
+      ],
+    });
+    const { item } = await ctx.library.upsertYoutube(userId, {
+      externalId: "abcdefghijk",
+      title: "Original",
+    });
+    await db.item.update({
+      where: { id: item.id },
+      data: { performance: "vocal", voices: '["female"]' },
+    });
+    await db.itemTag.createMany({
+      data: ["work", "legacy"].map((tagId) => ({ itemId: item.id, tagId })),
+    });
+    const archive = join(root, "classification.zip");
+    await exportLibrary(db, userId, root, archive, { includeFiles: false });
+    const checked = await inspectArchive(archive, join(root, "check-taxonomy"));
+    await db.tag.create({
+      data: {
+        id: "existing-studio",
+        ownerId: otherUserId,
+        name: "existing-studio",
+        label: "Kyoto Animation",
+        group: "source",
+        aliases: '["京アニ"]',
+      },
+    });
+    await applyArchive(db, otherUserId, root, checked);
+    const rows = await db.tag.findMany({ where: { ownerId: otherUserId } });
+    const studio = rows.find((t) => t.label === "Kyoto Animation")!;
+    expect(JSON.parse(studio.aliases)).toEqual(["京アニ", "KyoAni"]);
+    expect(rows.filter((t) => t.label === "CLANNAD")).toHaveLength(2);
+    expect(rows.find((t) => t.name === "opaque-work")?.parentIds).toBe(
+      JSON.stringify([studio.id]),
+    );
+    expect(studio.id).not.toBe("studio");
+    expect(rows.find((t) => t.name === "OST")?.archived).toBe(true);
+    const imported = await db.item.findFirstOrThrow({
+      where: { ownerId: otherUserId },
+    });
+    expect(imported).toMatchObject({
+      performance: "vocal",
+      voices: '["female"]',
+    });
+    await db.item.update({
+      where: { id: imported.id },
+      data: { voices: '["male"]' },
+    });
+    await applyArchive(db, otherUserId, root, checked);
+    expect(
+      await db.item.findUniqueOrThrow({ where: { id: imported.id } }),
+    ).toMatchObject({ voices: '["male"]' });
   });
   it("copies files and rewrites every item/tag/playlist/queue reference for the new owner", async () => {
     const input = join(ctx.root, "tone.wav");
@@ -213,7 +398,10 @@ describe("portable library", () => {
     expect(checked.preview.canApply).toBe(true);
     expect(checked.manifest.settings).not.toHaveProperty("mode");
     await applyArchive(ctx.db, ctx.otherUserId, ctx.root, checked);
-    expect((await ctx.library.snapshot(ctx.otherUserId)).items[0].sources[0].hasAudio).toBeUndefined();
+    expect(
+      (await ctx.library.snapshot(ctx.otherUserId)).items[0].sources[0]
+        .hasAudio,
+    ).toBeUndefined();
     expect(
       (await ctx.library.snapshot(ctx.otherUserId)).items[0].sources.every(
         (s) => s.status !== "available",

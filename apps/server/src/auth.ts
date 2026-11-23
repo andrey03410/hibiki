@@ -27,24 +27,20 @@ export class AuthService {
       "login_taken",
       "Этот логин уже занят",
     );
+    const seeds = [
+      ...["Аниме", "Визуальная новелла", "Игра", "Фильм", "Сериал", "Песня"].map(name => ({
+        name, group: "source", aliases: JSON.stringify(name === "Визуальная новелла" ? ["ВН"] : []),
+      })),
+      ...["Спокойная", "Быстрая", "Загадочная", "Агрессивная"].map(name => ({ name, group: "mood" })),
+      ...[["Cover", "Кавер"], ["Remix", "Ремикс"], ["Опенинг"], ["Эндинг"]].map(([name, alias]) => ({
+        name, group: "extra", aliases: JSON.stringify(alias ? [alias] : []),
+      })),
+    ];
     const user = await this.db.user.create({
       data: {
-        id: randomUUID(),
-        login,
-        passwordHash: await bcrypt.hash(password, 12),
+        id: randomUUID(), login, passwordHash: await bcrypt.hash(password, 12),
+        tags: { create: seeds.map(tag => ({ ...tag, id: randomUUID() })) },
       },
-    });
-    await this.db.tag.createMany({
-      data: [
-        {
-          id: randomUUID(),
-          ownerId: user.id,
-          name: "Любимое",
-          color: "#ed9ac8",
-        },
-        { id: randomUUID(), ownerId: user.id, name: "Аниме", color: "#b8a5ff" },
-        { id: randomUUID(), ownerId: user.id, name: "OST", color: "#8bd7c4" },
-      ],
     });
     return { id: user.id, login: user.login };
   }
