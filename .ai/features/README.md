@@ -8,5 +8,6 @@
 | [05. Перемотка и очередь в мини-плеере](05-compact-player-controls/README.md) | `merged` | [PR #5](https://github.com/andrey03410/hibiki/pull/5), 252 теста и живая приёмка |
 | [06. Навигация по медиатеке и управление очередью](06-library-navigation/README.md) | `merged` | [PR #6](https://github.com/andrey03410/hibiki/pull/6), 261 тест и живая приёмка |
 | [08. Прослушивание и прокрутка медиатеки](08-library-listening/README.md) | `merged` | [PR #8](https://github.com/andrey03410/hibiki/pull/8), выдача по 100 записей, аудиозапуск, малые обложки и меню тегов |
+| [09. Навигация по тегам медиатеки](09-library-tag-navigation/README.md) | `product` | Бриф, продуктовая постановка и дизайн правой панели |
 
 Процесс — [feature](../../.claude/skills/feature/SKILL.md).
