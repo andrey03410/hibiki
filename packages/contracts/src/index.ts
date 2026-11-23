@@ -22,6 +22,7 @@ export interface TagDto {
 export interface SourceDto {
   id: string;
   provider: "youtube" | "local";
+  shared?: true;
   externalId?: string;
   url?: string;
   status: "unknown" | "available" | "unavailable";
@@ -48,6 +49,35 @@ export interface ItemDto {
   performance?: Performance;
   voices?: Voice[];
   preferredSourceId?: string;
+  shared?: { sharedBy: string; available: boolean };
+}
+export type ShareKind = "item" | "playlist";
+export type ShareStatus = "active" | "expired" | "revoked" | "unavailable";
+export interface ShareLinkDto {
+  id: string;
+  kind: ShareKind;
+  targetId: string;
+  title: string;
+  url?: string;
+  createdAt: string;
+  expiresAt: string | null;
+  status: ShareStatus;
+  trackCount: number | null;
+}
+export interface SharedViewDto {
+  kind: ShareKind;
+  title: string;
+  sharedBy: string;
+  items: ItemDto[];
+  trackCount: number;
+  savedId?: string;
+}
+export interface SavedSharedPlaylistDto {
+  id: string;
+  title: string;
+  sharedBy: string;
+  status: ShareStatus;
+  trackCount: number | null;
 }
 export type Rule =
   | { type: "items"; ids: string[] }

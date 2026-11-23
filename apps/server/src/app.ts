@@ -28,6 +28,8 @@ import { registerLibraryPages, searchLibraryIds } from "./library-pages";
 import { registerReplacement } from "./replacement";
 import { registerHistory } from "./history";
 import { registerYoutubeSync } from "./youtube-sync";
+import { ShareService } from "./sharing";
+import { registerSharing } from "./sharing-routes";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -37,6 +39,7 @@ declare module "fastify" {
     auth: AuthService;
     library: LibraryService;
     jobs: JobsService;
+    sharing: ShareService;
   }
 }
 export interface UploadGrant {
@@ -49,6 +52,7 @@ export interface Services {
   auth: AuthService;
   library: LibraryService;
   jobs: JobsService;
+  sharing: ShareService;
   storageRoot: string;
   uploadGrants: Map<string, UploadGrant>;
 }
@@ -70,17 +74,19 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
   const library = new LibraryService(db, storageRoot);
   const artwork = new ArtworkService(db, storageRoot);
   const jobs = new JobsService(db, library, storageRoot);
+  const sharing = new ShareService(db, library);
   const s: Services = {
     db,
     auth,
     library,
     jobs,
+    sharing,
     storageRoot,
     uploadGrants: new Map(),
   };
   const app = Object.assign(
     Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024, requestTimeout: 0 }),
-    { auth, library, jobs },
+    { auth, library, jobs, sharing },
   );
   app.decorateRequest("user", null);
   app.decorateRequest("access", null);
@@ -147,7 +153,11 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       : await auth.userBySession(request.cookies.hibiki_session);
     if (request.user && kanameEnabled()) {
       request.access = await ownerAccess(db, request.user.id);
-      if (request.url.startsWith("/files/") || request.url.split("?")[0] === "/api/settings" || !["GET", "HEAD", "OPTIONS"].includes(request.method))
+      const path = request.url.split("?")[0];
+      const sharedStream = /^\/api\/shared(?:-items|-playlists)?\/.*\/sources\//.test(path);
+      const libraryReading = /^\/api\/(library(?:\/(?:page|ids))?|items(?:\/[^/]+)?|playlists\/(?:preview|[^/]+\/(?:playback|resolve)))$/.test(path);
+      if (libraryReading) await sharing.prefetchForViewer(request.user.id);
+      if (path.startsWith("/files/") || sharedStream || path === "/api/settings" || !["GET", "HEAD", "OPTIONS"].includes(request.method))
         await markActivity(db, request.user.id);
     }
     const workspace = request.headers["x-hibiki-workspace"];
@@ -210,7 +220,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     const ownerId = request.user!.id;
     const filters = librarySearchSchema.parse({query: query.query, kind: query.kind, tagIds: query.tagId ? [query.tagId] : []});
     return db.$transaction(async tx => {
-      let ids = await searchLibraryIds(tx, ownerId, filters, undefined, browserAccess(request));
+      let ids = await searchLibraryIds(tx, ownerId, filters, library, undefined, browserAccess(request));
       if (query.cursor) {
         const index = ids.indexOf(query.cursor);
         invariant(index >= 0, 400, "cursor", "Курсор не найден");
@@ -218,7 +228,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       }
       const page = ids.slice(0, query.limit);
       return {
-        items: await hydrateLibraryItems(tx, ownerId, page),
+        items: await hydrateLibraryItems(tx, ownerId, page, true, library),
         nextCursor: ids.length > page.length ? page.at(-1) : null,
       };
     });
@@ -226,6 +236,10 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
   app.get("/api/items/:id", (request) =>
     library.getItem(request.user!.id, idOf(request)),
   );
+  app.post("/api/items/:id/shared-copy", (request) => {
+    const options = z.object({ mode: z.enum(["audio", "video"]).optional() }).strict().parse(request.body ?? {});
+    return jobs.create(request.user!.id, "shared-copy", { itemId: idOf(request), ...options });
+  });
   app.get("/api/items/:id/artwork", async (request, reply) => {
     reply
       .header("cache-control", "private, no-cache")
@@ -513,11 +527,12 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     return reply.send(createReadStream(path));
   });
   registerNotes(app, db);
-  registerLibraryPages(app, db);
+  registerLibraryPages(app, db, library);
   registerClassification(app, db);
   registerReplacement(app, db, library, storageRoot);
   registerHistory(app, db);
   registerYoutubeSync(app, db, library);
+  registerSharing(app, sharing, storageRoot);
   registerMcp(app, s);
   const webRoot = resolve("apps/web/dist");
   if (existsSync(join(webRoot, "index.html"))) {
@@ -526,10 +541,12 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       if (
         request.method === "GET" &&
         !/^\/(api|files|mcp)(\/|$)/.test(request.url)
-      )
+      ) {
+        if (request.url.startsWith("/share/")) reply.header("referrer-policy", "strict-origin");
         return reply
           .type("text/html")
           .send(createReadStream(join(webRoot, "index.html")));
+      }
       return reply
         .code(404)
         .send({ error: { code: "not_found", message: "Не найдено" } });

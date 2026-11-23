@@ -90,6 +90,8 @@ interface Controller {
   mode: PlaybackMode;
   start: (items: ItemDto[], index?: number, playlistId?: string, options?: StartOptions) => Promise<void>;
   activateItem: (items: ItemDto[], index: number, playlistId?: string, options?: StartOptions) => void;
+  playShared: (path: string, items: ItemDto[], index: number, load: () => Promise<ItemDto[]>, options: SharedStartOptions) => Promise<void>;
+  sharedId: (path: string, id: string) => string | undefined;
   enqueue: (item: ItemDto, playlistId?: string) => void;
   playNext: (item: ItemDto, playlistId?: string) => void;
   toggle: () => void;
@@ -101,7 +103,9 @@ type StartOptions = {
   loadQueueIds?: () => Promise<string[]>;
   queueIds?: string[];
   isCurrent?: () => boolean;
+  openPlayer?: boolean;
 };
+type SharedStartOptions = Pick<StartOptions, "mode" | "isCurrent" | "openPlayer"> & { activate?: boolean };
 const PlayerContext = createContext<Controller | null>(null);
 export const usePlayer = () => useContext(PlayerContext)!;
 
@@ -305,7 +309,7 @@ export function PlayerProvider({
   const navigate = useNavigate();
   const { key: routeKey } = useLocation();
   const onPlayerScreen = !!useMatch("/player");
-  const [catalog] = useState(() => new QueueCatalog(fetchItems));
+  const [catalog] = useState(() => new QueueCatalog(fetchItems, ids => fetchItems(ids, true)));
   useSyncExternalStore(catalog.subscribe, catalog.snapshot);
   const itemsById = catalog.rows;
   const [intent] = useState(() => new QueueIntents());
@@ -358,6 +362,7 @@ export function PlayerProvider({
     requestedVideoSourceId = useRef<string | undefined>(undefined),
     playingRef = useRef(playing),
     failed = useRef(new Set<string>()),
+    sourceCheck = useRef<{ key: string; token: number } | undefined>(undefined),
     nativeStarted = useRef(new WeakSet<HTMLMediaElement>()),
     nativePositionReady = useRef(new WeakSet<HTMLMediaElement>()),
     nativeRestart = useRef<{ element: HTMLMediaElement; position: number } | null>(null),
@@ -484,7 +489,7 @@ export function PlayerProvider({
   }
   function selectAttempt(state: PlaybackSettings, trigger: PlaybackTrigger) {
     const id = state.queue[state.queueIndex];
-    const item = id ? itemsById.get(id) : undefined;
+    const item = id && !catalog.isShared(id) ? itemsById.get(id) : undefined;
     const playlistIds = state.queuePlaylistIds;
     attempt.select(item ?? null, id && playlistIds && Object.hasOwn(playlistIds, id) ? playlistIds[id] : undefined, trigger);
   }
@@ -538,13 +543,28 @@ export function PlayerProvider({
       setDuration(0);
     }
   }
-  function switchTo(index: number) {
-    intent.command();
+  async function reloadPlaybackEntry(id: string, token: number) {
+    const active = () => intent.navigation === token;
+    try {
+      return await catalog.refreshPlayback(id, active);
+    } catch (failure) {
+      if (active()) setError((failure as Error).message);
+    }
+  }
+  async function switchTo(index: number) {
+    const token = intent.command();
     const state = live.current;
-    const item = itemsById.get(state.queue[index]!);
-    if (!item || queueEntryUnavailableReason(item, state.mode)) return;
+    const id = state.queue[index];
+    if (!id) return;
     if (index === state.queueIndex) {
       toggle();
+      return;
+    }
+    const guarded = catalog.rechecksPlayback(id);
+    const item = guarded ? await reloadPlaybackEntry(id, token) : itemsById.get(id);
+    if (token !== intent.navigation || !item || live.current.queue !== state.queue) return;
+    if (queueEntryUnavailableReason(item, state.mode)) {
+      if (guarded) setError(`«${item.title}» недоступна для воспроизведения.`);
       return;
     }
     finishAttempt("manual");
@@ -557,8 +577,17 @@ export function PlayerProvider({
     const isCurrent = () => token === intent.selection && options.isCurrent?.() !== false;
     setSelectionFailure(undefined);
     catalog.put(entries);
-    const selected = entries[index];
+    let selected: ItemDto | undefined = entries[index];
     if (!selected) return;
+    if (selected.shared && !catalog.isShared(selected.id)) {
+      try {
+        selected = await catalog.refreshPlayback(selected.id, isCurrent);
+        if (!selected || !isCurrent()) return;
+      } catch (e) {
+        if (isCurrent()) setError((e as Error).message);
+        return;
+      }
+    }
     const { fromLibrary = false, loadQueueIds, queueIds } = options;
     const mode = fromLibrary ? "audio" : options.mode ?? "original";
     const shuffle = !fromLibrary && live.current.shuffle;
@@ -569,7 +598,9 @@ export function PlayerProvider({
     let playable = canStartSelectedItem(selected, mode, fromLibrary && selectedItem) ? state.queueIndex : -1;
     let complete = !loadQueueIds;
     if (playable < 0 && fromLibrary) {
-      playable = entries.findIndex((entry, i) => i >= index && canStartSelectedItem(entry, mode));
+      const candidate = await findNext(1, state, token, true, false, setError, isCurrent);
+      if (candidate === undefined || !isCurrent()) return;
+      playable = candidate;
       if (playable < 0 && loadQueueIds) {
         // No playable row on screen. Keep the existing player until the search
         // finds a playable entry in the full filtered order.
@@ -606,7 +637,7 @@ export function PlayerProvider({
     const entry = itemsById.get(state.queue[playable]!)!;
     const chosenSource = playbackSources(entry, mode)[0];
     const opensPlayer = mode === "original" &&
-      (!!playlistId || entry.kind === "video" || playbackKind(entry, chosenSource, mode) === "video");
+      (!!playlistId || options.openPlayer || entry.kind === "video" || playbackKind(entry, chosenSource, mode) === "video");
     intent.advance(); // Ignore old automatic navigation once the new queue takes over.
     libraryOrder.cancel();
     finishAttempt("manual");
@@ -631,6 +662,12 @@ export function PlayerProvider({
         if (waitingForVideo && !options.fromLibrary) watchCurrent();
         else toggle();
     }
+  }
+  async function playShared(path: string, items: ItemDto[], index: number, load: () => Promise<ItemDto[]>, options: SharedStartOptions) {
+    if (options.isCurrent?.() === false) return;
+    const entries = catalog.sharedEntries(path, items, load);
+    if (options.activate) activateItem(entries, index, undefined, options);
+    else await start(entries, index, undefined, options);
   }
   async function findNext(direction: 1 | -1, state: PlaybackSettings, token: number, retry = false, wrap = state.repeat === "all", onError = setError, active = () => intent.navigation === token) {
     try {
@@ -688,10 +725,30 @@ export function PlayerProvider({
   async function sourceError() {
     if (!currentMedia()) return;
     feedback.pause();
+    let entry = current;
+    if (current && catalog.rechecksPlayback(current.id)) {
+      const check = { key: sourceKey, token: intent.navigation };
+      if (sourceCheck.current?.key === check.key && sourceCheck.current.token === check.token) return;
+      sourceCheck.current = check;
+      const active = () => sourceCheck.current === check && intent.navigation === check.token && currentMedia();
+      try {
+        entry = await catalog.readPlayback(current.id);
+        if (!active()) return;
+      } catch (failure) {
+        if (active()) {
+          playIntent(false);
+          setError((failure as Error).message);
+        }
+        return;
+      } finally {
+        if (sourceCheck.current === check) sourceCheck.current = undefined;
+      }
+    }
     mediaKey.current = "";
     const unsuccessful = new Set(failedSources);
     if (source) unsuccessful.add(source.id);
-    if (current && playbackSourceForAttempt(current, unsuccessful, undefined, settings.mode)) {
+    if (entry && entry !== current) catalog.put([entry]);
+    if (entry && playbackSourceForAttempt(entry, unsuccessful, undefined, settings.mode)) {
       measureProgress();
       attempt.paused();
       setFailedSources(unsuccessful);
@@ -853,9 +910,29 @@ export function PlayerProvider({
       if (currentNative(event.currentTarget)) void sourceError();
     },
   };
-  function toggle() {
-    intent.command();
+  async function toggle() {
+    const token = intent.command();
     if (!current || waitingForVideo) return;
+    if (!playingRef.current && catalog.rechecksPlayback(current.id)) {
+      const item = await reloadPlaybackEntry(current.id, token);
+      if (!item || token !== intent.navigation) return;
+      if (!playbackSources(item, live.current.mode).length) {
+        setError(`«${item.title}» недоступна для воспроизведения.`);
+        return;
+      }
+      if (!source) {
+        finishAttempt("manual");
+        failed.current.delete(item.id);
+        playEntry(live.current, live.current.queueIndex, "manual");
+        return;
+      }
+      if (!playbackSources(item, live.current.mode).some(candidate => candidate.id === source.id)) {
+        setFailedSources(new Set());
+        setError("");
+        playIntent(true);
+        return;
+      }
+    }
     if (!source) {
       if (playbackSources(current, settings.mode).length) {
         finishAttempt("manual");
@@ -892,9 +969,20 @@ export function PlayerProvider({
     playOnPlayerOpen.current = itemId;
     navigate("/player");
   }
-  function watchCurrent() {
+  async function watchCurrent() {
     if (!current || !videoSource) return;
-    if (settings.mode === "original" && source?.id === videoSource.id) openAndPlay(current.id);
+    if (settings.mode === "original" && source?.id === videoSource.id) {
+      if (catalog.rechecksPlayback(current.id)) {
+        const token = intent.command();
+        const item = await reloadPlaybackEntry(current.id, token);
+        if (!item || token !== intent.navigation) return;
+        if (!playableVideoSource(item)) {
+          setError(`«${item.title}» недоступна для просмотра.`);
+          return;
+        }
+      }
+      openAndPlay(current.id);
+    }
     else changeMode("original", { activate: true, videoSourceId: videoSource.id });
   }
   async function changeMode(mode: PlaybackMode, {
@@ -906,9 +994,12 @@ export function PlayerProvider({
       return;
     }
     const token = intent.command();
+    const item = catalog.rechecksPlayback(current.id) ? await reloadPlaybackEntry(current.id, token) : current;
+    if (!item || token !== intent.navigation || state.queue !== live.current.queue) return;
     const updated = { ...state, mode };
-    const candidate = videoSourceId ? videoSource : playbackSources(current, mode)[0];
-    if (!candidate && !(keepSelectedVideo && videoSource)) {
+    const latestVideo = item === current ? videoSource : playableVideoSource(item, failedSources);
+    const candidate = videoSourceId ? latestVideo : playbackSources(item, mode)[0];
+    if (!candidate && !(keepSelectedVideo && latestVideo)) {
       const nextEntry = await findNext(1, updated, token, true);
       if (token !== intent.navigation || state.queue !== live.current.queue || nextEntry === undefined) return;
       if (mode === "audio" && skipCurrent && nextEntry >= 0) {
@@ -920,7 +1011,7 @@ export function PlayerProvider({
       }
       setOfferAudioSkip(mode === "audio" && nextEntry >= 0);
       setError(mode === "audio"
-        ? soundUnavailableReason(current) ?? "Источник звука недоступен"
+        ? soundUnavailableReason(item) ?? "Источник звука недоступен"
         : "Источник недоступен");
       return;
     }
@@ -930,9 +1021,9 @@ export function PlayerProvider({
     failed.current.clear();
     setFailedSources(new Set());
     sourceIdentity.current = undefined;
-    requestedVideoSourceId.current = videoSourceId;
+    requestedVideoSourceId.current = videoSourceId ? candidate?.id : undefined;
     const position = readPosition() ?? state.position;
-    const needsReattach = source?.id !== candidate?.id || presentationKind !== playbackKind(current, candidate, mode);
+    const needsReattach = source?.id !== candidate?.id || presentationKind !== playbackKind(item, candidate, mode);
     if (needsReattach) {
       measureProgress();
       attempt.paused();
@@ -940,16 +1031,19 @@ export function PlayerProvider({
       setDuration(0);
     }
     seekOnLoad.current = position;
-    const canPlay = canAutoplayPlayback(current, candidate, mode, onPlayerScreen);
+    const canPlay = canAutoplayPlayback(item, candidate, mode, onPlayerScreen);
     playIntent((activate || playingRef.current) && canPlay);
     patch({ mode, position });
     if (activate && !canPlay && mode === "original") openAndPlay(current.id);
   }
-  function watchQueueVideo(index: number) {
-    intent.command();
+  async function watchQueueVideo(index: number) {
+    const token = intent.command();
     const state = live.current;
-    const item = itemsById.get(state.queue[index]!);
-    if (!item || playbackKind(item, playbackSources(item)[0]) !== "video") return;
+    const id = state.queue[index];
+    if (!id) return;
+    const item = catalog.rechecksPlayback(id) ? await reloadPlaybackEntry(id, token) : itemsById.get(id);
+    if (!item || token !== intent.navigation || live.current.queue !== state.queue ||
+      playbackKind(item, playbackSources(item)[0]) !== "video") return;
     finishAttempt("manual");
     failed.current.delete(item.id);
     playEntry({ ...state, mode: "original" }, index, "manual");
@@ -1047,7 +1141,7 @@ export function PlayerProvider({
     const id = queue[queueIndex];
     setQueueLoadError("");
     retryNavigation.current = undefined;
-    if (id) void catalog.ensure([id]).then(() => catalog.ensure(visible, () => active))
+    if (id) void catalog.ensure([id], () => active, true).then(() => catalog.ensure(visible, () => active))
       .catch(e => {if (active) setQueueLoadError(e.message);});
     return () => {active = false;};
   }, [catalog, revision, settings.queue, settings.queueIndex, onPlayerScreen, queueOpen, queueRetry]);
@@ -1110,18 +1204,19 @@ export function PlayerProvider({
   }, [initialSettings]);
   useEffect(() => () => attempt.finish("interrupted"), [attempt]);
 
-  // A page of library results is playable before its full order arrives.
-  // Reloads and overlapping saves must never promote that page to a saved queue.
+  // Partial library results and access-scoped playback stay in this tab.
+  // Keep the last complete personal queue when saving preferences.
   const persistable = useRef(settings);
+  const sharedQueue = settings.queue.some(catalog.isShared);
   useLayoutEffect(() => {
-    if (!libraryOrder.tail) {
+    if (!libraryOrder.tail && !sharedQueue) {
       persistable.current = settings;
     } else {
       const { volume, lastNonzeroVolume } = settings;
       if (volume !== persistable.current.volume || lastNonzeroVolume !== persistable.current.lastNonzeroVolume)
         persistable.current = { ...persistable.current, volume, lastNonzeroVolume };
     }
-  }, [settings, orderStatus, libraryOrder]);
+  }, [settings, orderStatus, libraryOrder, sharedQueue]);
   function cachePlayback() {
     try {
       localStorage.setItem(storageKey, JSON.stringify({
@@ -1341,7 +1436,7 @@ export function PlayerProvider({
   const showArtwork = artwork && failedArtwork !== artwork;
   const audioFallback = current?.kind === "video" && settings.mode === "original" &&
     source && presentationKind === "audio";
-  const sourceLabel = isYoutube ? "YouTube" : source ? "Локальный файл" : "Источник недоступен";
+  const sourceLabel = source?.shared ? "Источник по ссылке" : isYoutube ? "YouTube" : source ? "Локальный файл" : "Источник недоступен";
   function queueRow(id: string, index: number, editable = false) {
     const item = itemsById.get(id);
     const title = item?.title ?? (catalog.deleted(id) ? "Запись удалена" : "Загружаем запись…");
@@ -1385,7 +1480,7 @@ export function PlayerProvider({
             onDragEnd={() => { draggingId.current = undefined; setDragOver(undefined); }}
           ><GripVertical size={16} /></span>
         )}
-        <button type="button" className={`watch-queue-row ${active ? "active" : ""}`} aria-current={active ? "true" : undefined} aria-disabled={!!unavailableReason} onClick={() => switchTo(index)}>
+        <button type="button" className={`watch-queue-row ${active ? "active" : ""}`} aria-current={active ? "true" : undefined} aria-disabled={!!unavailableReason && !catalog.rechecksPlayback(id)} onClick={() => switchTo(index)}>
           <span className="watch-queue-number">{active && playing ? <span className="equalizer" aria-hidden="true"><i /><i /><i /></span> : index + 1}</span>
           <span className={`watch-queue-art art-${title.length % 6}`}>
             <ItemArtwork source={artworkSource} kind={item?.kind ?? "audio"} />
@@ -1625,7 +1720,7 @@ export function PlayerProvider({
                 </div>
               )}
               <div className="watch-queue-footer">
-                <button className="text-button" disabled={!queueEditable} onClick={() => { setCreatedPlaylist(undefined); setShowSavePlaylist(true); }}>Сохранить как плейлист</button>
+                {!sharedQueue && <button className="text-button" disabled={!queueEditable} onClick={() => { setCreatedPlaylist(undefined); setShowSavePlaylist(true); }}>Сохранить как плейлист</button>}
                 <button className="text-button" onClick={clearQueue}>Очистить</button>
               </div>
               {createdPlaylist && (
@@ -1703,7 +1798,7 @@ export function PlayerProvider({
           <div className="mini-player-side">
             <span>{formatDuration(settings.position)} / {formatDuration(total)}</span>
             <PlaybackVolume compact volume={settings.volume} onMute={toggleMute} onVolume={setVolume} />
-            <CompactPlaybackQueue incomplete={!queueEditable} key={routeKey} onOpenChange={setQueueOpen} deleted={catalog.deleted} settings={settings} itemsById={itemsById} failedIds={failed.current} onSelect={switchTo} />
+            <CompactPlaybackQueue incomplete={!queueEditable} key={routeKey} onOpenChange={setQueueOpen} deleted={catalog.deleted} canRecheck={catalog.rechecksPlayback} settings={settings} itemsById={itemsById} failedIds={failed.current} onSelect={switchTo} />
           </div>
         </section>
       )}
@@ -1711,12 +1806,14 @@ export function PlayerProvider({
   ) : null;
   // Media time updates are frequent. Library rows subscribe only to changes
   // that affect their buttons and cover, while commands use the latest state.
-  const commands = useRef({start, activateItem, toggle, watchCurrent, addToQueue});
-  useLayoutEffect(() => {commands.current = {start, activateItem, toggle, watchCurrent, addToQueue};});
+  const commands = useRef({start, activateItem, playShared, toggle, watchCurrent, addToQueue});
+  useLayoutEffect(() => {commands.current = {start, activateItem, playShared, toggle, watchCurrent, addToQueue};});
   const controller = useMemo<Controller>(() => ({
     current, playing, waitingForVideo, loadingLabel, mode: settings.mode, queueEditable,
     start: (...args) => commands.current.start(...args),
     activateItem: (...args) => commands.current.activateItem(...args),
+    playShared: (...args) => commands.current.playShared(...args),
+    sharedId: (path, id) => catalog.sharedId(path, id),
     toggle: () => commands.current.toggle(),
     watchCurrent: () => commands.current.watchCurrent(),
     enqueue: (item, playlistId) => commands.current.addToQueue(item, "last", playlistId),

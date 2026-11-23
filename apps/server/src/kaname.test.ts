@@ -126,6 +126,26 @@ it("serializes the last slot and byte reservations including cross-process write
   } finally { await second.$disconnect(); await f.close(); }
 });
 
+it("requires fresh author access when the player refreshes borrowed sources", async () => {
+  const f = await fixture();
+  try {
+    const { item } = await f.library.upsertYoutube(f.userId, { externalId: "abcdefghijk" });
+    const issued = await f.app.sharing.create(f.userId, "item", item.id);
+    const token = new URL(issued.url!).pathname.split("/").at(-1)!;
+    const saved = await f.app.sharing.save(f.otherUserId, token);
+    const read = (verifyShared: boolean) => f.app.inject({
+      method: "POST", url: "/api/library/items", headers: f.bob, payload: { ids: [saved.id], verifyShared },
+    });
+    expect((await read(false)).json().items).toMatchObject([{
+      shared: { available: true }, sources: [{ shared: true, provider: "youtube" }],
+    }]);
+    f.grants.delete("alice");
+    const after = await read(true);
+    expect(after.statusCode).toBe(200);
+    expect(after.json().items).toMatchObject([{ shared: { available: false }, sources: [] }]);
+  } finally { await f.close(); }
+});
+
 it("checks playlist cover metadata without converting thumbnails for regular Kaname members", async () => {
   const f = await fixture();
   const artwork = vi.spyOn(ArtworkService.prototype, "get");

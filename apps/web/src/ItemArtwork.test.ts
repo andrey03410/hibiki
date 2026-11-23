@@ -25,6 +25,13 @@ it("uses YouTube's small thumbnail for legacy and imported video sources", () =>
   }
 });
 
+it("requests shared artwork through its protected URL", () => {
+  const markup = renderToStaticMarkup(createElement(ItemArtwork, {
+    kind: "audio", source: { provider: "local", shared: true, thumbnail: "/api/shared/access-key/items/music/artwork" },
+  }));
+  expect(markup).toContain('src="/api/shared/access-key/items/music/artwork?size=thumb"');
+});
+
 it("keeps a fallback for missing artwork or an unrecognized external image", () => {
   for (const source of [
     undefined,

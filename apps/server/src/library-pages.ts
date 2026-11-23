@@ -5,7 +5,7 @@ import { z } from "zod";
 import { librarySearchSchema, playlistDefinitionSchema, type LibrarySearch, type LibraryCardOverviewDto, type LibraryPageDto } from "@hibiki/contracts";
 import type { Db } from "./db";
 import { invariant } from "./errors";
-import { hydrateLibraryItems, jobDto } from "./library";
+import { hydrateLibraryItems, jobDto, type LibraryService } from "./library";
 import { listTags } from "./taxonomy";
 import { browserOwner } from "./notes";
 
@@ -104,7 +104,28 @@ function missingFilter(group?: LibrarySearch["missingGroup"]) {
     ${assigned} AND c.tagGroup IN ('source','artist','genre','mood')) < 4)`;
 }
 
-function itemFilter(ownerId: string, search: LibrarySearch, zone?: string) {
+type BorrowedStatus = { available: string[]; unknown: string[] };
+
+async function borrowedStatus(tx: Tx, ownerId: string, search: LibrarySearch, library: LibraryService): Promise<BorrowedStatus | undefined> {
+  if (!search.availability) return;
+  const tracks = await tx.sharedTrack.findMany({
+    where: { recipientId: ownerId }, select: { recipientItemId: true }, orderBy: { recipientItemId: "asc" },
+  });
+  if (!tracks.length) return;
+  const status: BorrowedStatus = { available: [], unknown: [] };
+  const batchSize = 500;
+  for (let start = 0; start < tracks.length; start += batchSize) {
+    const ids = tracks.slice(start, start + batchSize).map(track => track.recipientItemId);
+    const items = await hydrateLibraryItems(tx, ownerId, ids, true, library);
+    for (const item of items) {
+      if (item.sources.some(source => source.shared && source.status === "available")) status.available.push(item.id);
+      if (item.sources.some(source => source.shared && source.status === "unknown")) status.unknown.push(item.id);
+    }
+  }
+  return status;
+}
+
+function itemFilter(ownerId: string, search: LibrarySearch, zone?: string, borrowed?: BorrowedStatus) {
   const sql = Prisma.sql;
   const clauses = [sql`i.ownerId = ${ownerId}`];
   if (search.kind) clauses.push(sql`i.kind = ${search.kind}`);
@@ -146,9 +167,14 @@ function itemFilter(ownerId: string, search: LibrarySearch, zone?: string) {
     clauses.push(source(sql`s.provider = ${search.provider}`));
   }
   if (search.availability) {
-    const available = source(sql`s.status = 'available'`);
+    const withBorrowed = (status: keyof BorrowedStatus) => {
+      const own = source(sql`s.status = ${status}`);
+      const ids = borrowed?.[status];
+      return ids?.length ? sql`(${own} OR i.id IN (SELECT value FROM json_each(${JSON.stringify(ids)})))` : own;
+    };
+    const available = withBorrowed("available");
     clauses.push(search.availability === "available" ? available : sql`NOT ${available}`);
-    const unknown = source(sql`s.status = 'unknown'`);
+    const unknown = withBorrowed("unknown");
     if (search.availability === "unknown") clauses.push(unknown);
     if (search.availability === "unavailable") clauses.push(sql`NOT ${unknown}`);
   }
@@ -213,8 +239,9 @@ async function matchingKeys(tx: Tx, ownerId: string, where: Prisma.Sql, search: 
   return keys.sort((a, b) => compare(a, b, search.sort)).map(({ id }) => id);
 }
 
-export async function searchLibraryIds(tx: Tx, ownerId: string, search: LibrarySearch, zone?: string, browser = false) {
-  const where = itemFilter(ownerId, search, zone);
+export async function searchLibraryIds(tx: Tx, ownerId: string, search: LibrarySearch, library: LibraryService, zone?: string, browser = false) {
+  const borrowed = await borrowedStatus(tx, ownerId, search, library);
+  const where = itemFilter(ownerId, search, zone, borrowed);
   if (search.query.trim() || search.sort.startsWith("title")) return matchingKeys(tx, ownerId, where, search, browser);
   const rows = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
     ${catalogCte(ownerId)} SELECT i.id FROM Item i WHERE ${where} ORDER BY ${orderBy(search.sort)}
@@ -236,13 +263,13 @@ async function facetCounts(tx: Tx, ownerId: string, where: Prisma.Sql) {
 
 function cursorOffset(input: string | undefined, key: string, revision: string) {
   if (!input) return 0;
-  const parts = /^([a-f\d]{24})\.(\d+)\.(\d{1,9})$/.exec(input);
+  const parts = /^([a-f\d]{24})\.(\d+(?:-[a-f\d]{16})?)\.(\d{1,9})$/.exec(input);
   invariant(parts && parts[1] === key, 400, "cursor", "Курсор не соответствует выборке");
   invariant(parts[2] === revision, 409, "library_changed", "Медиатека изменилась, обновите результаты");
   return Number(parts[3]);
 }
 
-export function registerLibraryPages(app: FastifyInstance, db: Db) {
+export function registerLibraryPages(app: FastifyInstance, db: Db, library: LibraryService) {
   // The common added/duration paths use SQL COUNT and LIMIT. Remember a few
   // ID-only selections so scrolling a Unicode search does not repeat its scan.
   const selections = new Map<string, string[]>();
@@ -251,9 +278,11 @@ export function registerLibraryPages(app: FastifyInstance, db: Db) {
     const search = input.filters;
     const zone = input.timeZone ?? search.timeZone;
     const key = createHash("sha256").update(JSON.stringify([ownerId, search, zone])).digest("hex").slice(0, 24);
-    const current = await revision(tx, ownerId);
+    const borrowed = await borrowedStatus(tx, ownerId, search, library);
+    const sharedRevision = borrowed ? "-" + createHash("sha256").update(JSON.stringify(borrowed)).digest("hex").slice(0, 16) : "";
+    const current = (await revision(tx, ownerId)) + sharedRevision;
     const offset = cursorOffset(input.cursor, key, current);
-    const where = itemFilter(ownerId, search, zone);
+    const where = itemFilter(ownerId, search, zone, borrowed);
     let ids: string[];
     let total: number;
     if (search.query.trim() || search.sort.startsWith("title")) {
@@ -288,9 +317,9 @@ export function registerLibraryPages(app: FastifyInstance, db: Db) {
       const cacheKey = JSON.stringify([ownerId, current, filters, zone]);
       tagCounts = countsCache.get(cacheKey);
       if (!tagCounts) {
-        let eligible = itemFilter(ownerId, filters, zone);
+        let eligible = itemFilter(ownerId, filters, zone, borrowed);
         if (filters.query.trim()) {
-          const matching = await searchLibraryIds(tx, ownerId, filters, zone, true);
+          const matching = await matchingKeys(tx, ownerId, eligible, filters, true);
           eligible = Prisma.sql`i.ownerId = ${ownerId} AND i.id IN (SELECT value FROM json_each(${JSON.stringify(matching)}))`;
         }
         tagCounts = await facetCounts(tx, ownerId, eligible);
@@ -299,7 +328,7 @@ export function registerLibraryPages(app: FastifyInstance, db: Db) {
       }
     }
     return {
-      items: await hydrateLibraryItems(tx, ownerId, ids), total, tagCounts,
+      items: await hydrateLibraryItems(tx, ownerId, ids, true, library), total, tagCounts,
       nextCursor: end < total ? `${key}.${current}.${end}` : null,
     } satisfies LibraryPageDto;
   }
@@ -320,7 +349,8 @@ export function registerLibraryPages(app: FastifyInstance, db: Db) {
   });
   app.post("/api/library/items", async (request, reply) => {
     const ownerId = browserOwner(request, reply);
-    const { ids } = z.object({ ids: z.array(id).max(pageSize) }).parse(request.body);
-    return { items: await hydrateLibraryItems(db, ownerId, ids) };
+    const { ids, verifyShared } = z.object({ ids: z.array(id).max(pageSize), verifyShared: z.boolean().optional() }).parse(request.body);
+    await app.sharing.prefetchForViewer(ownerId, ids, verifyShared);
+    return db.$transaction(async tx => ({ items: await hydrateLibraryItems(tx, ownerId, ids, true, library) }));
   });
 }

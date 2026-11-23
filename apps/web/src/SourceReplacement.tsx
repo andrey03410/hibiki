@@ -18,17 +18,18 @@ interface Proposal {
 interface Props {
   item: Pick<ItemDto, "id">;
   reload: () => void | Promise<void>;
+  localOnly?: boolean;
 }
 
 async function listProposals(path: string) {
   return (await api<{ proposals: Proposal[] }>(path)).proposals;
 }
 
-export function SourceReplacement({ item, reload }: Props) {
-  return <ReplacementForm key={item.id} item={item} reload={reload} />;
+export function SourceReplacement({ item, reload, localOnly }: Props) {
+  return <ReplacementForm key={item.id} item={item} reload={reload} localOnly={localOnly} />;
 }
 
-function ReplacementForm({ item, reload }: Props) {
+function ReplacementForm({ item, reload, localOnly }: Props) {
   const path = `/items/${encodeURIComponent(item.id)}/replacements`;
   const headingId = useId();
   const fileInput = useRef<HTMLInputElement>(null);
@@ -103,7 +104,7 @@ function ReplacementForm({ item, reload }: Props) {
     await api(`${path}/${encodeURIComponent(proposal.id)}/${action}`, "POST", {});
     setProposals((rows) => rows?.filter((row) => row.id !== proposal.id) ?? []);
     if (action === "confirm") {
-      setNotice("Предпочтительный источник обновлён");
+      setNotice(localOnly ? "Ваш файл добавлен" : "Предпочтительный источник обновлён");
       await reload();
     } else {
       setNotice(proposal.reason ? "Предложение отклонено" : "Замена отменена");
@@ -112,8 +113,8 @@ function ReplacementForm({ item, reload }: Props) {
 
   return (
     <section className="source-replacement" aria-labelledby={headingId} aria-busy={busy}>
-      <h3 id={headingId}>Заменить источник</h3>
-      <div className="source-replacement-input">
+      <h3 id={headingId}>{localOnly ? "Добавить свой файл" : "Заменить источник"}</h3>
+      {!localOnly && <div className="source-replacement-input">
         <label>
           Ссылка на ролик YouTube
           <input
@@ -134,7 +135,7 @@ function ReplacementForm({ item, reload }: Props) {
           onClick={() => void run(previewLink)}>
           Проверить ссылку
         </button>
-      </div>
+      </div>}
       <div className="source-replacement-input">
         <label>
           Локальный файл
@@ -151,7 +152,7 @@ function ReplacementForm({ item, reload }: Props) {
       {busy && <p className="small muted" role="status">Обрабатываем источник…</p>}
       {notice && <p className="small" role="status">{notice}</p>}
       {error && <p className="small danger-text" role="alert">{error}</p>}
-      {proposals?.map((proposal) => (
+      {proposals?.filter(proposal => !localOnly || proposal.kind === "local").map((proposal) => (
         <div className="source-replacement-proposal" key={proposal.id}>
           <div className="source-replacement-preview">
             <strong>{proposal.preview?.title ?? "Предложение агента"}</strong>
@@ -169,7 +170,7 @@ function ReplacementForm({ item, reload }: Props) {
             {proposal.preview ? (
               <button type="button" className="button primary" disabled={busy}
                 onClick={() => void run(() => resolve(proposal, "confirm"))}>
-                Подтвердить замену
+                {localOnly ? "Добавить файл" : "Подтвердить замену"}
               </button>
             ) : (
               <button type="button" className="button subtle" disabled={busy}

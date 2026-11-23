@@ -30,6 +30,10 @@ export function registerKaname(app: FastifyInstance, db: Db, auth: AuthService,
   const callback = () => new URL("/api/auth/kaname/callback", env("KANAME_SITE_URL"));
   const cookie = () => ({ path: "/api/auth/kaname", httpOnly: true, sameSite: "lax" as const, secure: callback().protocol === "https:", maxAge: 300 });
   app.get("/api/auth/kaname/login", async (req, reply) => {
+    const { next } = z.object({ next: z.union([
+      z.enum(["/", "/admin", "/settings"]),
+      z.string().regex(/^\/share\/[A-Za-z0-9_-]{43}$/),
+    ]).default("/") }).parse(req.query);
     const client = await config();
     for (const [id, value] of pending) if (value.expires < Date.now()) pending.delete(id);
     invariant(pending.size < 5000, 429, "login_busy", "Слишком много попыток входа");
@@ -37,7 +41,6 @@ export function registerKaname(app: FastifyInstance, db: Db, auth: AuthService,
     const state = oidc.randomState(), nonce = oidc.randomNonce(), verifier = oidc.randomPKCECodeVerifier();
     const url = oidc.buildAuthorizationUrl(client, { redirect_uri: callback().href, scope: "openid profile",
       state, nonce, code_challenge_method: "S256", code_challenge: await oidc.calculatePKCECodeChallenge(verifier) });
-    const { next } = z.object({ next: z.enum(["/", "/admin", "/settings"]).default("/") }).parse(req.query);
     pending.set(id, { state, nonce, verifier, next, expires: Date.now() + 300_000 });
     return reply.header("cache-control", "no-store").setCookie("hibiki_oidc", id, cookie()).redirect(url.href);
   });

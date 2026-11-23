@@ -67,16 +67,24 @@ export function completeLibraryOrder(state: PlaybackSettings, ids: string[]) {
   return { queue, queueIndex: current ? queue.indexOf(current) : 0 };
 }
 
+type SharedQueue = { number: number; load: () => Promise<ItemDto[]> };
+type SharedReads = Map<SharedQueue, Promise<Map<string, ItemDto>>>;
+
 // A saved queue contains IDs. A missing detail row is only a deletion after a
 // successful lookup, so browsing a different page never prunes the queue.
 export class QueueCatalog {
   readonly rows = new Map<string, ItemDto>();
+  private sharedQueues = new Map<string, SharedQueue>();
+  private sharedIds = new Map<string, { source: SharedQueue; id: string }>();
   private known = new Set<string>();
   private pending = new Map<string, Promise<void>>();
   private generation = 0;
   private version = 0;
   private listeners = new Set<() => void>();
-  constructor(private fetch: (ids: string[]) => Promise<ItemDto[]>) {}
+  constructor(
+    private fetch: (ids: string[]) => Promise<ItemDto[]>,
+    private verify: (ids: string[]) => Promise<ItemDto[]> = fetch,
+  ) {}
   snapshot = () => this.version;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -92,6 +100,47 @@ export class QueueCatalog {
     this.pending.clear();
   }
   deleted = (id: string) => this.known.has(id) && !this.rows.has(id);
+  isShared = (id?: string) => id !== undefined && this.sharedIds.has(id);
+  sharedId(path: string, id: string) {
+    const source = this.sharedQueues.get(path);
+    return source && `shared-playback:${source.number}:${id}`;
+  }
+  sharedEntries(path: string, items: ItemDto[], load: () => Promise<ItemDto[]>) {
+    let source = this.sharedQueues.get(path);
+    if (!source) this.sharedQueues.set(path, source = { number: this.sharedQueues.size, load });
+    else source.load = load;
+    return items.map(item => {
+      const id = this.sharedId(path, item.id)!;
+      this.sharedIds.set(id, { source, id: item.id });
+      return { ...item, id };
+    });
+  }
+  rechecksPlayback = (id?: string) => id !== undefined && (this.isShared(id) || this.rows.get(id)?.shared !== undefined);
+  async readPlayback(id: string, reads: SharedReads = new Map()) {
+    const known = this.rows.get(id);
+    const shared = this.sharedIds.get(id);
+    let latest: ItemDto | undefined;
+    if (shared) {
+      let read = reads.get(shared.source);
+      if (!read) {
+        read = shared.source.load().then(items => new Map(items.map(item => [item.id, item])));
+        reads.set(shared.source, read);
+      }
+      const item = (await read).get(shared.id);
+      latest = item && { ...item, id };
+    } else if (known?.shared) {
+      [latest] = await this.verify([id]);
+    } else {
+      return known;
+    }
+    return latest ?? (known && { ...known, sources: [] });
+  }
+  async refreshPlayback(id: string, active = () => true, reads?: SharedReads) {
+    const row = await this.readPlayback(id, reads);
+    if (!active()) return;
+    if (row && row !== this.rows.get(id)) this.put([row]);
+    return row;
+  }
   put(items: ItemDto[]) {
     for (const item of items) {
       this.rows.set(item.id, item);
@@ -99,14 +148,14 @@ export class QueueCatalog {
     }
     this.publish();
   }
-  async ensure(ids: string[], active: () => boolean = () => true) {
+  async ensure(ids: string[], active: () => boolean = () => true, verify = false) {
     const unique = [...new Set(ids)];
     for (let start = 0; start < unique.length && active(); start += 100) {
-      const chunk = unique.slice(start, start + 100).filter(id => !this.known.has(id));
+      const chunk = unique.slice(start, start + 100).filter(id => !this.isShared(id) && !this.known.has(id));
       const missing = chunk.filter(id => !this.pending.has(id));
       if (missing.length) {
         const generation = this.generation;
-        const request = this.fetch(missing).then(rows => {
+        const request = (verify ? this.verify : this.fetch)(missing).then(rows => {
           if (generation !== this.generation) return;
           for (const id of missing) { this.rows.delete(id); this.known.add(id); }
           this.put(rows);
@@ -124,8 +173,17 @@ export class QueueCatalog {
       const state = read();
       const generation = this.generation;
       const tail = unloadedTail();
-      const index = ended && state.repeat === "one" ? state.queueIndex
-        : await this.findPlayable(state.queue, state.queueIndex, direction, !tail && state.repeat === "all", state.mode, failed, active);
+      const current = state.queue[state.queueIndex];
+      let index: number;
+      if (ended && state.repeat === "one" && !this.rechecksPlayback(current)) {
+        index = state.queueIndex;
+      } else if (ended && state.repeat === "one" && current) {
+        const item = await this.refreshPlayback(current, active);
+        index = item && playbackSources(item, state.mode).length ? state.queueIndex
+          : await this.findPlayable(state.queue, state.queueIndex, direction, false, state.mode, failed, active);
+      } else {
+        index = await this.findPlayable(state.queue, state.queueIndex, direction, !tail && state.repeat === "all", state.mode, failed, active);
+      }
       if (index < 0 && tail && (direction > 0 || state.repeat === "all")) {
         await tail;
         continue;
@@ -137,16 +195,19 @@ export class QueueCatalog {
   }
   async findPlayable(queue: string[], current: number, direction: 1 | -1, wrap: boolean,
     mode: PlaybackMode, failed?: ReadonlySet<string>, active = () => true): Promise<number> {
+    const reads: SharedReads = new Map();
     for (let offset = 1; offset <= queue.length && active(); offset++) {
       const raw = current + offset * direction;
       if (!wrap && (raw < 0 || raw >= queue.length)) break;
       const index = (raw + queue.length) % queue.length;
       const id = queue[index]!;
-      if (!this.known.has(id)) {
+      const known = this.isShared(id) || this.known.has(id);
+      if (!known) {
         const window = direction === 1 ? queue.slice(index, index + 32) : queue.slice(Math.max(0, index - 31), index + 1);
         await this.ensure(window, active);
       }
-      const item = this.rows.get(id);
+      const item = this.rechecksPlayback(id) && !failed?.has(id)
+        ? await this.refreshPlayback(id, active, reads) : this.rows.get(id);
       if (item && !failed?.has(id) && playbackSources(item, mode).length) return index;
     }
     return -1;

@@ -33,6 +33,8 @@ watch layout с очередью справа, audio artwork, fullscreen overlay
 
 [12. Обложки и быстрый запуск плейлистов](.ai/features/12-playlist-loading/README.md) — обложки в каталоге и компактный ответ для старта очереди.
 
+[13. Записи и плейлисты по ссылке](.ai/features/13-media-sharing/README.md) — живые общие плейлисты, срок и отзыв ссылок, сохранение без файлов и явное копирование через сайт и MCP.
+
 ## Стек и проверки
 
 TypeScript · Node.js >=22.16 · npm workspaces · Fastify 5 · SQLite + Prisma 7 ·

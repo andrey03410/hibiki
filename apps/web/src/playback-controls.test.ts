@@ -49,6 +49,14 @@ it("explains why a compact queue entry cannot be selected", () => {
   expect(html).toMatch(/<button[^>]*aria-disabled="true"[^>]*aria-describedby="([^"]+)"[\s\S]*<small id="\1">В видео нет звуковой дорожки/);
 });
 
+it("keeps link playback selectable while showing that its access needs rechecking", () => {
+  const html = renderToStaticMarkup(createElement(CompactPlaybackQueueRow, {
+    title: "Опенинг", current: false, onSelect: vi.fn(), unavailableReason: "Доступ закрыт", canRecheck: true,
+  }));
+  expect(html).not.toContain("aria-disabled");
+  expect(html).toMatch(/aria-describedby="([^"]+)"[\s\S]*<small id="\1">Доступ закрыт/);
+});
+
 it("shows separated local buffered ranges beneath the shared progress fill", () => {
   const html = renderToStaticMarkup(createElement(PlaybackSeekBar, {
     position: 12, duration: 100, buffered: [[0, 20], [70, 85]],

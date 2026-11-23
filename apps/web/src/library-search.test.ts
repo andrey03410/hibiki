@@ -38,6 +38,13 @@ describe("library search", () => {
     ]);
   });
 
+  it("distinguishes a borrowed stream from a file saved on the device", () => {
+    const entry = item("borrowed", { sources: [{ ...remote, shared: true }, { ...local, shared: true }] });
+    expect(librarySourceBadges(entry)).toEqual([
+      { provider: "shared", status: "available", label: "Источник по ссылке" },
+    ]);
+  });
+
   it("distinguishes sources awaiting a check, missing local copies, and records without a source", () => {
     const entry = item("unknown", { sources: [
       { ...remote, status: "unknown" }, { ...local, streamUrl: undefined, status: "unavailable" },

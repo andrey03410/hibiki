@@ -156,18 +156,20 @@ export function PlaybackVolume({volume, onVolume, onMute, compact = false}: {
   </div>;
 }
 
-export function CompactPlaybackQueueRow({ title, kind, duration, current, unavailableReason, failed, buttonRef, onSelect }: {
+export function CompactPlaybackQueueRow({ title, kind, duration, current, unavailableReason, canRecheck, failed, buttonRef, onSelect }: {
   title: string;
   kind?: ItemDto["kind"];
   duration?: ItemDto["duration"];
   current: boolean;
   unavailableReason?: string;
+  canRecheck?: boolean;
   failed?: boolean;
   buttonRef?: Ref<HTMLButtonElement>;
   onSelect: () => void;
 }) {
   const reasonId = useId();
   const reason = unavailableReason ?? (failed ? "Источник недоступен" : undefined);
+  const disabled = !!unavailableReason && !canRecheck;
   const Icon = kind === "video" ? Video : Music2;
   return (
     <li>
@@ -177,9 +179,9 @@ export function CompactPlaybackQueueRow({ title, kind, duration, current, unavai
         type="button"
         aria-label={title}
         aria-current={current ? "true" : undefined}
-        aria-disabled={unavailableReason ? true : undefined}
+        aria-disabled={disabled || undefined}
         aria-describedby={reason ? reasonId : undefined}
-        onClick={() => { if (!unavailableReason) onSelect(); }}
+        onClick={() => { if (!disabled) onSelect(); }}
       >
         <Icon size={15} aria-hidden="true" />
         <span className="mini-queue-name">
@@ -192,13 +194,14 @@ export function CompactPlaybackQueueRow({ title, kind, duration, current, unavai
   );
 }
 
-export function CompactPlaybackQueue({ settings, itemsById, failedIds, onSelect, onOpenChange, deleted, incomplete = false }: {
+export function CompactPlaybackQueue({ settings, itemsById, failedIds, onSelect, onOpenChange, deleted, canRecheck, incomplete = false }: {
   settings: Pick<PlaybackSettings, "queue" | "queueIndex" | "mode">;
   itemsById: ReadonlyMap<string, ItemDto>;
   failedIds: ReadonlySet<string>;
   onSelect: (index: number) => void;
   onOpenChange?: (open: boolean) => void;
   deleted?: (id: string) => boolean;
+  canRecheck?: (id: string) => boolean;
   incomplete?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -253,6 +256,7 @@ export function CompactPlaybackQueue({ settings, itemsById, failedIds, onSelect,
         duration={item?.duration}
         current={current}
         unavailableReason={queueEntryUnavailableReason(item, mode)}
+        canRecheck={canRecheck?.(id)}
         failed={failedIds.has(id)}
         buttonRef={current ? activeRow : undefined}
         onSelect={() => {

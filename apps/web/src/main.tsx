@@ -69,6 +69,7 @@ import type {
   Rule,
   PlaylistDefinition,
   ResolvedPlaylist,
+  ShareLinkDto,
   TagDto,
   UserDto,
 } from "@hibiki/contracts";
@@ -89,6 +90,9 @@ import { LibrarySearchControls, useLibrarySearch } from "./LibrarySearchControls
 import { NoteEditor, NoteIndicator, NotesContext, NotesLoadError, useNotes, useNotesController } from "./NoteEditor.tsx";
 import { noteFor } from "./note-model.ts";
 import { SourceReplacement } from "./SourceReplacement.tsx";
+import { SharedItemStatus, useSavedSharedPlaylists } from "./LibrarySharing";
+import { issueShare, kanameLoginHref } from "./sharing-model";
+import { pollWhileVisible } from "./use-sharing-request";
 import { YoutubeLinkedPlaylist, YoutubeLinkImport, YoutubeSyncNotifications, YoutubeSyncSettings } from "./YoutubeSync.tsx";
 import { HistorySettings } from "./HistorySettings.tsx";
 import { useHistoryRevision } from "./history-events.ts";
@@ -96,6 +100,12 @@ import type { HistoryPreference } from "./listening-client.ts";
 import "./styles.css";
 import "./library-view.css";
 import "./taxonomy.css";
+
+const loadSharing = () => import("./Sharing");
+const IssueShare = React.lazy(() => loadSharing().then(module => ({ default: module.IssueShare })));
+const ShareManager = React.lazy(() => loadSharing().then(module => ({ default: module.ShareManager })));
+const SharedMediaPage = React.lazy(() => loadSharing().then(module => ({ default: module.SharedMediaPage })));
+const SavedSharedPlaylistCard = React.lazy(() => loadSharing().then(module => ({ default: module.SavedSharedPlaylistCard })));
 
 const EMPTY: LibraryDto = { items: [], tags: [], playlists: [], jobs: [] };
 type Toast = { id: number; text: string; error?: boolean };
@@ -306,7 +316,7 @@ function Auth({
               ? "Создайте личную медиатеку на этом устройстве."
               : "Войдите, чтобы продолжить с того же места."}
           </p>
-          {kaname ? <a className="primary" href={["/admin", "/settings"].includes(location.pathname) ? "/api/auth/kaname/login?next=" + encodeURIComponent(location.pathname) : "/api/auth/kaname/login"}>Войти через Kaname <ArrowUpRight size={17} /></a> : <form onSubmit={submit}>
+          {kaname ? <a className="primary" href={kanameLoginHref(location.pathname)}>Войти через Kaname <ArrowUpRight size={17} /></a> : <form onSubmit={submit}>
             <label>
               Логин
               <input
@@ -606,6 +616,10 @@ function Workspace({
                   <span className="job-count">{activeJobs}</span>
                 )}
               </NavLink>
+              <NavLink to="/share-links" aria-label="Мои ссылки" title="Мои ссылки">
+                <Link2 size={19} />
+                <span>Мои ссылки</span>
+              </NavLink>
             </nav>
             <div className="sidebar-section">
               <span className="sidebar-label">ПЛЕЙЛИСТЫ</span>
@@ -660,6 +674,7 @@ function Workspace({
           </aside>
           <main className="main-content">
             <div id="browse-content" className="browse-content">
+            <React.Suspense fallback={<div className="loading-inline" role="status"><LoaderCircle size={18} className="spin" />Загружаем…</div>}>
             <Routes>
               <Route path="/player" element={watchPlayer} />
               <Route path="/" element={<LibraryPage userId={user.id} search={librarySearch} />} />
@@ -671,6 +686,9 @@ function Workspace({
               <Route path="/tags" element={<TagsPage query={tagQuery} onQuery={setTagQuery} onBrowse={browseTag} />} />
               {kaname && <Route path="/admin" element={<KanameSettings userId={user.id} adminPage />} />}
               <Route path="/jobs" element={<JobsPage />} />
+              <Route path="/share-links" element={<ShareManager />} />
+              <Route path="/share/:token" element={<SharedMediaPage refreshLibrary={refresh} />} />
+              <Route path="/shared-playlists/:id" element={<SharedMediaPage saved refreshLibrary={refresh} />} />
               <Route path="/settings" element={<WithCatalog><SettingsPage user={user} kaname={kaname} /></WithCatalog>} />
               <Route
                 path="*"
@@ -687,6 +705,7 @@ function Workspace({
                 }
               />
             </Routes>
+            </React.Suspense>
             </div>
             {miniPlayer}
           </main>
@@ -779,6 +798,12 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
     void pages.refresh();
     return pages.cancel;
   }, [pages, overview.revision]);
+  const watchesAvailability = !!(filters.availability || filters.provider);
+  const showsShared = items.some(item => item.shared);
+  useEffect(() => {
+    if (watchesAvailability) return pollWhileVisible(() => pages.refresh(true));
+    if (showsShared) return pollWhileVisible(() => pages.revalidateShared());
+  }, [pages, watchesAvailability, showsShared]);
   useEffect(() => {
     if (!nextCursor || loading || error || !sentinel.current) return;
     const observer = new IntersectionObserver(entries => {
@@ -792,8 +817,11 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   const idQuery = useMemo(() => {
     let pending: Promise<string[]> | undefined;
     return () => pending ??= api<{ids: string[]}>("/library/ids", "POST", searchBody(filters), "low")
-      .then(result => result.ids).catch(e => {pending = undefined; throw e;});
-  }, [filters, overview.revision]);
+      .then(result => {
+        if (watchesAvailability) pending = undefined;
+        return result.ids;
+      }).catch(e => {pending = undefined; throw e;});
+  }, [filters, overview.revision, watchesAvailability]);
   const pageComplete = !loading && !nextCursor && !error && items.length === total;
   const pageIds = useMemo(() => items.map(item => item.id), [items]);
   const allIds = () => pageComplete ? Promise.resolve(pageIds) : idQuery();
@@ -975,6 +1003,8 @@ function ItemTable({
   const { notes } = useNotes();
   const [editTarget, setEditTarget] = useState<{ id: string; focusSource?: boolean }>(),
     [remove, setRemove] = useState<ItemDto | null>(null),
+    [shareTarget, setShareTarget] = useState<{ id: string; issued: Promise<ShareLinkDto> }>(),
+    [copying, setCopying] = useState<string[]>([]),
     [busy, setBusy] = useState(false);
   const currentItems = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
   const edit = editTarget ? currentItems.get(editTarget.id) : undefined;
@@ -990,18 +1020,34 @@ function ItemTable({
     }
   }
 
+  async function createLocalCopy(itemId: string) {
+    setCopying(previous => [...previous, itemId]);
+    try {
+      await api(`/items/${encodeURIComponent(itemId)}/shared-copy`, "POST", {});
+      notify("Задание на создание локальной копии добавлено в очередь");
+      void refresh().catch(() => {});
+    } catch (e) {
+      notify((e as Error).message, true);
+    } finally {
+      setCopying(previous => previous.filter(id => id !== itemId));
+    }
+  }
+
   const results = items.map((item, index) => {
-    const streamUrl = item.sources.find((source) => source.streamUrl)?.streamUrl;
-    const externalUrl = item.sources.find((source) => source.url)?.url;
+    const ownSources = item.sources.filter(source => !source.shared);
+    const borrowedOnly = !!item.shared && !ownSources.length;
+    const canCopy = item.shared?.available && item.sources.some(source => source.shared && source.status !== "unavailable");
+    const streamUrl = ownSources.find((source) => source.streamUrl)?.streamUrl;
+    const externalUrl = ownSources.find((source) => source.url)?.url;
     const artworkSource = item.sources.find((source) => source.thumbnail);
     const available = playbackSources(item).length > 0;
     const active = player.current?.id === item.id;
     const playing = active && player.playing;
     const status = sourceAvailability(item);
     const hasItemNote = !!noteFor(notes, "item", item.id);
-    const hasSourceNote = item.sources.some((source) => noteFor(notes, "source", source.id));
+    const hasSourceNote = ownSources.some((source) => noteFor(notes, "source", source.id));
     const video = item.kind === "video";
-    const yt = item.sources.some((source) => source.provider === "youtube");
+    const yt = ownSources.some((source) => source.provider === "youtube");
     const kindLabel = video ? "Видео" : "Аудио";
     const playLabel = playing ? "Приостановить"
       : !inLibrary && video && (!active || player.waitingForVideo || player.mode === "original") ? "Смотреть"
@@ -1043,7 +1089,7 @@ function ItemTable({
     const menu = (
       <details className="row-menu" name={inLibrary ? "library-item-actions" : undefined}
         onKeyDown={(event) => {
-          if (!inLibrary || event.key !== "Escape" || !event.currentTarget.open) return;
+          if (event.key !== "Escape" || !event.currentTarget.open) return;
           event.currentTarget.open = false;
           event.currentTarget.querySelector("summary")?.focus();
         }}
@@ -1052,16 +1098,28 @@ function ItemTable({
           <MoreHorizontal size={19} />
         </summary>
         <div className="dropdown" onClick={(event) => {
-          if (inLibrary && event.target instanceof Element && event.target.closest("button:not(:disabled), a")) {
+          if (event.target instanceof Element && event.target.closest("button:not(:disabled), a")) {
             const details = event.currentTarget.parentElement;
-            if (details instanceof HTMLDetailsElement) details.open = false;
+            if (details instanceof HTMLDetailsElement) {
+              details.open = false;
+              details.querySelector("summary")?.focus();
+            }
           }
         }}>
           <button onClick={() => setEditTarget({ id: item.id })}>
             <Pencil size={14} />
             Детали записи
           </button>
-          {status === "unavailable" && (
+          {!borrowedOnly && <button onFocus={() => void loadSharing()} onPointerEnter={() => void loadSharing()}
+            onClick={() => setShareTarget({ id: item.id, issued: issueShare("item", item.id) })}>
+            <Link2 size={14} />
+            Поделиться
+          </button>}
+          {canCopy && <button disabled={copying.includes(item.id)} onClick={() => void createLocalCopy(item.id)}>
+            <Copy size={14} />
+            Создать локальную копию
+          </button>}
+          {!borrowedOnly && status === "unavailable" && (
             <button onClick={() => setEditTarget({ id: item.id, focusSource: true })}>
               <RefreshCw size={14} />
               Заменить источник
@@ -1142,13 +1200,14 @@ function ItemTable({
           {cover}
           <div className="entry-description">
             <div className="item-name-actions">{itemTitle}</div>
+            <SharedItemStatus item={item} />
             <ItemTagList tags={item.tags} catalog={catalog} selected={selectedTags} performance={item.performance}
               voices={item.voices} onTag={onTag} onPerformance={onPerformance}/>
             {showMissing && <small className="missing-reasons">Не указано · {missingClassification(item.tags,item.performance,item.voices).map(k => missingLabels[k]).join(", ")}</small>}
             <div className="entry-meta">
               <span>{itemLoading || kindLabel} · {formatDuration(item.duration)}</span>
               {badges.map(({ provider, status, label }) => {
-                const Icon = provider === "youtube" ? Youtube : provider === "local" ? HardDrive : CircleAlert;
+                const Icon = provider === "youtube" ? Youtube : provider === "local" ? HardDrive : provider === "shared" ? Link2 : CircleAlert;
                 return (
                   <span key={provider} className="entry-source" data-provider={provider} data-status={status}
                     role="img" aria-label={label} title={label}>
@@ -1156,7 +1215,7 @@ function ItemTable({
                   </span>
                 );
               })}
-              {!available && <span>Нет рабочего источника</span>}
+              {!available && item.shared?.available !== false && <span>Нет рабочего источника</span>}
             </div>
             {reasons?.[item.id] && (
               <details className="reason-details">
@@ -1186,6 +1245,9 @@ function ItemTable({
           close={() => setEditTarget(undefined)}
         />
       )}
+      {shareTarget && <React.Suspense fallback={null}>
+        <IssueShare kind="item" targetId={shareTarget.id} issued={shareTarget.issued} close={() => setShareTarget(undefined)} />
+      </React.Suspense>}
       {remove && (
         <Modal
           title="Удалить запись?"
@@ -1259,6 +1321,7 @@ function EditItem({ item, close, focusSource }: { item: ItemDto; close: () => vo
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
+  const borrowedOnly = !!item.shared && item.sources.every(source => source.shared);
   const missing = missingClassification(tagIds.flatMap(id => catalog.byId.get(id) ?? []),performance,voices);
   const replacement = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1276,6 +1339,7 @@ function EditItem({ item, close, focusSource }: { item: ItemDto; close: () => vo
       close={close}
     >
       <FavoriteButton item={item} withLabel />
+      <SharedItemStatus item={item} />
       <form
         onSubmit={async (e) => {
           e.preventDefault();
@@ -1331,8 +1395,8 @@ function EditItem({ item, close, focusSource }: { item: ItemDto; close: () => vo
             <div className="source-details" key={s.id}>
               <div>
                 <span>
-                  {s.provider === "local" ? <HardDrive size={16} /> : <Youtube size={16} />}
-                  {s.provider === "local" ? "Локальный файл" : "YouTube"}
+                  {s.shared ? <Link2 size={16} /> : s.provider === "local" ? <HardDrive size={16} /> : <Youtube size={16} />}
+                  {s.shared ? "Источник по ссылке" : s.provider === "local" ? "Локальный файл" : "YouTube"}
                 </span>
                 <span className={s.status === "unavailable" ? "danger-text" : "muted"}>
                   {s.status === "available"
@@ -1343,12 +1407,12 @@ function EditItem({ item, close, focusSource }: { item: ItemDto; close: () => vo
                 </span>
                 {s.reason && <p>{s.reason}</p>}
               </div>
-              <NoteEditor kind="source" id={s.id} />
+              {!s.shared && <NoteEditor kind="source" id={s.id} />}
             </div>
           ))}
         </section>
       )}
-      <div ref={replacement}><SourceReplacement item={item} reload={refresh} /></div>
+      <div ref={replacement}><SourceReplacement item={item} reload={refresh} localOnly={borrowedOnly} /></div>
       <ItemListeningSummary itemId={item.id} />
     </Modal>
   );
@@ -1471,6 +1535,7 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
   onCreate: () => void;
 }) {
   const { overview, notify } = useData();
+  const { playlists: savedPlaylists, error: savedError, loading: savedLoading } = useSavedSharedPlaylists();
   const player = usePlayer();
   const { notes } = useNotes();
   const request = useRef(0);
@@ -1495,6 +1560,8 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
   const playlists = overview.playlists.filter((p) =>
     matchesSearch(query, p.title, p.description, noteFor(notes, "playlist", p.id)),
   );
+  const shared = savedPlaylists.filter(playlist => matchesSearch(query, playlist.title, playlist.sharedBy));
+  const resultCount = playlists.length + shared.length;
   return (
     <>
       <div className="title-row library-title-row">
@@ -1506,7 +1573,7 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
       </div>
       <div className="section-heading">
         <h2>
-          Найдено <span>{playlists.length}</span>
+          Найдено <span>{resultCount}</span>
         </h2>
         <label className="search-input">
           <Search size={16} />
@@ -1519,19 +1586,23 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
         </label>
       </div>
       <NotesLoadError />
+      {savedError && <ErrorMessage error={savedError.message} />}
       <div className="playlist-grid">
         {playlists.map((p) => (
           <PlaylistCard key={p.id} playlist={p} play={play} busy={loadingId === p.id} />
         ))}
+        <React.Suspense fallback={null}>
+          {shared.map(playlist => <SavedSharedPlaylistCard key={playlist.id} playlist={playlist} />)}
+        </React.Suspense>
       </div>
-      {!playlists.length && query && (
+      {!resultCount && !savedError && !savedLoading && query && (
         <EmptyState
           title="Плейлист не найден"
           text="Измените запрос или очистите поиск."
           icon={<ListMusic size={29} />}
         />
       )}
-      {!playlists.length && !query && (
+      {!resultCount && !savedError && !savedLoading && !query && (
         <EmptyState title="Здесь будут ваши плейлисты" text="Соберите плейлист из записей или задайте правила подбора." />
       )}
     </>
@@ -1581,13 +1652,14 @@ function PlaylistPage({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
     [error, setError] = useState(""),
     [edit, setEdit] = useState(false),
     [copy, setCopy] = useState(false),
+    [share, setShare] = useState<Promise<ShareLinkDto>>(),
     [remove, setRemove] = useState(false),
     [busy, setBusy] = useState(false);
   const resolveRequest = useRef(0);
   const historyRevision = useHistoryRevision(Boolean(playlist && (
     playlist.definition.sort === "last-started" || usesListeningHistory(playlist.definition.rule, library)
   )));
-  async function resolve() {
+  async function resolve(background = false) {
     if (!id) return;
     const request = ++resolveRequest.current;
     try {
@@ -1596,7 +1668,7 @@ function PlaylistPage({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
       setResolved(result);
       setError("");
     } catch (e) {
-      if (request === resolveRequest.current) setError((e as Error).message);
+      if (!background && request === resolveRequest.current) setError((e as Error).message);
     }
   }
   const contentKey =
@@ -1610,6 +1682,10 @@ function PlaylistPage({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
   useEffect(() => {
     void resolve();
   }, [id, contentKey, historyRevision]);
+  const hasSharedRows = !!resolved?.items.some(item => item.shared);
+  useEffect(() => {
+    if (hasSharedRows) return pollWhileVisible(() => resolve(true));
+  }, [id, hasSharedRows]);
   if (!playlist)
     return (
       <>
@@ -1697,6 +1773,10 @@ function PlaylistPage({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
               <Pencil size={16} />
               {playlist.youtubeLinked ? "Название и описание" : automatic ? "Изменить правила" : "Изменить плейлист"}
             </Button>
+            <Button className="subtle" onFocus={() => void loadSharing()} onPointerEnter={() => void loadSharing()}
+              onClick={() => setShare(issueShare("playlist", playlist.id))}>
+              <Link2 size={16} /> Поделиться
+            </Button>
             {playlist.youtubeLinked && (
               <Button className="subtle" disabled={!resolved} onClick={() => setCopy(true)}>
                 <Copy size={16} /> Сделать ручную копию
@@ -1745,7 +1825,7 @@ function PlaylistPage({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
         <h2>
           Состав плейлиста <span>{resolved?.total ?? "…"}</span>
         </h2>
-        <button className="text-button" onClick={resolve}>
+        <button className="text-button" onClick={() => void resolve()}>
           <RefreshCw size={14} />
           Обновить состав
         </button>
@@ -1811,6 +1891,9 @@ function PlaylistPage({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
           }}
         />
       )}
+      {share && <React.Suspense fallback={null}>
+        <IssueShare key={playlist.id} kind="playlist" targetId={playlist.id} issued={share} close={() => setShare(undefined)} />
+      </React.Suspense>}
       {remove && (
         <Modal
           title="Удалить плейлист?"
@@ -2936,6 +3019,7 @@ const JOB_NAMES: Record<string, string> = {
   "youtube-import": "Импорт из YouTube",
   "youtube-download": "Скачивание YouTube",
   "youtube-refresh": "Проверка источника",
+  "shared-copy": "Создание локальной копии",
   export: "Экспорт медиатеки",
   import: "Импорт архива",
   "import-preview": "Проверка архива",

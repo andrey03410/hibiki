@@ -52,21 +52,22 @@ export function sourceAvailability(item: ItemDto): SourceDto["status"] {
 }
 
 type LibrarySourceBadge = {
-  provider: SourceDto["provider"] | "none";
+  provider: SourceDto["provider"] | "shared" | "none";
   status: SourceDto["status"];
   label: string;
 };
 
 export function librarySourceBadges(item: Pick<ItemDto, "kind" | "sources">): LibrarySourceBadge[] {
   const badges: LibrarySourceBadge[] = [];
-  const youtube = item.sources.filter((source) => source.provider === "youtube");
+  const own = item.sources.filter(source => !source.shared);
+  const youtube = own.filter((source) => source.provider === "youtube");
   if (youtube.length) {
     const status = sourceStatus(youtube);
     const label = status === "available" ? "YouTube" : status === "unknown"
       ? "YouTube · доступность не проверена" : "YouTube недоступен";
     badges.push({ provider: "youtube", status, label });
   }
-  const local = item.sources.filter((source) => source.provider === "local");
+  const local = own.filter((source) => source.provider === "local");
   if (local.length) {
     const working = local.filter(workingLocalSource);
     const audioCopy = item.kind === "video" && working.every((source) => source.mime?.startsWith("audio/"));
@@ -76,6 +77,8 @@ export function librarySourceBadges(item: Pick<ItemDto, "kind" | "sources">): Li
       : status === "unknown" ? "Локальная копия · доступность не проверена" : "Локальная копия недоступна";
     badges.push({ provider: "local", status, label });
   }
+  const shared = item.sources.filter(source => source.shared);
+  if (shared.length) badges.push({ provider: "shared", status: sourceStatus(shared), label: "Источник по ссылке" });
   if (!badges.length) badges.push({ provider: "none", status: "unavailable", label: "Нет источника" });
   return badges;
 }
