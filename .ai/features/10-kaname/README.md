@@ -2,7 +2,7 @@
 track: product
 stage: review
 branch: codex/10-kaname
-pr: null
+pr: https://github.com/andrey03410/hibiki/pull/10
 ---
 # 10. Вход и права Kaname
 
