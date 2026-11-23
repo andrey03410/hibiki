@@ -1,6 +1,6 @@
 ---
 track: product
-stage: product
+stage: tech
 branch: codex/10-kaname
 pr: null
 ---
