@@ -168,3 +168,96 @@ it("asks a stale tab to reopen its workspace before reading pages or saving into
   expect(save.statusCode).toBe(409);
   expect((await ctx.library.getSettings(ctx.userId)).volume).not.toBe(0.123);
 });
+
+const tagWrite = (method: "POST" | "PATCH", payload: Record<string, unknown>, id?: string, session = cookie) =>
+  app.inject({ method, url: "/api/tags" + (id ? "/" + id : ""), headers: { cookie: session }, payload });
+async function createTag(name: string, group: string, extra: Record<string, unknown> = {}) {
+  const result = await tagWrite("POST", { name, group, ...extra });
+  expect(result.statusCode, result.body).toBe(200);
+  return result.json().id as string;
+}
+const editTrack = (id: string, payload: Record<string, unknown>) =>
+  app.inject({ method: "PATCH", url: "/api/items/" + id, headers: { cookie }, payload });
+
+it("allows homonyms only at distinct paths, rejects cycles, cross-owner parents and hierarchical flat groups", async () => {
+  const anime = await createTag("Anime", "source");
+  const novel = await createTag("VN", "source");
+  const first = await createTag("CLANNAD", "source", { parentIds: [anime], aliases: ["  Clann  "] });
+  const second = await createTag("CLANNAD", "source", { parentIds: [novel] });
+  expect(second).not.toBe(first);
+  expect((await tagWrite("POST", { name: " clannad ", group: "source", parentIds: [anime, novel] })).statusCode).toBe(409);
+  expect((await tagWrite("PATCH", { parentIds: [first] }, anime)).statusCode).toBe(409);
+  expect((await tagWrite("PATCH", { group: "artist" }, anime)).statusCode).toBe(409);
+  expect((await tagWrite("POST", { name: "wrong", group: "mood", parentIds: [anime] })).statusCode).toBe(409);
+  expect((await tagWrite("POST", { name: "foreign", group: "source", parentIds: [anime] }, undefined, foreignCookie)).statusCode).toBe(404);
+  expect((await app.inject({ method: "DELETE", url: "/api/tags/" + anime, headers: {cookie} })).statusCode).toBe(409);
+  expect((await overview()).json().tags).toContainEqual(expect.objectContaining({ id: first, name: "CLANNAD", aliases: ["Clann"], parentIds: [anime] }));
+});
+
+it("filters a DAG and counts unique tracks under text and performance independently of selected tags", async () => {
+  const anime = await createTag("Аниме", "source");
+  const studio = await createTag("Kyoto Animation", "source", { aliases: ["KyoAni"], parentIds: [anime] });
+  const partner = await createTag("Studio Two", "source", { parentIds: [anime] });
+  const work = await createTag("Work", "source", { parentIds: [studio, partner] });
+  const mood = await createTag("Slow", "mood");
+  const ownerId = ctx.userId;
+  await ctx.db.item.createMany({ data: ["a", "b", "c", "d", "e"].map((id) => track(id)) });
+  for (const [id, tagIds, performance, voices] of [
+    ["a", [work, mood], "ost", []], ["b", [work], "vocal", []],
+    ["c", [mood], "vocal", ["male", "female"]], ["d", [work], "vocal", ["female"]],
+    ["e", [], "unknown", []],
+  ] as const) expect((await editTrack(id, { tagIds, performance, voices })).statusCode).toBe(200);
+  expect((await overview()).json().tagCounts).toMatchObject({ [anime]: 3, [mood]: 2 });
+  for (const [filters, ids] of [
+    [{ tagIds: [anime, mood] }, ["a"]],
+    [{ tagIds: [anime, mood], tagMode: "or", performanceFilter: "vocal" }, ["b", "c", "d"]],
+    [{ tagIds: [anime, mood], tagMode: "or", performanceFilter: "male" }, ["c"]],
+    [{ performanceFilter: "female" }, ["c", "d"]], [{ performanceFilter: "ost" }, ["a"]],
+    [{ query: "  KyOaNi  " }, ["a", "b", "d"]],
+    [{ missingGroup: "voice" }, ["b"]], [{ missingGroup: "performance" }, ["e"]],
+  ] as const) {
+    const input = {filters: { ...filters, sort: "title-asc" }};
+    expect((await post("ids", input)).json()).toEqual({ids});
+    expect((await post("page", input)).json().items.map((i: ItemDto) => i.id)).toEqual(ids);
+  }
+  const counts = (await post("page", {filters: { query: "kyoani", tagIds: [mood], performanceFilter: "vocal" }})).json();
+  expect(counts).toMatchObject({total: 0, tagCounts: { [anime]: 2, [mood]: 0 }});
+  expect(await ctx.db.item.count({where:{ownerId}})).toBe(5);
+});
+
+it("preserves archived links when completing classification and rolls back a batch with a missing field", async () => {
+  await ctx.db.item.createMany({ data: [track("a"), track("b")] });
+  const legacy = await createTag("Legacy", "extra");
+  expect((await editTrack("a", {tagIds: [legacy]})).statusCode).toBe(200);
+  expect((await tagWrite("PATCH", {archived: true}, legacy)).statusCode).toBe(200);
+  const tagIds = await Promise.all(["source", "artist", "genre", "mood"].map(group => createTag(group, group)));
+  const result = await editTrack("a", {tagIds, performance: "vocal", voices: ["female"], completeClassification: true});
+  expect(result.statusCode, result.body).toBe(200);
+  expect(result.json().tags).toContainEqual(expect.objectContaining({ id: legacy, archived: true }));
+  const playlist = await ctx.library.savePlaylist(ctx.userId, {
+    title: "Legacy", definition: { version: 1, sort: "source", rule: {type: "tag", id: legacy} },
+  });
+  expect((await ctx.library.resolve(ctx.userId, playlist.id)).items.map(item => item.id)).toEqual(["a"]);
+  expect((await overview()).json().tags.map((t: {id:string}) => t.id)).not.toContain(legacy);
+  expect((await post("ids", {filters: {needsClassification:true}})).json()).toEqual({ids:["b"]});
+  const batch = await app.inject({method:"POST",url:"/api/items/batch",headers:{cookie},payload:{changes:[
+    {id:"a",title:"changed"}, {id:"b",tagIds,performance:"vocal",completeClassification:true},
+  ]}});
+  expect(batch.statusCode).toBe(422);
+  expect((await ctx.library.getItem(ctx.userId, "a")).title).toBe("a");
+  expect((await editTrack("a", {performance: "ost"})).json()).toMatchObject({performance:"ost",voices:[]});
+});
+
+it("rejects a stale batch preview and applies a larger reviewed selection as one transaction", async () => {
+  const ids = Array.from({length: 201}, (_, i) => "item-" + i);
+  await ctx.db.item.createMany({data: ids.map(id => track(id))});
+  const before = (await overview()).json().revision;
+  await ctx.db.item.update({where: {id:ids[0]},data:{title:"newer"}});
+  const apply = (expectedRevision: string) => app.inject({method:"POST",url:"/api/items/batch", headers:{cookie},
+    payload:{expectedRevision,changes:ids.map(id => ({id,performance:"ost"}))}});
+  expect((await apply(before)).statusCode).toBe(409);
+  expect((await ctx.library.getItem(ctx.userId,ids[1])).performance).toBe("unknown");
+  const applied = await apply((await overview()).json().revision);
+  expect(applied.statusCode,applied.body).toBe(200);
+  expect(await ctx.db.item.count({where:{ownerId:ctx.userId,performance:"ost"}})).toBe(201);
+});

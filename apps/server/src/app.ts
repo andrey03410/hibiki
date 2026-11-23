@@ -10,7 +10,7 @@ import { createWriteStream } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { z, ZodError } from "zod";
 import type { UserDto } from "@hibiki/contracts";
-import { itemPatchSchema, playlistDefinitionSchema } from "@hibiki/contracts";
+import { librarySearchSchema, itemPatchSchema, playlistDefinitionSchema, tagInputSchema } from "@hibiki/contracts";
 import type { Db } from "./db";
 import { AuthService } from "./auth";
 import { LibraryService } from "./library";
@@ -21,7 +21,8 @@ import { registerMcp } from "./mcp";
 import { uploadPolicy } from "./upload-policy";
 import { ArtworkService } from "./artwork";
 import { registerNotes } from "./notes";
-import { registerLibraryPages } from "./library-pages";
+import { registerClassification } from "./classification";
+import { registerLibraryPages, searchLibraryIds, hydrateLibraryItems } from "./library-pages";
 import { registerReplacement } from "./replacement";
 import { registerHistory } from "./history";
 import { registerYoutubeSync } from "./youtube-sync";
@@ -56,13 +57,6 @@ const playlistInput = z
     definition: playlistDefinitionSchema,
   })
   .strict();
-const tagInput = z.object({
-  name: z.string().trim().min(1).max(80),
-  color: z
-    .string()
-    .regex(/^#[a-f0-9]{6}$/i)
-    .optional(),
-});
 const idOf = (request: { params: unknown }) =>
   z.object({ id: z.string() }).parse(request.params).id;
 const browserAccess = (request: FastifyRequest) =>
@@ -202,23 +196,21 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
         limit: z.coerce.number().int().min(1).max(200).default(50),
       })
       .parse(request.query);
-    let items = (await library.snapshot(request.user!.id)).items.filter(
-      (i) =>
-        (!query.query ||
-          i.title.toLowerCase().includes(query.query.toLowerCase())) &&
-        (!query.kind || i.kind === query.kind) &&
-        (!query.tagId || i.tags.some((t) => t.id === query.tagId)),
-    );
-    if (query.cursor) {
-      const index = items.findIndex((i) => i.id === query.cursor);
-      invariant(index >= 0, 400, "cursor", "Курсор не найден");
-      items = items.slice(index + 1);
-    }
-    const page = items.slice(0, query.limit);
-    return {
-      items: page,
-      nextCursor: items.length > page.length ? page.at(-1)?.id : null,
-    };
+    const ownerId = request.user!.id;
+    const filters = librarySearchSchema.parse({query: query.query, kind: query.kind, tagIds: query.tagId ? [query.tagId] : []});
+    return db.$transaction(async tx => {
+      let ids = await searchLibraryIds(tx, ownerId, filters, undefined, browserAccess(request));
+      if (query.cursor) {
+        const index = ids.indexOf(query.cursor);
+        invariant(index >= 0, 400, "cursor", "Курсор не найден");
+        ids = ids.slice(index + 1);
+      }
+      const page = ids.slice(0, query.limit);
+      return {
+        items: await hydrateLibraryItems(tx, ownerId, page),
+        nextCursor: ids.length > page.length ? page.at(-1) : null,
+      };
+    });
   });
   app.get("/api/items/:id", (request) =>
     library.getItem(request.user!.id, idOf(request)),
@@ -244,40 +236,12 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       itemPatchSchema.parse(request.body),
     ),
   );
-  app.post("/api/items/batch", async (request) => {
-    const { changes } = z
-      .object({
-        changes: z
-          .array(
-            z.object({
-              id: z.string(),
-              title: z.string().trim().min(1).max(500).optional(),
-              tagIds: z.array(z.string()).optional(),
-            }),
-          )
-          .max(200),
-      })
-      .parse(request.body);
-    // Validate all ownership before the first write.
-    for (const change of changes) {
-      await library.getItem(request.user!.id, change.id);
-      if (change.tagIds)
-        invariant(
-          (await db.tag.count({
-            where: {
-              ownerId: request.user!.id,
-              id: { in: [...new Set(change.tagIds)] },
-            },
-          })) === new Set(change.tagIds).size,
-          404,
-          "tag_not_found",
-          "Один из тегов не найден",
-        );
-    }
-    const items = [];
-    for (const change of changes)
-      items.push(await library.updateItem(request.user!.id, change.id, change));
-    return { items };
+  app.post("/api/items/batch", { bodyLimit: 16 * 1024 * 1024 }, async (request) => {
+    const { changes, expectedRevision } = z.object({
+      changes: z.array(itemPatchSchema.extend({ id: z.string().min(1).max(256) })).max(10_000),
+      expectedRevision: z.string().regex(/^\d+$/).optional(),
+    }).parse(request.body);
+    return { items: await library.updateItems(request.user!.id, changes, expectedRevision) };
   });
   app.delete("/api/items/:id", async (request) => {
     await library.deleteItem(request.user!.id, idOf(request));
@@ -376,16 +340,16 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     return receiveUpload(request, grant.ownerId, grant.archive);
   });
   app.get("/api/tags", async (request) => ({
-    tags: (await library.snapshot(request.user!.id)).tags,
+    tags: await library.listTags(request.user!.id),
   }));
   app.post("/api/tags", (request) =>
-    library.createTag(request.user!.id, tagInput.parse(request.body)),
+    library.createTag(request.user!.id, tagInputSchema.parse(request.body)),
   );
   app.patch("/api/tags/:id", (request) =>
     library.updateTag(
       request.user!.id,
       idOf(request),
-      tagInput.partial().parse(request.body),
+      tagInputSchema.partial().parse(request.body),
     ),
   );
   app.delete("/api/tags/:id", async (request) => {
@@ -530,6 +494,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
   });
   registerNotes(app, db);
   registerLibraryPages(app, db);
+  registerClassification(app, db);
   registerReplacement(app, db, library, storageRoot);
   registerHistory(app, db);
   registerYoutubeSync(app, db, library);

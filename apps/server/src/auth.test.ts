@@ -24,6 +24,11 @@ describe("account credentials", () => {
   it("hashes passwords, checks sessions and revokes personal tokens", async () => {
     const auth = new AuthService(ctx.db);
     const user = await auth.register("listener", "test-password-123");
+    const catalog = await ctx.library.snapshot(user.id);
+    expect(catalog.tags.filter(tag => tag.group === "source").map(tag => tag.name).sort())
+      .toEqual(["Аниме", "Визуальная новелла", "Игра", "Песня", "Сериал", "Фильм"]);
+    expect(catalog.tags.filter(tag => tag.group === "mood")).toHaveLength(4);
+    expect(catalog.tags.some(tag => ["Любимое", "OST"].includes(tag.name))).toBe(false);
     expect(
       (await ctx.db.user.findUniqueOrThrow({ where: { id: user.id } }))
         .passwordHash,

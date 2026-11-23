@@ -52,6 +52,8 @@ model Item {
   kind String
   duration Float?
   favorite Boolean @default(false)
+  performance String @default("unknown")
+  voices String @default("[]")
   note String?
   preferredSourceId String?
   createdAt DateTime @default(now())
@@ -103,6 +105,11 @@ model Tag {
   id String @id
   ownerId String
   name String
+  label String?
+  group String @default("extra")
+  aliases String @default("[]")
+  parentIds String @default("[]")
+  archived Boolean @default(false)
   color String @default("#b8a5ff")
   note String?
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
@@ -264,4 +271,16 @@ model YoutubeNotice {
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   playlist Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
   @@index([ownerId, readAt, createdAt])
+}
+
+model ClassificationBatch {
+  id String @id
+  ownerId String
+  digest String
+  revision Int
+  state String
+  packageJson String
+  journalJson String?
+  createdAt DateTime @default(now())
+  @@index([ownerId, createdAt])
 }

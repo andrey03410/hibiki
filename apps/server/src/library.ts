@@ -19,10 +19,15 @@ import type {
   LibraryDto,
   PlaylistDefinition,
   PlaylistDto,
-  TagDto,
+  TagInput,
+  ItemPatch,
+  Performance,
+  Voice,
 } from "@hibiki/contracts";
-import { playbackModeSchema, playlistDefinitionSchema } from "@hibiki/contracts";
+import { missingClassification, playbackModeSchema, playlistDefinitionSchema } from "@hibiki/contracts";
 import { collectReferences, resolvePlaylist, usesPrivateHistory } from "@hibiki/core";
+
+import { listTags, tagDto, saveTag } from "./taxonomy";
 
 export const itemInclude = {
   sources: { include: { file: true } },
@@ -34,6 +39,12 @@ export function requireHistoryAccess(definition: PlaylistDefinition, browser: bo
     browser || !usesPrivateHistory(definition),
     403, "browser_only", "Создавайте правила по личной истории в браузере",
   );
+}
+function ownedItemInclude(ownerId: string) {
+  return {
+    sources: { ...itemInclude.sources, where: { ownerId, OR: [{ fileId: null }, { file: { ownerId } }] } },
+    tags: { ...itemInclude.tags, where: { tag: { ownerId } } },
+  };
 }
 type IncludedItem = NonNullable<
   Awaited<ReturnType<Db["item"]["findFirst"]>>
@@ -49,11 +60,9 @@ export function itemDto(row: IncludedItem): ItemDto {
     preferredSourceId: row.preferredSourceId ?? undefined,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
-    tags: row.tags.map(({ tag }) => ({
-      id: tag.id,
-      name: tag.name,
-      color: tag.color,
-    })),
+    tags: row.tags.map(({ tag }) => tagDto(tag)),
+    performance: row.performance as Performance,
+    voices: JSON.parse(row.voices),
     sources: row.sources.map((source) => ({
       id: source.id,
       provider: source.provider,
@@ -172,10 +181,10 @@ export class LibraryService {
     const [items, tags, playlists, jobs] = await Promise.all([
       db.item.findMany({
         where: { ownerId },
-        include: itemInclude,
+        include: ownedItemInclude(ownerId),
         orderBy: { createdAt: "desc" },
       }),
-      db.tag.findMany({ where: { ownerId }, orderBy: { name: "asc" } }),
+      listTags(db, ownerId, true),
       db.playlist.findMany({
         where: { ownerId },
         include: { youtubeLink: { select: { playlistId: true } } },
@@ -189,7 +198,7 @@ export class LibraryService {
     ]);
     return {
       items: items.map(itemDto),
-      tags: tags.map(({ id, name, color }) => ({ id, name, color })),
+      tags,
       playlists: playlists.map(playlistDto),
       jobs: jobs.map(jobDto),
     };
@@ -197,7 +206,7 @@ export class LibraryService {
   async getItem(ownerId: string, id: string) {
     const row = await this.db.item.findFirst({
       where: { id, ownerId },
-      include: itemInclude,
+      include: ownedItemInclude(ownerId),
     });
     invariant(row, 404, "item_not_found", "Медиа не найдено");
     return itemDto(row);
@@ -530,42 +539,54 @@ export class LibraryService {
       reused: row.reused,
     };
   }
-  async updateItem(
-    ownerId: string,
-    id: string,
-    input: { title?: string; tagIds?: string[] },
-  ) {
-    await this.getItem(ownerId, id);
-    if (input.title !== undefined)
-      invariant(
-        input.title.trim() && input.title.length <= 500,
-        400,
-        "invalid_title",
-        "Название должно содержать от 1 до 500 символов",
-      );
-    const tagIds = input.tagIds ? [...new Set(input.tagIds)] : undefined;
-    if (tagIds)
-      invariant(
-        (await this.db.tag.count({
-          where: { id: { in: tagIds }, ownerId },
-        })) === tagIds.length,
-        404,
-        "tag_not_found",
-        "Один из тегов не найден",
-      );
-    await this.db.$transaction(async (tx) => {
-      await tx.item.update({
-        where: { id },
-        data: { title: input.title?.trim() },
-      });
-      if (tagIds) {
-        await tx.itemTag.deleteMany({ where: { itemId: id } });
-        await tx.itemTag.createMany({
-          data: tagIds.map((tagId) => ({ itemId: id, tagId })),
-        });
+  async updateItem(ownerId: string, id: string, input: ItemPatch) {
+    const [item] = await this.updateItems(ownerId, [{ ...input, id }]);
+    return item;
+  }
+
+  async updateItems(ownerId: string, changes: Array<ItemPatch & { id: string }>, expectedRevision?: string) {
+    return this.db.$transaction(async tx => {
+      if (expectedRevision !== undefined) {
+        const { libraryRevision } = await tx.user.findUniqueOrThrow({ where: { id: ownerId }, select: { libraryRevision: true } });
+        invariant(String(libraryRevision) === expectedRevision, 409, "library_changed", "Медиатека изменилась, обновите предпросмотр");
       }
-    });
-    return this.getItem(ownerId, id);
+      const results = [];
+      for (const input of changes) {
+        const { id } = input;
+        const current = await tx.item.findFirst({
+          where: { id, ownerId }, include: { tags: ownedItemInclude(ownerId).tags },
+        });
+        invariant(current, 404, "item_not_found", "Медиа не найдено");
+        if (input.title !== undefined)
+          invariant(input.title.trim() && input.title.length <= 500, 400, "invalid_title",
+            "Название должно содержать от 1 до 500 символов");
+        let tags = current.tags.map(({ tag }) => tag);
+        if (input.tagIds !== undefined) {
+          const ids = new Set([...input.tagIds, ...tags.filter(tag => tag.archived).map(tag => tag.id)]);
+          tags = await tx.tag.findMany({ where: { ownerId, id: { in: [...ids] } } });
+          invariant(tags.length === ids.size, 404, "tag_not_found", "Один из тегов не найден");
+          await tx.itemTag.deleteMany({ where: { itemId: id, tagId: { notIn: [...ids] } } });
+          const existing = new Set(current.tags.map(link => link.tagId));
+          const additions = [...ids].filter(tagId => !existing.has(tagId)).map(tagId => ({ itemId: id, tagId }));
+          if (additions.length) await tx.itemTag.createMany({ data: additions });
+        }
+        const performance = input.performance ?? current.performance as Performance;
+        const voices: Voice[] = performance === "vocal"
+          ? [...new Set<Voice>(input.voices ?? JSON.parse(current.voices))] : [];
+        if (input.completeClassification) {
+          const missing = missingClassification(tags.map(tagDto), performance, voices);
+          const names = { source: "источник", artist: "исполнитель", genre: "жанр", mood: "настроение", performance: "исполнение", voice: "голос" };
+          invariant(!missing.length, 422, "incomplete_classification",
+            "Для завершения разметки укажите: " + missing.map(field => names[field]).join(", "));
+        }
+        const row = await tx.item.update({
+          where: { id }, data: { title: input.title?.trim(), performance, voices: JSON.stringify(voices) },
+          include: ownedItemInclude(ownerId),
+        });
+        results.push(itemDto(row));
+      }
+      return results;
+    }, { timeout: 120_000 });
   }
   async deleteItem(ownerId: string, id: string) {
     await this.db.$transaction(async (tx) => {
@@ -609,79 +630,27 @@ export class LibraryService {
         await this.writeSettings(ownerId, JSON.parse(settings.json), tx);
     });
   }
-  async createTag(
-    ownerId: string,
-    input: { name: string; color?: string },
-  ): Promise<TagDto> {
-    const name = input.name.trim();
-    invariant(
-      name.length > 0 && name.length <= 80,
-      400,
-      "invalid_tag",
-      "Название тега: от 1 до 80 символов",
-    );
-    const color = input.color ?? "#b8a5ff";
-    invariant(
-      /^#[0-9a-f]{6}$/i.test(color),
-      400,
-      "invalid_color",
-      "Цвет должен быть в формате #RRGGBB",
-    );
-    const row = await this.db.tag.upsert({
-      where: { ownerId_name: { ownerId, name } },
-      create: { id: randomUUID(), ownerId, name, color },
-      update: {},
-    });
-    return { id: row.id, name: row.name, color: row.color };
+  listTags(ownerId: string, includeArchived = false) {
+    return listTags(this.db, ownerId, includeArchived);
   }
-  async updateTag(
-    ownerId: string,
-    id: string,
-    input: { name?: string; color?: string },
-  ) {
-    invariant(
-      await this.db.tag.findFirst({ where: { id, ownerId } }),
-      404,
-      "tag_not_found",
-      "Тег не найден",
-    );
-    if (input.name !== undefined)
-      invariant(
-        input.name.trim().length > 0 && input.name.length <= 80,
-        400,
-        "invalid_tag",
-        "Название тега: от 1 до 80 символов",
-      );
-    if (input.color !== undefined)
-      invariant(
-        /^#[0-9a-f]{6}$/i.test(input.color),
-        400,
-        "invalid_color",
-        "Некорректный цвет",
-      );
-    const row = await this.db.tag.update({
-      where: { id },
-      data: { name: input.name?.trim(), color: input.color },
-    });
-    return { id: row.id, name: row.name, color: row.color };
+  createTag(ownerId: string, input: TagInput) {
+    return this.db.$transaction(tx => saveTag(tx, ownerId, input));
+  }
+  updateTag(ownerId: string, id: string, input: Partial<TagInput>) {
+    return this.db.$transaction(tx => saveTag(tx, ownerId, input, id));
   }
   async deleteTag(ownerId: string, id: string) {
-    invariant(
-      await this.db.tag.findFirst({ where: { id, ownerId } }),
-      404,
-      "tag_not_found",
-      "Тег не найден",
-    );
-    const uses = (await this.snapshot(ownerId)).playlists.filter((p) =>
-      collectReferences(p.definition.rule).tagIds.includes(id),
-    );
-    invariant(
-      !uses.length,
-      409,
-      "tag_in_use",
-      `Тег используется в плейлистах: ${uses.map((p) => p.title).join(", ")}`,
-    );
-    await this.db.tag.delete({ where: { id } });
+    await this.db.$transaction(async tx => {
+      const tags = await listTags(tx, ownerId, true);
+      invariant(tags.some(tag => tag.id === id), 404, "tag_not_found", "Тег не найден");
+      invariant(!tags.some(tag => tag.parentIds?.includes(id)), 409, "tag_in_use", "Сначала переместите дочерние теги");
+      const playlists = await tx.playlist.findMany({ where: { ownerId } });
+      const uses = playlists.map(playlistDto).filter(p => collectReferences(p.definition.rule).tagIds.includes(id));
+      invariant(!uses.length, 409, "tag_in_use", `Тег используется в плейлистах: ${uses.map(p => p.title).join(", ")}`);
+      invariant(!await tx.youtubeLink.findFirst({ where: { ownerId, tagId: id } }),
+        409, "tag_in_use", "Тег используется в синхронизации YouTube");
+      await tx.tag.delete({ where: { id } });
+    });
   }
   async savePlaylist(
     ownerId: string,

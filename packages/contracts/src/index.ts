@@ -1,9 +1,22 @@
 import { z } from "zod";
 
+export const tagGroupSchema = z.enum(["source", "artist", "genre", "mood", "extra"]);
+export const performanceSchema = z.enum(["unknown", "ost", "vocal"]);
+export const voiceSchema = z.enum(["male", "female"]);
+export const missingGroupSchema = z.enum(["source", "artist", "genre", "mood", "performance", "voice"]);
+export type TagGroup = z.infer<typeof tagGroupSchema>;
+export type Performance = z.infer<typeof performanceSchema>;
+export type Voice = z.infer<typeof voiceSchema>;
+export type MissingGroup = z.infer<typeof missingGroupSchema>;
+
 export interface TagDto {
   id: string;
   name: string;
   color: string;
+  group?: TagGroup;
+  aliases?: string[];
+  parentIds?: string[];
+  archived?: boolean;
 }
 export interface SourceDto {
   id: string;
@@ -31,12 +44,14 @@ export interface ItemDto {
   tags: TagDto[];
   sources: SourceDto[];
   favorite?: boolean;
+  performance?: Performance;
+  voices?: Voice[];
   preferredSourceId?: string;
 }
 export type Rule =
   | { type: "items"; ids: string[] }
   | { type: "playlist"; id: string }
-  | { type: "tag"; id: string }
+  | { type: "tag"; id: string; descendants?: boolean }
   | { type: "favorite" }
   | {
       type: "history";
@@ -98,12 +113,17 @@ export interface LibraryPageDto {
   items: ItemDto[];
   total: number;
   nextCursor: string | null;
+  tagCounts?: Record<string, number>;
 }
 
 export const librarySearchSchema = z.object({
   query: z.string().default(""),
   kind: z.enum(["", "audio", "video"]).default(""),
   tagIds: z.array(z.string().min(1).max(256)).default([]),
+  tagMode: z.enum(["and", "or"]).optional(),
+  performanceFilter: z.enum(["", "ost", "male", "female", "vocal"]).optional(),
+  needsClassification: z.boolean().optional(),
+  missingGroup: missingGroupSchema.optional(),
   minDuration: z.string().default(""),
   maxDuration: z.string().default(""),
   addedFrom: z.string().default(""),
@@ -112,6 +132,7 @@ export const librarySearchSchema = z.object({
   availability: z.enum(["", "available", "unknown", "unavailable"]).default(""),
   favoriteOnly: z.boolean().default(false),
   sort: z.enum(["title-asc", "title-desc", "duration-asc", "duration-desc", "added-asc", "added-desc"]).default("added-desc"),
+  timeZone: z.string().max(128).optional(),
 });
 export type LibrarySearch = z.infer<typeof librarySearchSchema>;
 
@@ -160,7 +181,7 @@ const recursiveRuleSchema: z.ZodType<Rule> = z.lazy(() =>
       })
       .strict(),
     z.object({ type: z.literal("playlist"), id: idSchema }).strict(),
-    z.object({ type: z.literal("tag"), id: idSchema }).strict(),
+    z.object({ type: z.literal("tag"), id: idSchema, descendants: z.boolean().optional() }).strict(),
     z.object({ type: z.literal("favorite") }).strict(),
     z.object({
       type: z.literal("history"),
@@ -266,11 +287,24 @@ export const playlistDefinitionSchema = z
   })
   .strict() satisfies z.ZodType<PlaylistDefinition>;
 
+const tagCatalogFields = {
+  group: tagGroupSchema.optional(),
+  aliases: z.array(z.string().trim().min(1).max(200)).max(100).optional(),
+  parentIds: z.array(idSchema).max(100).optional(),
+  archived: z.boolean().optional(),
+};
+export const tagInputSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  color: z.string().regex(/^#[a-f0-9]{6}$/i).optional(),
+  ...tagCatalogFields,
+});
+export type TagInput = z.infer<typeof tagInputSchema>;
 export const tagSchema = z
   .object({
     id: idSchema,
     name: z.string().min(1).max(200),
     color: z.string().max(64),
+    ...tagCatalogFields,
   })
   .strict() satisfies z.ZodType<TagDto>;
 export const sourceSchema = z
@@ -302,6 +336,8 @@ export const itemSchema = z
     tags: z.array(tagSchema),
     sources: z.array(sourceSchema),
     favorite: z.boolean().optional(),
+    performance: performanceSchema.optional(),
+    voices: z.array(voiceSchema).max(2).optional(),
     preferredSourceId: idSchema.optional(),
   })
   .strict() satisfies z.ZodType<ItemDto>;
@@ -348,8 +384,12 @@ export const itemPatchSchema = z
     title: z.string().trim().min(1).max(1000).optional(),
     kind: mediaKindSchema.optional(),
     tagIds: z.array(idSchema).max(1000).optional(),
+    performance: performanceSchema.optional(),
+    voices: z.array(voiceSchema).max(2).optional(),
+    completeClassification: z.boolean().optional(),
   })
   .strict();
+export type ItemPatch = z.infer<typeof itemPatchSchema>;
 export const jobCreateSchema = z
   .object({
     kind: z.enum([
@@ -373,3 +413,51 @@ export const settingsSchema = z
     mode: playbackModeSchema.optional(),
   })
   .catchall(z.unknown()) satisfies z.ZodType<Settings>;
+
+export function missingClassification(tags: TagDto[], performance: Performance = "unknown", voices: readonly Voice[] = []): MissingGroup[] {
+  const groups = new Set(tags.filter(tag => !tag.archived).map(tag => tag.group));
+  const missing: MissingGroup[] = (["source", "artist", "genre", "mood"] as const).filter(group => !groups.has(group));
+  if (performance === "unknown") missing.push("performance");
+  if (performance === "vocal" && !voices.length) missing.push("voice");
+  return missing;
+}
+
+/** Validate an owner's complete graph, including parent edges retained for archived labels. */
+export function validateCatalog(tags: TagDto[]): void {
+  const byId = new Map(tags.map(tag => [tag.id, tag]));
+  if (byId.size !== tags.length) throw new Error("Повтор идентификатора тега");
+  const paths = new Set<string>();
+  const children = new Map<string, string[]>();
+  const indegree = new Map<string, number>();
+  for (const tag of tags) {
+    const parents = tag.parentIds ?? [];
+    if (new Set(parents).size !== parents.length) throw new Error("Повтор родителя");
+    for (const id of parents) {
+      const parent = byId.get(id);
+      if (!parent) throw new Error("Родительский тег не найден");
+      if (tag.group !== "source" || parent.group !== "source")
+        throw new Error("Иерархия доступна только в разделе «Источник»");
+      if (!tag.archived && parent.archived) throw new Error("У активного тега не может быть архивного родителя");
+      const siblings = children.get(id) ?? [];
+      siblings.push(tag.id);
+      children.set(id, siblings);
+    }
+    indegree.set(tag.id, parents.length);
+    if (!tag.archived) {
+      for (const parent of parents.length ? parents : [null]) {
+        const path = JSON.stringify([tag.group ?? "extra", parent, tag.name.trim().normalize("NFC").toLowerCase()]);
+        if (paths.has(path)) throw new Error("Тег с таким названием уже есть в этой ветке");
+        paths.add(path);
+      }
+    }
+  }
+  const roots = tags.filter(tag => !indegree.get(tag.id)).map(tag => tag.id);
+  for (let i = 0; i < roots.length; i++) {
+    for (const child of children.get(roots[i]) ?? []) {
+      const remaining = indegree.get(child)! - 1;
+      indegree.set(child, remaining);
+      if (!remaining) roots.push(child);
+    }
+  }
+  if (roots.length !== tags.length) throw new Error("Цикл в дереве источников");
+}
