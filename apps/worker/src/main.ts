@@ -37,6 +37,17 @@ if (process.argv.includes("--diagnostics")) {
       error instanceof Error ? error.message : String(error),
     );
   });
+  const playlistCounts = (async () => {
+    while (!abort.signal.aborted) {
+      try {
+        if (await library.refreshDuePlaylistCounts(new Date(), abort.signal)) continue;
+      } catch (error) {
+        if (abort.signal.aborted) break;
+        console.error("Ошибка обновления числа записей:", error instanceof Error ? error.message : String(error));
+      }
+      await setTimeout(3000, undefined, { signal: abort.signal }).catch(() => {});
+    }
+  })();
   const syncChecks = (async () => {
     while (!abort.signal.aborted) {
       try {
@@ -71,7 +82,7 @@ if (process.argv.includes("--diagnostics")) {
     }
   } finally {
     abort.abort();
-    await Promise.all([jobs.stop(), syncChecks, audioTracks]);
+    await Promise.all([jobs.stop(), syncChecks, audioTracks, playlistCounts]);
     await db.$disconnect();
   }
 }

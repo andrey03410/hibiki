@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   playbackSources,
+  playbackVolume,
   playableVideoSource,
   canStartSelectedItem,
   sourceLoadPosition,
@@ -12,6 +13,7 @@ import {
   playbackKind,
   enterPlayerFullscreen,
   createFullscreenIdleTimer,
+  createVideoClickGesture,
   startPlaybackQueue,
   queuePlaylistInput,
   togglePlaybackShuffle,
@@ -519,13 +521,25 @@ describe("watch player controls", () => {
     expect(playbackShortcut({ key: "K" })).toBe("toggle");
     expect(playbackShortcut({ key: "f" })).toBe("fullscreen");
     expect(playbackShortcut({ key: "m" })).toBe("mute");
-    expect(playbackShortcut({ key: "ArrowLeft" })).toBe("backward");
-    expect(playbackShortcut({ key: "ArrowRight" })).toBe("forward");
+    expect(playbackShortcut({ key: "ArrowLeft" })).toBe("backFive");
+    expect(playbackShortcut({ key: "ArrowRight" })).toBe("forwardFive");
     expect(playbackShortcut({ key: "f", ctrlKey: true })).toBeNull();
     expect(playbackShortcut({ key: "k", metaKey: true })).toBeNull();
     expect(playbackShortcut({ key: "ArrowLeft", altKey: true })).toBeNull();
     expect(playbackShortcut({ key: " ", repeat: true })).toBeNull();
     expect(playbackShortcut({ key: "x" })).toBeNull();
+  });
+  it("uses physical letters in Russian and keeps native control activation", () => {
+    expect(playbackShortcut({ key: "л", code: "KeyK", target: {tagName:"BUTTON"} }, true)).toBe("toggle");
+    expect(playbackShortcut({ key: "а", code: "KeyF", target: {tagName:"BUTTON"} }, true)).toBe("fullscreen");
+    expect(playbackShortcut({ key: " ", code: "Space", target: {tagName:"BUTTON"} }, true)).toBeNull();
+    expect(playbackShortcut({ key: "л", code: "KeyK", target: {tagName:"INPUT"} }, true)).toBeNull();
+    expect(playbackShortcut({ key: "3", code: "Digit3" })).toBe(0.3);
+    expect(playbackShortcut({ key: "0", code: "Digit0" })).toBe(0);
+    expect(playbackShortcut({ key: "ArrowUp" })).toBe("louder");
+    expect(playbackShortcut({ key: "ArrowDown" })).toBe("quieter");
+    expect(playbackShortcut({ key: "о", code: "KeyJ" })).toBe("backward");
+    expect(playbackShortcut({ key: "д", code: "KeyL" })).toBe("forward");
   });
   it("shows the active source artwork before other source thumbnails", () => {
     const item = {
@@ -577,11 +591,12 @@ describe("fullscreen controls inactivity", () => {
     vi.useFakeTimers();
     const states: boolean[] = [];
     const timer = createFullscreenIdleTimer((idle) => states.push(idle));
-    expect(states).toEqual([false]);
+    expect(states).toEqual([true]);
+    timer.activity();
     vi.advanceTimersByTime(2999);
-    expect(states).toEqual([false]);
+    expect(states).toEqual([true, false]);
     vi.advanceTimersByTime(1);
-    expect(states).toEqual([false, true]);
+    expect(states).toEqual([true, false, true]);
     timer.dispose();
   });
   it("reveals controls on activity and replaces the previous inactivity deadline", () => {
@@ -591,14 +606,14 @@ describe("fullscreen controls inactivity", () => {
     vi.advanceTimersByTime(2000);
     timer.activity();
     vi.advanceTimersByTime(2999);
-    expect(states).toEqual([false, false]);
+    expect(states).toEqual([true, false]);
     vi.advanceTimersByTime(1);
-    expect(states).toEqual([false, false, true]);
+    expect(states).toEqual([true, false, true]);
     timer.activity();
-    expect(states).toEqual([false, false, true, false]);
+    expect(states).toEqual([true, false, true, false]);
     timer.dispose();
   });
-  it("cancels pending work on exit or item change and cannot restart a disposed timer", () => {
+  it("cancels pending work on exit and cannot restart a disposed timer", () => {
     vi.useFakeTimers();
     const states: boolean[] = [];
     const timer = createFullscreenIdleTimer((idle) => states.push(idle));
@@ -606,7 +621,68 @@ describe("fullscreen controls inactivity", () => {
     timer.dispose();
     timer.activity();
     vi.advanceTimersByTime(6000);
-    expect(states).toEqual([false]);
+    expect(states).toEqual([true]);
     expect(vi.getTimerCount()).toBe(0);
   });
+});
+
+describe("video click gesture", () => {
+  afterEach(() => vi.useRealTimers());
+  it("honors a longer OS double-click interval and restores the initial playback state", () => {
+    vi.useFakeTimers();
+    const gesture = createVideoClickGesture();
+    let paused = true;
+    const toggle = vi.fn(() => { paused = !paused; });
+    const full = vi.fn();
+    gesture.click(1, toggle, full);
+    vi.advanceTimersByTime(900);
+    expect(toggle).not.toHaveBeenCalled();
+    gesture.click(2, toggle, full);
+    vi.runAllTimers();
+    expect(paused).toBe(true);
+    expect(toggle).not.toHaveBeenCalled();
+    expect(full).toHaveBeenCalledOnce();
+  });
+  it("applies only fullscreen for a double click and cancels a pending click on unmount", () => {
+    vi.useFakeTimers();
+    const single = vi.fn(), double = vi.fn();
+    const gesture = createVideoClickGesture();
+    gesture.click(1, single, double);
+    vi.advanceTimersByTime(450);
+    gesture.click(2, single, double);
+    vi.runAllTimers();
+    expect(single).not.toHaveBeenCalled();
+    expect(double).toHaveBeenCalledOnce();
+    gesture.click(1, single, double);
+    vi.runAllTimers();
+    gesture.click(1, single, double);
+    gesture.cancel();
+    vi.runAllTimers();
+    expect(single).toHaveBeenCalledOnce();
+  });
+});
+
+it("remembers the muted account's previous level on reload, independently of stale local settings", () => {
+  const settings = restorePlayback({queue: ["track"], volume: 0, lastNonzeroVolume: 0.35});
+  const cached = {...settings, queue: ["old"], serverSignature: playbackSettingsSignature(settings)};
+  expect(settings.lastNonzeroVolume).toBe(0.35);
+  expect(restoreCachedPlayback({...settings, lastNonzeroVolume: 0.2}, cached)).toMatchObject({
+    queue: ["track"], volume: 0, lastNonzeroVolume: 0.2,
+  });
+});
+
+it("preserves an existing fractional account volume and its legacy cache signature", () => {
+  const initial = {queue: ["track"], volume: 0.125};
+  const legacySignature = JSON.stringify([["track"], 0, 0, 0.125, "off", false, []]);
+  expect(playbackSettingsSignature(restorePlayback(initial))).toBe(legacySignature);
+  expect(restoreCachedPlayback(initial, {...initial, position: 12, serverSignature: legacySignature})).toMatchObject({
+    position: 12, volume: 0.125,
+  });
+});
+
+it("reaches mute after six five-point decreases from 30% and remembers the last audible step", () => {
+  let level = playbackVolume(0.3);
+  for (let i = 0; i < 6; i++) level = playbackVolume(level.volume - 0.05, level.lastNonzeroVolume);
+  expect(level.volume).toBe(0);
+  expect(level.lastNonzeroVolume).toBeCloseTo(0.05);
 });

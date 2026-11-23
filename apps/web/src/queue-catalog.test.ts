@@ -33,3 +33,72 @@ it("re-evaluates the next entry when play-next changes the queue during hydratio
   release();
   expect(await advance).toMatchObject({index:1, state:{queue:["one","inserted","two"],volume:0.2}});
 });
+
+function audioEntry(id: string) {
+  return {id, kind: "audio", sources: [{provider:"local", streamUrl:"/files/" + id, status:"available"}]} as ItemDto;
+}
+
+it("uses known positions immediately and waits for the tail before wrapping", async () => {
+  const catalog = new QueueCatalog(async ids => ids.map(audioEntry));
+  let state = restorePlayback({queue: ["a", "b"], queueIndex: 0, repeat: "all"});
+  let release!: () => void;
+  let tail: Promise<void> | undefined = new Promise(resolve => { release = resolve; });
+  const advance = () => catalog.nextInQueue(() => state, 1, false, new Set(), () => true, () => tail);
+  expect((await advance())?.index).toBe(1);
+  state = {...state, queueIndex: 1};
+  let result: number | undefined;
+  const boundary = advance().then(target => {result = target?.index;});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(result).toBeUndefined();
+  state = {...state, queue: ["a", "b", "c"]};
+  tail = undefined;
+  release();
+  await boundary;
+  expect(result).toBe(2);
+});
+
+it("a late first queue cannot replace the second, and retry resumes boundary navigation", async () => {
+  const { LibraryQueueLoad } = await import("./queue-catalog");
+  const load = new LibraryQueueLoad();
+  let release!: (ids: string[]) => void;
+  const applied: string[][] = [];
+  load.start(() => new Promise(resolve => {release = resolve;}), ids => {applied.push(ids);});
+  const oldTail = load.tail;
+  let failed = true;
+  load.start(async () => {
+    if (failed) throw new Error("offline");
+    return ["new", "tail"];
+  }, ids => {applied.push(ids);});
+  const newTail = load.tail;
+  await oldTail;
+  release(["old"]);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(load.snapshot()).toBe("error");
+  expect(applied).toEqual([]);
+  failed = false;
+  load.retry();
+  await newTail;
+  expect(load.snapshot()).toBe("complete");
+  expect(applied).toEqual([["new", "tail"]]);
+});
+
+it("fills the complete order around the item playing now without resetting its attempt or position", async () => {
+  const { completeLibraryOrder } = await import("./queue-catalog");
+  const state = restorePlayback({queue:["first", "current"], queueIndex:1, position:18, volume:0.2});
+  expect({...state, ...completeLibraryOrder(state, ["inserted", "first", "current", "tail"])}).toEqual({
+    ...state, queue:["inserted", "first", "current", "tail"], queueIndex:2
+  });
+  expect(completeLibraryOrder(state, ["first", "tail"])).toEqual({queue:["first", "current", "tail"], queueIndex:1});
+});
+
+it("a natural advance keeps a pending selection; a later command supersedes it", async () => {
+  const {QueueIntents} = await import("./queue-catalog");
+  const intents = new QueueIntents();
+  const selecting = intents.command();
+  const natural = intents.advance();
+  expect(intents.selection).toBe(selecting);
+  expect(intents.navigation).toBe(natural);
+  const later = intents.command();
+  expect(intents.selection).toBe(later);
+  expect(intents.navigation).not.toBe(natural);
+});

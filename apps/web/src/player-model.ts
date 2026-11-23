@@ -20,6 +20,7 @@ export interface PlaybackSource {
 export interface PlaybackSettings extends QueueOrder {
   position: number;
   volume: number;
+  lastNonzeroVolume?: number;
   repeat: "off" | "all" | "one";
   shuffle: boolean;
   mode: PlaybackMode;
@@ -268,6 +269,14 @@ export function queuePlaylistInput(
   };
 }
 
+export function playbackVolume(value: number, previous = 0.8) {
+  const bounded = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0.8;
+  // Keep fractional legacy preferences, but snap arithmetic noise from repeated 5% steps.
+  const percentage = Math.round(bounded * 100) / 100;
+  const volume = Math.abs(bounded - percentage) < Number.EPSILON ? percentage : bounded;
+  return {volume, lastNonzeroVolume: volume || (previous > 0 && previous <= 1 ? previous : 0.8)};
+}
+
 export function restorePlayback(
   settings: Partial<PlaybackSettings>,
   items?: PlayableItem[],
@@ -285,10 +294,7 @@ export function restorePlayback(
     queue,
     queueIndex: Math.max(0, retained),
     position: retained >= 0 && Number.isFinite(settings.position) ? Math.max(0, settings.position!) : 0,
-    volume: Math.min(
-      1,
-      Math.max(0, Number.isFinite(settings.volume) ? settings.volume! : 0.8),
-    ),
+    ...playbackVolume(settings.volume ?? 0.8, settings.lastNonzeroVolume),
     repeat:
       settings.repeat === "all" || settings.repeat === "one"
         ? settings.repeat
@@ -308,12 +314,15 @@ export function restorePlayback(
 
 export function playbackSettingsSignature(settings: PlaybackSettings): string {
   const { queue, queueIndex, position, volume, repeat, shuffle, mode, queuePlaylistIds } = settings;
-  const signature = [
+  const signature: unknown[] = [
     queue, queueIndex, position, volume, repeat, shuffle,
     Object.entries(queuePlaylistIds ?? {}).sort(),
   ];
   // Preserve the default signature used by older cached player state.
-  return JSON.stringify(mode === "audio" ? [...signature, mode] : signature);
+  if (mode === "audio") signature.push(mode);
+  if (!volume && settings.lastNonzeroVolume && settings.lastNonzeroVolume !== 0.8)
+    signature.push(settings.lastNonzeroVolume);
+  return JSON.stringify(signature);
 }
 
 export function reconcileQueuePlaylistIds(
@@ -409,37 +418,80 @@ export function sourceLoadPosition(
 
 interface ShortcutEvent {
   key: string;
+  code?: string;
   ctrlKey?: boolean;
   metaKey?: boolean;
   altKey?: boolean;
+  shiftKey?: boolean;
   repeat?: boolean;
+  isComposing?: boolean;
   target?: {
     tagName?: string;
     isContentEditable?: boolean;
     closest?: (selectors: string) => unknown;
   } | null;
 }
-export function playbackShortcut(event: ShortcutEvent):
-  | "toggle" | "fullscreen" | "mute" | "backward" | "forward" | null {
+
+export function playbackShortcut(event: ShortcutEvent, onTransportButton = false) {
   const target = event.target;
-  if (
-    event.ctrlKey || event.metaKey || event.altKey || event.repeat ||
-    target?.isContentEditable ||
-    /^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(target?.tagName ?? "") ||
-    target?.closest?.("input, textarea, select, button, a, [contenteditable]:not([contenteditable='false']), [role='textbox'], [role='slider']")
-  ) return null;
-  switch (event.key.toLowerCase()) {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || event.isComposing ||
+      target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT|A)$/.test(target?.tagName ?? "") ||
+      target?.closest?.("input, textarea, select, a, [contenteditable]:not([contenteditable='false']), [role='textbox'], [role='slider']")) return null;
+  const key = event.code?.match(/^Key([A-Z])$/)?.[1]?.toLowerCase() ?? event.key.toLowerCase();
+  if ((target?.tagName === "BUTTON" || target?.closest?.("button, [role='button']")) &&
+      (!onTransportButton || key === " ")) return null;
+  if (event.repeat && [" ", "k", "f", "m"].includes(key)) return null;
+  if (/^[0-9]$/.test(key)) return Number(key) / 10;
+  switch (key) {
     case " ":
     case "k": return "toggle";
     case "f": return "fullscreen";
     case "m": return "mute";
-    case "arrowleft":
+    case "arrowleft": return "backFive";
+    case "arrowright": return "forwardFive";
+    case "arrowup": return "louder";
+    case "arrowdown": return "quieter";
     case "j": return "backward";
-    case "arrowright":
     case "l": return "forward";
     default: return null;
   }
 }
+
+// Delay only clicks on the video. Transport buttons and keys act immediately.
+export function createVideoClickGesture() {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let pending: (() => void) | undefined;
+  let applied = false;
+  function cancel() {
+    clearTimeout(timer);
+    pending = undefined;
+    applied = false;
+  }
+  return {
+    cancel,
+    click(detail: number, single: () => void, double: () => void) {
+      if (detail > 0 && detail % 2 === 0) {
+        // Browsers expose the OS click count, but not the user's time setting.
+        // A slow OS double click can arrive after the first action was applied.
+        const restore = applied;
+        cancel();
+        if (restore) single();
+        double();
+        return;
+      }
+      const previous = pending;
+      cancel();
+      previous?.();
+      pending = single;
+      timer = setTimeout(() => {
+        pending = undefined;
+        applied = true;
+        single();
+      }, 1000);
+    },
+  };
+}
+
 export function playbackArtwork(
   item?: { sources: { thumbnail?: string | null }[] },
   source?: { thumbnail?: string | null },
@@ -492,7 +544,7 @@ export function createFullscreenIdleTimer(onIdle: (idle: boolean) => void) {
     onIdle(false);
     timer = setTimeout(() => onIdle(true), 3000);
   }
-  activity();
+  onIdle(true);
   return {
     activity,
     dispose() {

@@ -105,11 +105,18 @@ export interface LibraryDto {
   playlists: PlaylistDto[];
   jobs: JobDto[];
 }
+export interface PlaylistSummaryDto extends Omit<PlaylistDto, "definition"> {
+  manual: boolean;
+  trackCount: number | null;
+}
 export interface LibraryOverviewDto extends Omit<LibraryDto, "items"> {
   total: number;
   tagCounts: Record<string, number>;
   archivedTagNames?: Record<string, string>;
   revision: string;
+}
+export interface LibraryCardOverviewDto extends Omit<LibraryOverviewDto, "playlists"> {
+  playlists: PlaylistSummaryDto[];
 }
 export interface LibraryPageDto {
   items: ItemDto[];
@@ -153,6 +160,7 @@ export type RepeatMode = "off" | "all" | "one";
 export type PlaybackMode = z.infer<typeof playbackModeSchema>;
 export interface Settings {
   volume: number;
+  lastNonzeroVolume?: number;
   repeat: RepeatMode;
   shuffle: boolean;
   queue: string[];
@@ -408,6 +416,7 @@ export const jobCreateSchema = z
 export const settingsSchema = z
   .object({
     volume: z.number().finite().min(0).max(1),
+    lastNonzeroVolume: z.number().finite().positive().max(1).optional(),
     repeat: repeatModeSchema,
     shuffle: z.boolean(),
     queue: z.array(idSchema).max(100_000),

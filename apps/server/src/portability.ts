@@ -222,6 +222,7 @@ const safeSettings = (value: unknown): Settings => {
     ...Object.fromEntries(
       [
         "volume",
+        "lastNonzeroVolume",
         "repeat",
         "shuffle",
         "queue",

@@ -15,6 +15,7 @@ export async function api<T = any>(
   path: string,
   method = "GET",
   body?: unknown,
+  priority?: RequestPriority,
 ): Promise<T> {
   const owner = workspaceOwner;
   const headers = new Headers();
@@ -22,6 +23,7 @@ export async function api<T = any>(
   if (body !== undefined && !(body instanceof FormData)) headers.set("Content-Type", "application/json");
   const response = await fetch(`/api${path}`, {
     method,
+    priority,
     credentials: "same-origin",
     headers,
     body:

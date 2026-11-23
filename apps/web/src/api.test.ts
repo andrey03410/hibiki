@@ -20,3 +20,10 @@ it("sends a JSON body with the matching header", async () => {
   expect(request.headers.get("content-type")).toBe("application/json");
   expect(await request.json()).toEqual({ mode: "audio" });
 });
+
+it("lets the full library order yield network priority to the selected media file", async () => {
+  const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(Response.json({ids: []}));
+  vi.stubGlobal("fetch", fetch);
+  await api("/library/ids", "POST", {}, "low");
+  expect(fetch.mock.calls[0]?.[1]?.priority).toBe("low");
+});

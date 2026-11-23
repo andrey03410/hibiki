@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { ItemArtwork } from "./ItemArtwork";
 
 it("requests the library rendition with background image loading hints", () => {
@@ -34,5 +34,18 @@ it("keeps a fallback for missing artwork or an unrecognized external image", () 
     const markup = renderToStaticMarkup(createElement(ItemArtwork, { kind: "video", source }));
     expect(markup).not.toContain("<img");
     expect(markup).toContain("<svg");
+  }
+});
+
+it("leaves offscreen thumbnail requests unscheduled until their rows approach the viewport", () => {
+  vi.stubGlobal("IntersectionObserver", class {});
+  try {
+    const markup = renderToStaticMarkup(createElement(ItemArtwork, {
+      kind: "audio", source: { provider: "local", thumbnail: "/api/items/music/artwork" },
+    }));
+    expect(markup).toContain("<img");
+    expect(markup).not.toContain('src=');
+  } finally {
+    vi.unstubAllGlobals();
   }
 });

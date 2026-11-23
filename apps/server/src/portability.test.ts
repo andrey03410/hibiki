@@ -271,7 +271,8 @@ describe("portable library", () => {
       create: {
         userId: ctx.userId,
         json: JSON.stringify({
-          volume: 0.3,
+          volume: 0,
+          lastNonzeroVolume: 0.35,
           repeat: "all",
           shuffle: true,
           queue: [item.id],
@@ -314,6 +315,7 @@ describe("portable library", () => {
     );
     expect(settings.queue).toEqual([imported.items[0].id]);
     expect(settings.originalQueue).toEqual([imported.items[0].id]);
+    expect(settings).toMatchObject({volume: 0, lastNonzeroVolume: 0.35});
     expect(settings.shuffle).toBe(true);
     expect(settings.mode).toBe("audio");
     for (const playlist of imported.playlists)

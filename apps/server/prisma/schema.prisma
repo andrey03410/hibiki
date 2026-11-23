@@ -24,6 +24,7 @@ model User {
   items Item[]
   tags Tag[]
   playlists Playlist[]
+  playlistCountWork PlaylistCountWork?
   jobs Job[]
   setting Setting?
   listeningAttempts ListeningAttempt[]
@@ -142,6 +143,8 @@ model Playlist {
   title String
   description String @default("")
   definitionJson String
+  manual Boolean @default(false)
+  trackCount Int?
   revision Int @default(1)
   note String?
   createdAt DateTime @default(now())
@@ -150,6 +153,15 @@ model Playlist {
   youtubeLink YoutubeLink?
   youtubeNotices YoutubeNotice[]
   @@index([ownerId])
+}
+
+model PlaylistCountWork {
+  ownerId String @id
+  version Int @default(0)
+  dueAt BigInt?
+  watchHistory Boolean @default(true)
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  @@index([dueAt, ownerId])
 }
 
 model Job {

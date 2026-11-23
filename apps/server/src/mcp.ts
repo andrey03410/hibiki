@@ -343,7 +343,7 @@ export function buildMcp(ownerId: string, s: Services) {
     "playlists_list",
     "Свои ручные и составные плейлисты",
     {},
-    async () => ({ playlists: (await s.library.snapshot(ownerId)).playlists }),
+    async () => ({ playlists: await s.library.listPlaylists(ownerId) }),
     true,
   );
   tool(

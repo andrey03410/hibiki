@@ -9,6 +9,7 @@
 | [06. Навигация по медиатеке и управление очередью](06-library-navigation/README.md) | `merged` | [PR #6](https://github.com/andrey03410/hibiki/pull/6), 261 тест и живая приёмка |
 | [08. Прослушивание и прокрутка медиатеки](08-library-listening/README.md) | `merged` | [PR #8](https://github.com/andrey03410/hibiki/pull/8), выдача по 100 записей, аудиозапуск, малые обложки и меню тегов |
 | [09. Навигация по тегам медиатеки](09-library-tag-navigation/README.md) | `merged` | [PR #9](https://github.com/andrey03410/hibiki/pull/9), каталог, правая панель, разметка, предпросмотр и отмена |
+| [11. Запуск и управление воспроизведением](11-player-feedback/README.md) | `merged` | [PR #12](https://github.com/andrey03410/hibiki/pull/12), шесть решений по воспроизведению и плейлистам |
 
 Процесс — [feature](../../.claude/skills/feature/SKILL.md).
 
