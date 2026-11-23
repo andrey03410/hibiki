@@ -2,9 +2,9 @@
 id: 12
 title: Обложки и быстрый запуск плейлистов
 track: product
-stage: build
+stage: review
 branch: codex/12-playlist-loading
-pr:
+pr: https://github.com/andrey03410/hibiki/pull/14
 started: 2026-11-23
 merged:
 ---
@@ -18,5 +18,5 @@ merged:
 - [x] [Бриф](brief.md)
 - [x] [Продуктовая постановка](product.md)
 - [x] [Технические решения](tech.md) и [план](plan.md)
-- [ ] Реализация и [проверка](verify.md)
+- [x] Реализация и [проверка](verify.md)
 - [ ] Автономная приёмка и вливание
