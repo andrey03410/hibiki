@@ -628,12 +628,27 @@ describe("fullscreen controls inactivity", () => {
 
 describe("video click gesture", () => {
   afterEach(() => vi.useRealTimers());
+  it("honors a longer OS double-click interval and restores the initial playback state", () => {
+    vi.useFakeTimers();
+    const gesture = createVideoClickGesture();
+    let paused = true;
+    const toggle = vi.fn(() => { paused = !paused; });
+    const full = vi.fn();
+    gesture.click(1, toggle, full);
+    vi.advanceTimersByTime(900);
+    expect(toggle).not.toHaveBeenCalled();
+    gesture.click(2, toggle, full);
+    vi.runAllTimers();
+    expect(paused).toBe(true);
+    expect(toggle).not.toHaveBeenCalled();
+    expect(full).toHaveBeenCalledOnce();
+  });
   it("applies only fullscreen for a double click and cancels a pending click on unmount", () => {
     vi.useFakeTimers();
     const single = vi.fn(), double = vi.fn();
     const gesture = createVideoClickGesture();
     gesture.click(1, single, double);
-    vi.advanceTimersByTime(120);
+    vi.advanceTimersByTime(450);
     gesture.click(2, single, double);
     vi.runAllTimers();
     expect(single).not.toHaveBeenCalled();

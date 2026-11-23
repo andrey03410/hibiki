@@ -1,6 +1,18 @@
 import type { ItemDto, PlaybackMode } from "@hibiki/contracts";
 import { playbackSources, type PlaybackSettings } from "./player-model";
 
+export class QueueIntents {
+  selection = 0;
+  navigation = 0;
+  command() {
+    this.selection = ++this.navigation;
+    return this.selection;
+  }
+  advance() {
+    return ++this.navigation;
+  }
+}
+
 // Keep boundary navigation waiting across a failed request and an explicit retry.
 // Starting another queue releases waiters and invalidates the old response.
 export class LibraryQueueLoad {

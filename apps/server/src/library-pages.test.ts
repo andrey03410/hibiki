@@ -372,3 +372,49 @@ it("keeps definitions in overview responses for tabs opened before summary cards
   const oldTab = await app.inject({ url: "/api/library/overview", headers: { cookie } });
   expect(oldTab.json().playlists[0].definition).toEqual(definition);
 });
+
+it("keeps unrelated counts fresh when editing a child pushes a parent beyond the depth limit", async () => {
+  const { db, library, userId: ownerId } = ctx;
+  await db.item.create({ data: track("a") });
+  const definition = (rule: Rule): PlaylistDefinition => ({ version: 1, sort: "source", rule });
+  await db.playlist.createMany({ data: Array.from({ length: 40 }, (_, i) => ({
+    id: "chain-" + i, ownerId, title: "chain-" + i, definitionJson: JSON.stringify(definition(
+      i === 0 ? { type: "items", ids: [] } : { type: "playlist", id: "chain-" + (i - 1) })),
+  })) });
+  const healthy = await library.savePlaylist(ownerId, { title: "Вся медиатека", definition: definition({ type: "filter" }) });
+  const counts = async () => Object.fromEntries((await overview()).json().playlists.map(
+    (p: PlaylistSummaryDto) => [p.id, p.trackCount]));
+  await library.refreshDuePlaylistCounts();
+  expect(await counts()).toMatchObject({ "chain-39": 0, [healthy.id]: 1 });
+  await library.savePlaylist(ownerId, { title: "Нижний", definition: definition({
+    type: "union", rules: [{ type: "items", ids: ["a"] }] }),
+  }, "chain-0");
+  await db.item.create({ data: track("b") });
+  await library.refreshDuePlaylistCounts();
+  expect(await counts()).toMatchObject({ "chain-38": 1, "chain-39": null, [healthy.id]: 2 });
+  expect(await library.refreshDuePlaylistCounts()).toBe(false);
+  await library.savePlaylist(ownerId, { title: "Нижний", definition: definition({ type: "items", ids: ["b"] }) }, "chain-0");
+  await library.refreshDuePlaylistCounts();
+  expect(await counts()).toMatchObject({ "chain-39": 1, [healthy.id]: 2 });
+});
+
+it.each(["{", "{}"])("isolates an unreadable stored definition and its parents until repaired (%s)", async json => {
+  const { db, library, userId: ownerId } = ctx;
+  const definition: PlaylistDefinition = { version: 1, sort: "source", rule: { type: "filter" } };
+  const good = await library.savePlaylist(ownerId, { title: "Обычный", definition });
+  const bad = await library.savePlaylist(ownerId, { title: "Испорченный", definition });
+  const parent = await library.savePlaylist(ownerId, { title: "Родитель", definition: {
+    ...definition, rule: { type: "playlist", id: bad.id },
+  } });
+  const counts = async () => Object.fromEntries((await overview()).json().playlists.map(
+    (p: PlaylistSummaryDto) => [p.id, p.trackCount]));
+  await library.refreshDuePlaylistCounts();
+  expect(await counts()).toEqual({ [good.id]: 0, [bad.id]: 0, [parent.id]: 0 });
+  await db.playlist.update({ where: { id: bad.id }, data: { definitionJson: json } });
+  await db.item.create({ data: track("a") });
+  await library.refreshDuePlaylistCounts();
+  expect(await counts()).toEqual({ [good.id]: 1, [bad.id]: null, [parent.id]: null });
+  await db.playlist.update({ where: { id: bad.id }, data: { definitionJson: JSON.stringify(definition) } });
+  await library.refreshDuePlaylistCounts();
+  expect(await counts()).toEqual({ [good.id]: 1, [bad.id]: 1, [parent.id]: 1 });
+});

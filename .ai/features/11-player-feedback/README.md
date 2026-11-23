@@ -2,11 +2,11 @@
 id: 11
 title: Запуск и управление воспроизведением
 track: product
-stage: build
+stage: merged
 branch: codex/11-player-feedback
-pr:
+pr: https://github.com/andrey03410/hibiki/pull/12
 started: 2026-11-23
-merged:
+merged: 2026-11-23
 ---
 
 # 11. Запуск и управление воспроизведением
@@ -18,5 +18,5 @@ merged:
 - [x] [Бриф](brief.md)
 - [x] [Продуктовая постановка](product.md)
 - [x] [Технические решения](tech.md) и [план](plan.md)
-- [ ] Реализация и проверка
-- [ ] Приёмка владельцем и вливание
+- [x] Реализация и [проверка](verify.md)
+- [x] Автономная приёмка и [вливание](https://github.com/andrey03410/hibiki/pull/12)

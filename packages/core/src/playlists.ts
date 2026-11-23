@@ -234,13 +234,15 @@ function sortSelection(
   return new Map(ids.map((id) => [id, selected.get(id)!]));
 }
 
+export class InvalidPlaylistError extends Error {}
+
 export function resolvePlaylist(
   definition: PlaylistDefinition,
   library: PlaylistLibrary,
   editingPlaylistId?: string,
 ): ResolvedPlaylist {
   const validation = validatePlaylist(definition, library, editingPlaylistId);
-  if (!validation.valid) throw new Error(validation.issues.join("; "));
+  if (!validation.valid) throw new InvalidPlaylistError(validation.issues.join("; "));
   const items = new Map(library.items.map((item) => [item.id, item]));
   const tags = new Map(library.tags.map((tag) => [tag.id, tag]));
   const playlists = new Map(

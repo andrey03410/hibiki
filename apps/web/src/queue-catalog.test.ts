@@ -90,3 +90,15 @@ it("fills the complete order around the item playing now without resetting its a
   });
   expect(completeLibraryOrder(state, ["first", "tail"])).toEqual({queue:["first", "current", "tail"], queueIndex:1});
 });
+
+it("a natural advance keeps a pending selection; a later command supersedes it", async () => {
+  const {QueueIntents} = await import("./queue-catalog");
+  const intents = new QueueIntents();
+  const selecting = intents.command();
+  const natural = intents.advance();
+  expect(intents.selection).toBe(selecting);
+  expect(intents.navigation).toBe(natural);
+  const later = intents.command();
+  expect(intents.selection).toBe(later);
+  expect(intents.navigation).not.toBe(natural);
+});

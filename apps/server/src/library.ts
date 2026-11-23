@@ -4,6 +4,7 @@ import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Db } from "./db";
 import type { Prisma } from "@prisma/client";
+import { ZodError } from "zod";
 import { HttpError, invariant } from "./errors";
 import {
   stageMediaCopy,
@@ -26,7 +27,7 @@ import type {
   Voice,
 } from "@hibiki/contracts";
 import { missingClassification, playbackModeSchema, playlistDefinitionSchema } from "@hibiki/contracts";
-import { collectReferences, resolvePlaylist, usesPrivateHistory } from "@hibiki/core";
+import { collectReferences, InvalidPlaylistError, resolvePlaylist, usesPrivateHistory } from "@hibiki/core";
 
 import { listTags, tagDto, saveTag } from "./taxonomy";
 
@@ -172,15 +173,16 @@ export class LibraryService {
       after = files.at(-1)?.id;
     }
   }
-  async snapshot(ownerId: string, browserJobs = false): Promise<LibraryDto> {
-    return this.snapshotWith(ownerId, this.db, browserJobs);
+  async snapshot(ownerId: string, browserJobs = false, onInvalidPlaylist?: (id: string) => void): Promise<LibraryDto> {
+    return this.snapshotWith(ownerId, this.db, browserJobs, onInvalidPlaylist);
   }
   private async snapshotWith(
     ownerId: string,
     db: Prisma.TransactionClient,
     browserJobs = false,
+    onInvalidPlaylist?: (id: string) => void,
   ): Promise<LibraryDto> {
-    const [items, tags, playlists, jobs] = await Promise.all([
+    const [items, tags, playlistRows, jobs] = await Promise.all([
       db.item.findMany({
         where: { ownerId },
         include: ownedItemInclude(ownerId),
@@ -198,10 +200,19 @@ export class LibraryService {
         take: 50,
       }),
     ]);
+    const playlists: PlaylistDto[] = [];
+    for (const row of playlistRows) {
+      try {
+        playlists.push(playlistDto(row));
+      } catch (error) {
+        if (!onInvalidPlaylist || !(error instanceof SyntaxError || error instanceof ZodError)) throw error;
+        onInvalidPlaylist(row.id);
+      }
+    }
     return {
       items: items.map(itemDto),
       tags,
-      playlists: playlists.map(playlistDto),
+      playlists,
       jobs: jobs.map(jobDto),
     };
   }
@@ -741,9 +752,9 @@ export class LibraryService {
     });
     return rows.map(playlistDto);
   }
-  private async playlistInputs(ownerId: string) {
+  private async playlistInputs(ownerId: string, onInvalidPlaylist?: (id: string) => void) {
     const [snapshot, history] = await Promise.all([
-      this.snapshot(ownerId),
+      this.snapshot(ownerId, false, onInvalidPlaylist),
       this.db.listeningSummary.findMany({
         where: { ownerId },
         select: { itemId: true, launches: true, completed: true, skipped: true, lastStartedAt: true },
@@ -761,16 +772,21 @@ export class LibraryService {
     try {
       await ownerAccess(this.db, ownerId);
       signal?.throwIfAborted();
-      const snapshot = await this.playlistInputs(ownerId);
+      const counts = new Map<string, number | null>();
+      const snapshot = await this.playlistInputs(ownerId, id => counts.set(id, null));
       let nextCutoff = Infinity;
       const inputs = {
         ...snapshot, now,
         onFutureHistoryCutoff: (at: number) => { nextCutoff = Math.min(nextCutoff, at); },
       };
-      const counts = new Map<string, number>();
       for (const playlist of snapshot.playlists) {
         signal?.throwIfAborted();
-        counts.set(playlist.id, resolvePlaylist(playlist.definition, inputs, playlist.id).total);
+        try {
+          counts.set(playlist.id, resolvePlaylist(playlist.definition, inputs, playlist.id).total);
+        } catch (error) {
+          if (!(error instanceof InvalidPlaylistError)) throw error;
+          counts.set(playlist.id, null);
+        }
       }
       const watchHistory = snapshot.playlists.some(p => usesPrivateHistory(p.definition));
       await this.db.$transaction(async tx => {

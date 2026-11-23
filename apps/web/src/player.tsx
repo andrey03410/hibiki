@@ -39,7 +39,7 @@ import type { ItemDto, PlaybackMode, PlaylistDto } from "@hibiki/contracts";
 import { api, formatDuration, mediaWord } from "./api.ts";
 import { ItemArtwork } from "./ItemArtwork.tsx";
 import { fetchItems } from "./library-pages";
-import { completeLibraryOrder, LibraryQueueLoad, QueueCatalog } from "./queue-catalog";
+import { completeLibraryOrder, LibraryQueueLoad, QueueCatalog, QueueIntents } from "./queue-catalog";
 import { CompactPlaybackQueue, PlaybackSeekBar, PlaybackVolume, type BufferedRanges } from "./PlaybackControls";
 import { PlaybackFeedback } from "./playback-feedback";
 import { useListeningAttempt } from "./listening-client";
@@ -302,7 +302,7 @@ export function PlayerProvider({
   const [catalog] = useState(() => new QueueCatalog(fetchItems));
   useSyncExternalStore(catalog.subscribe, catalog.snapshot);
   const itemsById = catalog.rows;
-  const intent = useRef(0);
+  const [intent] = useState(() => new QueueIntents());
   const [libraryOrder] = useState(() => new LibraryQueueLoad());
   const orderStatus = useSyncExternalStore(libraryOrder.subscribe, libraryOrder.snapshot);
   const queueEditable = orderStatus === "complete";
@@ -310,6 +310,7 @@ export function PlayerProvider({
   const [queueLoadError, setQueueLoadError] = useState("");
   const [queueRetry, setQueueRetry] = useState(0);
   const retryNavigation = useRef<(() => void) | undefined>(undefined);
+  const [selectionFailure, setSelectionFailure] = useState<{ token: number; message: string; retry: () => void }>();
   const history = useListeningAttempt(userId);
   const [attempt] = useState(() => createPlaybackAttempt(history));
   const serverSignature = useRef<string | undefined>(undefined);
@@ -532,7 +533,7 @@ export function PlayerProvider({
     }
   }
   function switchTo(index: number) {
-    intent.current++;
+    intent.command();
     const state = live.current;
     const item = itemsById.get(state.queue[index]!);
     if (!item || queueEntryUnavailableReason(item, state.mode)) return;
@@ -546,7 +547,8 @@ export function PlayerProvider({
   }
   async function start(entries: ItemDto[], index = 0, playlistId?: string, options: StartOptions = {}, selectedItem = false) {
     if (!entries.length) return;
-    const token = ++intent.current;
+    const token = intent.command();
+    setSelectionFailure(undefined);
     catalog.put(entries);
     const selected = entries[index];
     if (!selected) return;
@@ -564,27 +566,27 @@ export function PlayerProvider({
         // finds a playable entry in the full filtered order.
         try {
           const ids = await loadQueueIds();
-          if (token !== intent.current) return;
+          if (token !== intent.selection) return;
           newOrder = startPlaybackQueue(ids.map(id => ({id})), 0, false);
           state = {...live.current, ...newOrder, mode, shuffle};
-          playable = await catalog.findPlayable(state.queue, -1, 1, false, mode, undefined, () => token === intent.current);
+          playable = await catalog.findPlayable(state.queue, -1, 1, false, mode, undefined, () => token === intent.selection);
           complete = true;
         } catch (e) {
-          if (token === intent.current) {
-            setQueueLoadError((e as Error).message);
-            retryNavigation.current = () => {
-              if (intent.current === token) void start(entries, index, playlistId, options, selectedItem);
-            };
+          if (token === intent.selection) {
+            setSelectionFailure({
+              token, message: (e as Error).message,
+              retry: () => { if (intent.selection === token) void start(entries, index, playlistId, options, selectedItem); },
+            });
           }
           return;
         }
       }
     } else if (playable < 0) {
-      const candidate = await findNext(1, state, token, true, true);
+      const candidate = await findNext(1, state, token, true, true, setError, () => intent.selection === token);
       if (candidate === undefined) return;
       playable = candidate;
     }
-    if (token !== intent.current) return;
+    if (token !== intent.selection) return;
     if (playable < 0) {
       setOfferAudioSkip(false);
       setError(mode === "audio"
@@ -596,6 +598,7 @@ export function PlayerProvider({
     const chosenSource = playbackSources(entry, mode)[0];
     const opensPlayer = mode === "original" &&
       (!!playlistId || entry.kind === "video" || playbackKind(entry, chosenSource, mode) === "video");
+    intent.advance(); // Ignore old automatic navigation once the new queue takes over.
     libraryOrder.cancel();
     finishAttempt("manual");
     failed.current.clear();
@@ -620,22 +623,22 @@ export function PlayerProvider({
         else toggle();
     }
   }
-  async function findNext(direction: 1 | -1, state: PlaybackSettings, token: number, retry = false, wrap = state.repeat === "all", onError = setError) {
+  async function findNext(direction: 1 | -1, state: PlaybackSettings, token: number, retry = false, wrap = state.repeat === "all", onError = setError, active = () => intent.navigation === token) {
     try {
       return await catalog.findPlayable(state.queue, state.queueIndex, direction, wrap, state.mode,
-        retry ? undefined : failed.current, () => intent.current === token);
+        retry ? undefined : failed.current, active);
     } catch (e) {
-      if (intent.current === token) onError((e as Error).message);
+      if (active()) onError((e as Error).message);
     }
   }
-  async function advanceTarget(direction: 1 | -1, ended: boolean, retry: () => void) {
-    const token = ++intent.current;
+  async function advanceTarget(direction: 1 | -1, ended: boolean, retry: () => void, manual = false) {
+    const token = manual ? intent.command() : intent.advance();
     try {
-      return await catalog.nextInQueue(() => live.current, direction, ended, failed.current, () => token === intent.current, () => libraryOrder.tail);
+      return await catalog.nextInQueue(() => live.current, direction, ended, failed.current, () => token === intent.navigation, () => libraryOrder.tail);
     } catch (e) {
-      if (intent.current === token) {
+      if (intent.navigation === token) {
         mediaKey.current = sourceKey;
-        retryNavigation.current = () => {if (intent.current === token) retry();};
+        retryNavigation.current = () => {if (intent.navigation === token) retry();};
         setQueueLoadError((e as Error).message);
       }
     }
@@ -657,7 +660,7 @@ export function PlayerProvider({
   async function next(direction: 1 | -1 = 1, ended = false) {
     if (!currentMedia()) return;
     if (ended) { feedback.pause(); finishAttempt("ended"); }
-    const target = await advanceTarget(direction, ended, () => void next(direction, ended));
+    const target = await advanceTarget(direction, ended, () => void next(direction, ended), !ended);
     if (!target) return;
     if (!ended) finishAttempt("manual");
     const {state, index} = target;
@@ -842,7 +845,7 @@ export function PlayerProvider({
     },
   };
   function toggle() {
-    intent.current++;
+    intent.command();
     if (!current || waitingForVideo) return;
     if (!source) {
       if (playbackSources(current, settings.mode).length) {
@@ -893,12 +896,12 @@ export function PlayerProvider({
       setOfferAudioSkip(false);
       return;
     }
-    const token = ++intent.current;
+    const token = intent.command();
     const updated = { ...state, mode };
     const candidate = videoSourceId ? videoSource : playbackSources(current, mode)[0];
     if (!candidate && !(keepSelectedVideo && videoSource)) {
       const nextEntry = await findNext(1, updated, token, true);
-      if (token !== intent.current || state.queue !== live.current.queue || nextEntry === undefined) return;
+      if (token !== intent.navigation || state.queue !== live.current.queue || nextEntry === undefined) return;
       if (mode === "audio" && skipCurrent && nextEntry >= 0) {
         finishAttempt("manual");
         failed.current.clear();
@@ -934,7 +937,7 @@ export function PlayerProvider({
     if (activate && !canPlay && mode === "original") openAndPlay(current.id);
   }
   function watchQueueVideo(index: number) {
-    intent.current++;
+    intent.command();
     const state = live.current;
     const item = itemsById.get(state.queue[index]!);
     if (!item || playbackKind(item, playbackSources(item)[0]) !== "video") return;
@@ -982,7 +985,7 @@ export function PlayerProvider({
     setRemoval(undefined);
   }
   function clearQueue() {
-    intent.current++;
+    intent.command();
     libraryOrder.cancel();
     finishAttempt("manual");
     attempt.select(null);
@@ -1026,7 +1029,7 @@ export function PlayerProvider({
   useEffect(() => {
     catalog.invalidate();
   }, [catalog, revision]);
-  useEffect(() => () => {intent.current++; libraryOrder.cancel();}, [libraryOrder]);
+  useEffect(() => () => {intent.command(); libraryOrder.cancel();}, [libraryOrder]);
   useEffect(() => {
     let active = true;
     const {queue, queueIndex} = settings;
@@ -1051,12 +1054,12 @@ export function PlayerProvider({
     }
     if (!catalog.deleted(id)) {pendingEntry.current = id; return;}
     // Find a surviving neighbor without dropping IDs that haven't been loaded yet.
-    const token = ++intent.current;
+    const token = intent.advance();
     let active = true;
     void (async () => {
       let candidate = await findNext(1, state, token, false, false, setQueueLoadError);
       if (candidate === -1) candidate = await findNext(-1, state, token, false, false, setQueueLoadError);
-      if (!active || token !== intent.current || candidate === undefined) return;
+      if (!active || token !== intent.navigation || candidate === undefined) return;
       finishAttempt("interrupted");
       const queue = state.queue.filter(entry => !catalog.deleted(entry));
       if (!queue.length) {clearQueue(); setError("В очереди больше нет доступных записей."); return;}
@@ -1081,7 +1084,7 @@ export function PlayerProvider({
   useLayoutEffect(() => {
     if (lastInitialSettings.current !== initialSettings) {
       lastInitialSettings.current = initialSettings;
-      intent.current++;
+      intent.command();
       libraryOrder.cancel();
       finishAttempt("interrupted");
       const restored = restorePlayback(initialSettings ?? {});
@@ -1098,10 +1101,22 @@ export function PlayerProvider({
   }, [initialSettings]);
   useEffect(() => () => attempt.finish("interrupted"), [attempt]);
 
+  // A page of library results is playable before its full order arrives.
+  // Reloads and overlapping saves must never promote that page to a saved queue.
+  const persistable = useRef(settings);
+  useLayoutEffect(() => {
+    if (!libraryOrder.tail) {
+      persistable.current = settings;
+    } else {
+      const { volume, lastNonzeroVolume } = settings;
+      if (volume !== persistable.current.volume || lastNonzeroVolume !== persistable.current.lastNonzeroVolume)
+        persistable.current = { ...persistable.current, volume, lastNonzeroVolume };
+    }
+  }, [settings, orderStatus, libraryOrder]);
   function cachePlayback() {
     try {
       localStorage.setItem(storageKey, JSON.stringify({
-        ...live.current, serverSignature: serverSignature.current,
+        ...persistable.current, serverSignature: serverSignature.current,
       }));
     } catch {}
   }
@@ -1113,7 +1128,7 @@ export function PlayerProvider({
         method: "PUT",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json", "X-Hibiki-Workspace": userId },
-        body: JSON.stringify(live.current),
+        body: JSON.stringify(persistable.current),
         keepalive: true,
       }).catch(() => {});
     };
@@ -1126,7 +1141,7 @@ export function PlayerProvider({
     let mounted = true;
     const save = () => {
       if (savingSuspended.current) return;
-      const submitted = live.current;
+      const submitted = persistable.current;
       const serialized = JSON.stringify(submitted);
       if (serialized === last) return;
       last = serialized;
@@ -1387,10 +1402,13 @@ export function PlayerProvider({
       </div>
     );
   }
-  const queueRetryNotice = (queueLoadError || orderStatus === "error") && (
+  const failedSelection = selectionFailure?.token === intent.selection ? selectionFailure : undefined;
+  const queueMessage = failedSelection?.message ?? (orderStatus === "error" ? "Не удалось загрузить всю очередь." : queueLoadError);
+  const queueRetryNotice = queueMessage && (
     <div className="mini-player-notice" role="alert">
-      <span>{orderStatus === "error" ? "Не удалось загрузить всю очередь." : queueLoadError}</span>
+      <span>{queueMessage}</span>
       <button className="text-button" onClick={() => {
+        if (failedSelection) { failedSelection.retry(); return; }
         if (libraryOrder.snapshot() === "error") { libraryOrder.retry(); return; }
         const retry = retryNavigation.current;
         retryNavigation.current = undefined;

@@ -461,24 +461,33 @@ export function playbackShortcut(event: ShortcutEvent, onTransportButton = false
 export function createVideoClickGesture() {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pending: (() => void) | undefined;
+  let applied = false;
   function cancel() {
     clearTimeout(timer);
     pending = undefined;
+    applied = false;
   }
   return {
     cancel,
     click(detail: number, single: () => void, double: () => void) {
-      if (pending) {
-        const previous = pending;
+      if (detail > 0 && detail % 2 === 0) {
+        // Browsers expose the OS click count, but not the user's time setting.
+        // A slow OS double click can arrive after the first action was applied.
+        const restore = applied;
         cancel();
-        if (detail === 2) {
-          double();
-          return;
-        }
-        previous();
+        if (restore) single();
+        double();
+        return;
       }
+      const previous = pending;
+      cancel();
+      previous?.();
       pending = single;
-      timer = setTimeout(() => { cancel(); single(); }, 400);
+      timer = setTimeout(() => {
+        pending = undefined;
+        applied = true;
+        single();
+      }, 1000);
     },
   };
 }
