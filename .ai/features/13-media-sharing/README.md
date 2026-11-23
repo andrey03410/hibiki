@@ -2,9 +2,9 @@
 id: 13
 title: Записи и плейлисты по ссылке
 track: product
-stage: build
+stage: review
 branch: codex/13-media-sharing
-pr:
+pr: https://github.com/andrey03410/hibiki/pull/15
 started: 2026-11-23
 merged:
 ---
@@ -22,5 +22,5 @@ merged:
 - [x] [Техника](tech.md)
 - [x] [План](plan.md)
 - [x] [Реализация и проверка](verify.md)
-- [ ] Проверка владельцем
+- [x] Автономная приёмка и независимое ревью
 - [ ] Влито
