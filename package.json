@@ -20,7 +20,8 @@
     "db:deploy": "node scripts/prisma.mjs migrate deploy",
     "db:migrate": "node scripts/prisma.mjs migrate dev",
     "account": "tsx --env-file-if-exists=.env scripts/account.ts",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "kaname:bind": "tsx --env-file-if-exists=.env scripts/bind-kaname.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
@@ -36,6 +37,7 @@
     "ffmpeg-static": "^5.2.0",
     "lucide-react": "^0.468.0",
     "music-metadata": "^12.4.0",
+    "openid-client": "^6.9.1",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "react-router": "^7.18.5",

@@ -1,3 +1,4 @@
+import { ownerAccess, checkItems, requireHeavy, reserve, release } from "./kaname";
 import { randomUUID } from "node:crypto";
 import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -5,7 +6,7 @@ import type { Db } from "./db";
 import type { Prisma } from "@prisma/client";
 import { HttpError, invariant } from "./errors";
 import {
-  copyMedia,
+  stageMediaCopy,
   hashFile,
   storagePath,
   inspectAudioTrack,
@@ -144,7 +145,7 @@ export class LibraryService {
       signal?.throwIfAborted();
       const files = await this.db.mediaFile.findMany({
         where: { hasAudio: null, id: after === undefined ? undefined : { gt: after } },
-        select: { id: true, path: true, bytes: true },
+        select: { id: true, ownerId: true, path: true, bytes: true },
         orderBy: { id: "asc" },
         take: batchSize,
       });
@@ -152,6 +153,7 @@ export class LibraryService {
         signal?.throwIfAborted();
         let hasAudio: boolean;
         try {
+          await ownerAccess(this.db, file.ownerId);
           const path = storagePath(this.storageRoot, file.path);
           const info = await stat(path, { bigint: true });
           if (!info.isFile() || info.size !== file.bytes) continue;
@@ -216,11 +218,13 @@ export class LibraryService {
     filePath: string,
     options: {
       title?: string;
+      creditId?: string;
       itemId?: string;
       signal?: AbortSignal;
       applyReplacement?: (tx: Prisma.TransactionClient, sourceId: string) => Promise<void>;
     } = {},
   ): Promise<{ item: ItemDto; reused: boolean }> {
+    let access = await ownerAccess(this.db, ownerId);
     if (options.itemId) await this.getItem(ownerId, options.itemId);
     const media = await inspectFile(filePath, { signal: options.signal });
     const canonicalKey = `local:${media.hash}`;
@@ -298,62 +302,35 @@ export class LibraryService {
         }
       }
     }
+    if (!media.browserCompatible) requireHeavy(access);
     const prepared = await preparePlayback(
       filePath,
       media,
       join(this.storageRoot, "tmp", "playback"),
       { signal: options.signal },
     );
+    const staged = new Map<string, Awaited<ReturnType<typeof stageMediaCopy>>>();
+    let reservation: string | undefined;
     try {
+      const candidates = [{ path: filePath, media }, ...(prepared ? [prepared] : [])];
+      let bytes = 0;
+      const missing = [];
+      for (const candidate of candidates) {
+        const hash = candidate.media.hash;
+        const known = await this.db.mediaFile.findUnique({ where: { ownerId_hash: { ownerId, hash } } });
+        if (!known || known.path.startsWith("missing/")) bytes += candidate.media.bytes;
+        if (!(await fileIntact(known))) missing.push(candidate);
+      }
+      if (access) {
+        const credit = options.creditId && await this.db.kanameStorage.findFirst({ where: { id: options.creditId, ownerId } });
+        reservation = await reserve(this.db, ownerId, Math.max(0, bytes - Number(credit ? credit.bytes : 0)), access);
+      }
+      for (const { path, media: info } of missing)
+        staged.set(info.hash, await stageMediaCopy(this.storageRoot, ownerId, info.hash, info.ext, path));
+      access = await ownerAccess(this.db, ownerId);
+      if (prepared) requireHeavy(access);
       invariant(!options.applyReplacement || prepared || media.browserCompatible,
         422, "no_playable_source", "Не удалось подготовить файл к воспроизведению");
-      const store = async (source: string, info: MediaInspection) => {
-        let file = await this.db.mediaFile.findUnique({
-          where: { ownerId_hash: { ownerId, hash: info.hash } },
-        });
-        if (!file || !(await fileIntact(file))) {
-          const path = await copyMedia(
-            this.storageRoot,
-            ownerId,
-            info.hash,
-            info.ext,
-            source,
-          );
-          file = await this.db.mediaFile.upsert({
-            where: { ownerId_hash: { ownerId, hash: info.hash } },
-            create: {
-              id: randomUUID(),
-              ownerId,
-              hash: info.hash,
-              path,
-              mime: info.mime,
-              bytes: info.bytes,
-              kind: info.kind,
-              duration: info.duration,
-              hasAudio: info.hasAudio,
-            },
-            update: {
-              path,
-              mime: info.mime,
-              bytes: info.bytes,
-              kind: info.kind,
-              duration: info.duration,
-              hasAudio: info.hasAudio,
-            },
-          });
-        } else if (file.hasAudio !== info.hasAudio) {
-          file = await this.db.mediaFile.update({
-            where: { id: file.id },
-            data: { hasAudio: info.hasAudio },
-          });
-        }
-        return file;
-      };
-      options.signal?.throwIfAborted();
-      const file = await store(filePath, media);
-      const playback = prepared
-        ? await store(prepared.path, prepared.media)
-        : undefined;
       const title = (options.title?.trim() || media.title).slice(0, 500);
       const result = await this.db.$transaction(async (tx) => {
         // Re-check under the write transaction: parallel imports may finish probing together.
@@ -370,6 +347,51 @@ export class LibraryService {
           where: { ownerId_key: { ownerId, key } },
         });
         const reused = Boolean(current);
+        await checkItems(tx, ownerId, !options.itemId && !current ? 1 : 0, access);
+        const store = async (info: MediaInspection) => {
+          let file = await tx.mediaFile.findUnique({
+            where: { ownerId_hash: { ownerId, hash: info.hash } },
+          });
+          const copy = staged.get(info.hash);
+          if (copy) {
+            await copy.publish();
+            const path = copy.path;
+            file = await tx.mediaFile.upsert({
+              where: { ownerId_hash: { ownerId, hash: info.hash } },
+              create: {
+                id: randomUUID(),
+                ownerId,
+                hash: info.hash,
+                path,
+                mime: info.mime,
+                bytes: info.bytes,
+                kind: info.kind,
+                duration: info.duration,
+                hasAudio: info.hasAudio,
+              },
+              update: {
+                path,
+                mime: info.mime,
+                bytes: info.bytes,
+                kind: info.kind,
+                duration: info.duration,
+                hasAudio: info.hasAudio,
+              },
+            });
+          } else if (file && file.hasAudio !== info.hasAudio) {
+            file = await tx.mediaFile.update({
+              where: { id: file.id },
+              data: { hasAudio: info.hasAudio },
+            });
+          }
+          invariant(file, 409, "file_changed", "Состав хранилища изменился, повторите импорт");
+          return file;
+        };
+        options.signal?.throwIfAborted();
+        const file = await store(media);
+        const playback = prepared
+          ? await store(prepared.media)
+          : undefined;
         if (!options.itemId && !current)
           await tx.item.create({
             data: {
@@ -436,13 +458,16 @@ export class LibraryService {
         }
         if (options.applyReplacement) await options.applyReplacement(tx, preferredSource.id);
         options.signal?.throwIfAborted();
+        await release(tx, reservation);
         return { itemId, reused };
-      });
+      }, { timeout: 120000 });
       return {
         item: await this.getItem(ownerId, result.itemId),
         reused: result.reused,
       };
     } finally {
+      await Promise.all([...staged.values()].map(copy => copy.discard()));
+      await release(this.db, reservation);
       if (prepared) await rm(prepared.path, { force: true });
     }
   }
@@ -463,12 +488,14 @@ export class LibraryService {
       "youtube_id",
       "Некорректный ID YouTube",
     );
+    const access = await ownerAccess(this.db, ownerId);
     const key = `youtube:${metadata.externalId}`;
     const row = await this.db.$transaction(async (tx) => {
       const prior = await tx.source.findUnique({
         where: { ownerId_key: { ownerId, key } },
         include: { item: true },
       });
+      await checkItems(tx, ownerId, prior ? 0 : 1, access);
       const meaningful =
         metadata.title?.trim() &&
         !/^\[?(private|deleted|unavailable) video\]?$/i.test(

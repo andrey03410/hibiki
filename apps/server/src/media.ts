@@ -325,7 +325,7 @@ export function storagePath(root: string, path: string) {
   );
   return full;
 }
-export async function copyMedia(
+export async function stageMediaCopy(
   root: string,
   ownerId: string,
   hash: string,
@@ -338,11 +338,11 @@ export async function copyMedia(
   const temporary = resolve(dir, `.${hash}-${randomUUID()}.tmp`);
   try {
     await copyFile(source, temporary);
-    await rename(temporary, target);
-  } finally {
+  } catch (error) {
     await rm(temporary, { force: true });
+    throw error;
   }
-  return relative(root, target);
+  return { path: relative(root, target), publish: () => rename(temporary, target), discard: () => rm(temporary, { force: true }) };
 }
 export async function allowedLocalPath(path: string) {
   const full = await realpath(path);
