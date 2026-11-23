@@ -2,7 +2,7 @@
 id: 13
 title: Записи и плейлисты по ссылке
 track: product
-stage: plan
+stage: build
 branch: codex/13-media-sharing
 pr:
 started: 2026-11-23
@@ -20,7 +20,7 @@ merged:
 - [x] [Бриф](brief.md)
 - [x] [Продукт](product.md)
 - [x] [Техника](tech.md)
-- [ ] План
+- [x] [План](plan.md)
 - [ ] Реализация и проверка
 - [ ] Проверка владельцем
 - [ ] Влито
