@@ -1,3 +1,4 @@
+import { kanameEnabled, markActivity, ownerAccess, requireHeavy } from "./kaname";
 import {
   MAX_MEDIA_UPLOAD_BYTES,
   MAX_ARCHIVE_UPLOAD_BYTES,
@@ -43,6 +44,10 @@ export function registerMcp(app: FastifyInstance, services: Services) {
           id: null,
           error: { code: -32001, message: "Нужен личный MCP-токен Hibiki" },
         });
+    if (kanameEnabled()) {
+      await ownerAccess(services.db, user.id);
+      if ((request.body as { method?: string })?.method === "tools/call") await markActivity(services.db, user.id);
+    }
     const server = buildMcp(user.id, services);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -242,6 +247,7 @@ export function buildMcp(ownerId: string, s: Services) {
     "Скопировать локальные файлы из LOCAL_MEDIA_DIRS; оригиналы не меняются",
     { paths: z.array(z.string()).min(1).max(50) },
     async (args) => {
+      requireHeavy(await ownerAccess(s.db, ownerId));
       const items = [];
       const failed = [];
       for (const path of args.paths) {

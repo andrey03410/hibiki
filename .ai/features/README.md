@@ -8,7 +8,9 @@
 | [05. Перемотка и очередь в мини-плеере](05-compact-player-controls/README.md) | `merged` | [PR #5](https://github.com/andrey03410/hibiki/pull/5), 252 теста и живая приёмка |
 | [06. Навигация по медиатеке и управление очередью](06-library-navigation/README.md) | `merged` | [PR #6](https://github.com/andrey03410/hibiki/pull/6), 261 тест и живая приёмка |
 | [08. Прослушивание и прокрутка медиатеки](08-library-listening/README.md) | `merged` | [PR #8](https://github.com/andrey03410/hibiki/pull/8), выдача по 100 записей, аудиозапуск, малые обложки и меню тегов |
-| [09. Навигация по тегам медиатеки](09-library-tag-navigation/README.md) | `review` | [PR #9](https://github.com/andrey03410/hibiki/pull/9), каталог, правая панель, разметка, предпросмотр и отмена |
-| [11. Запуск и управление воспроизведением](11-player-feedback/README.md) | `product` | Шесть решений по воспроизведению и плейлистам на вычитке у владельца |
+| [09. Навигация по тегам медиатеки](09-library-tag-navigation/README.md) | `merged` | [PR #9](https://github.com/andrey03410/hibiki/pull/9), каталог, правая панель, разметка, предпросмотр и отмена |
+| [11. Запуск и управление воспроизведением](11-player-feedback/README.md) | `build` | Шесть согласованных решений по воспроизведению и плейлистам |
 
 Процесс — [feature](../../.claude/skills/feature/SKILL.md).
+
+[10. Интеграция с Kaname](10-kaname/README.md) — SSO, роли площадки, квоты, отчёты и локальное администрирование.

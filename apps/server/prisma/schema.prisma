@@ -12,6 +12,12 @@ model User {
   passwordHash String
   libraryRevision Int @default(0)
   createdAt DateTime @default(now())
+  kanameIssuer String?
+  kanameSubject String?
+  suspended Boolean @default(false)
+  activities KanameActivity[]
+  holds KanameStorage[]
+  @@unique([kanameIssuer, kanameSubject])
   sessions Session[]
   tokens ApiToken[]
   classificationBatches ClassificationBatch[]
@@ -30,6 +36,7 @@ model User {
 }
 
 model Session {
+  kaname Boolean @default(false)
   tokenHash String @id
   userId String
   expiresAt DateTime
@@ -37,6 +44,7 @@ model Session {
 }
 
 model ApiToken {
+  kaname Boolean @default(false)
   id String @id
   name String
   tokenHash String @unique
@@ -287,4 +295,21 @@ model ClassificationBatch {
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
   @@index([ownerId, createdAt])
+}
+
+model KanameActivity {
+  ownerId String
+  day String
+  lastActiveAt DateTime
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  @@id([ownerId, day])
+}
+
+model KanameStorage {
+  id String @id
+  ownerId String
+  bytes BigInt
+  expiresAt DateTime?
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  @@index([ownerId])
 }
