@@ -31,6 +31,8 @@ watch layout с очередью справа, audio artwork, fullscreen overlay
 
 [11. Запуск и управление воспроизведением](.ai/features/11-player-feedback/README.md) — быстрый старт из медиатеки, управление с клавиатуры и мыши, громкость и буферизация, плавная шкала и счётчики плейлистов.
 
+[12. Обложки и быстрый запуск плейлистов](.ai/features/12-playlist-loading/README.md) — обложки в каталоге и компактный ответ для старта очереди.
+
 ## Стек и проверки
 
 TypeScript · Node.js >=22.16 · npm workspaces · Fastify 5 · SQLite + Prisma 7 ·

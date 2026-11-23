@@ -65,6 +65,7 @@ import type {
   LibraryCardOverviewDto,
   PlaylistDto,
   PlaylistSummaryDto,
+  PlaylistPlaybackDto,
   Rule,
   PlaylistDefinition,
   ResolvedPlaylist,
@@ -72,7 +73,7 @@ import type {
   UserDto,
 } from "@hibiki/contracts";
 import { api, setWorkspaceOwner, formatDuration, humanDuration, mediaWord } from "./api.ts";
-import { ItemArtwork } from "./ItemArtwork.tsx";
+import { ItemArtwork, useNearbyArtwork } from "./ItemArtwork.tsx";
 import { LibraryPages, fetchItems, searchBody } from "./library-pages";
 import { PlayerProvider, usePlayer } from "./player.tsx";
 import { missingClassification } from "@hibiki/contracts/classification";
@@ -183,31 +184,34 @@ function Modal({
 }
 function Cover({
   title,
-  items = [],
+  items,
+  coverUrls,
   large = false,
   className = "",
 }: {
   title: string;
   items?: ItemDto[];
+  coverUrls?: string[];
   large?: boolean;
   className?: string;
 }) {
-  const seed = [...title].reduce((sum, c) => sum + c.charCodeAt(0), 0),
-    thumbnail = items
-      .flatMap((i) => i.sources)
-      .find((s) => s.thumbnail)?.thumbnail;
+  const seed = [...title].reduce((sum, c) => sum + c.charCodeAt(0), 0);
+  const { nearby, attach } = useNearbyArtwork();
+  const [failed, setFailed] = useState<string[]>([]);
+  const detailThumbnail = items?.find(item => item.sources.some(source => source.thumbnail))
+    ?.sources.find(source => source.thumbnail)?.thumbnail;
+  const thumbnail = detailThumbnail && !failed.includes(detailThumbnail)
+    ? detailThumbnail : coverUrls?.find(url => !failed.includes(url));
   return (
-    <div
+    <div ref={thumbnail ? attach : undefined}
       className={`cover art-${seed % 6} ${large ? "large" : ""} ${className}`}
     >
-      {thumbnail ? (
-        <img src={thumbnail} alt="" loading="lazy" />
-      ) : (
-        <>
-          <span className="cover-orbit" />
-          <span className="cover-orbit second" />
-          <span className="cover-mark">響</span>
-        </>
+      <span className="cover-orbit" />
+      <span className="cover-orbit second" />
+      <span className="cover-mark">響</span>
+      {nearby && thumbnail && (
+        <img key={thumbnail} src={thumbnail} alt="" decoding="async" fetchPriority="low"
+          onError={() => setFailed(previous => [...previous, thumbnail])} />
       )}
       <div className="cover-grain" />
     </div>
@@ -1470,16 +1474,22 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
   const player = usePlayer();
   const { notes } = useNotes();
   const request = useRef(0);
+  const [loadingId, setLoadingId] = useState<string>();
   useEffect(() => () => { request.current++; }, []);
   async function play(id: string) {
+    if (loadingId === id) return;
     const selected = ++request.current;
+    const isCurrent = () => selected === request.current;
+    setLoadingId(id);
     try {
-      const result = await api<ResolvedPlaylist>(`/playlists/${id}/resolve`);
-      if (selected !== request.current) return;
-      if (result.items.length) player.start(result.items, 0, id);
+      const { items, ids } = await api<PlaylistPlaybackDto>(`/playlists/${encodeURIComponent(id)}/playback`, "GET", undefined, "high");
+      if (!isCurrent()) return;
+      if (items.length) await player.start(items, 0, id, { queueIds: ids, isCurrent });
       else notify("В плейлисте пока нет записей");
     } catch (error) {
-      if (selected === request.current) notify((error as Error).message, true);
+      if (isCurrent()) notify((error as Error).message, true);
+    } finally {
+      if (isCurrent()) setLoadingId(undefined);
     }
   }
   const playlists = overview.playlists.filter((p) =>
@@ -1511,7 +1521,7 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
       <NotesLoadError />
       <div className="playlist-grid">
         {playlists.map((p) => (
-          <PlaylistCard key={p.id} playlist={p} play={play} />
+          <PlaylistCard key={p.id} playlist={p} play={play} busy={loadingId === p.id} />
         ))}
       </div>
       {!playlists.length && query && (
@@ -1527,19 +1537,25 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
     </>
   );
 }
-function PlaylistCard({ playlist, play }: { playlist: PlaylistSummaryDto; play: (id: string) => void }) {
+function PlaylistCard({ playlist, play, busy }: {
+  playlist: PlaylistSummaryDto;
+  play: (id: string) => void;
+  busy: boolean;
+}) {
   const { notes } = useNotes();
   return (
     <article className="playlist-card">
-      <button type="button" className="playlist-card-action" aria-label={`Воспроизвести ${playlist.title}`}
+      <button type="button" className="playlist-card-action" aria-label={`Воспроизвести ${playlist.title}`} aria-busy={busy || undefined}
         onClick={() => play(playlist.id)} />
       <div className="playlist-cover-wrap">
-        <Cover title={playlist.title} />
+        <Cover title={playlist.title} coverUrls={playlist.coverUrls} />
         <span className="cover-type">
           {playlist.youtubeLinked ? <Youtube size={13} /> : playlist.manual ? <ListMusic size={13} /> : <Sparkles size={13} />}
           {playlist.youtubeLinked ? "СВЯЗЬ С YOUTUBE" : playlist.manual ? "ВАШ ВЫБОР" : "ПО ПРАВИЛАМ"}
         </span>
-        <span className="card-play" aria-hidden="true"><Play size={20} fill="currentColor" /></span>
+        <span className="card-play" aria-hidden="true">
+          {busy ? <LoaderCircle size={20} className="spin" /> : <Play size={20} fill="currentColor" />}
+        </span>
       </div>
       <Link className="playlist-card-title" to={`/playlists/${playlist.id}`}>
         {playlist.title}
@@ -1641,7 +1657,8 @@ function PlaylistPage({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
         </Link>
       </PageTop>
       <section className="playlist-detail-hero">
-        <Cover title={playlist.title} items={resolved?.items} large />
+        <Cover title={playlist.title} items={resolved?.items}
+          coverUrls={overview.playlists.find(p => p.id === playlist.id)?.coverUrls} large />
         <div>
           <span className="eyebrow">
             {playlist.youtubeLinked ? "СВЯЗАН С YOUTUBE" : automatic ? "СОСТАВНОЙ ПЛЕЙЛИСТ" : "ВАШ ПЛЕЙЛИСТ"}

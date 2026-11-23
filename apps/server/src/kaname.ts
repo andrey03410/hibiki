@@ -45,8 +45,11 @@ export async function ownerAccess(db: Db, ownerId: string) {
   invariant(row?.kanameSubject && row.kanameIssuer === env("KANAME_OIDC_ISSUER") && !row.suspended, 403, "kaname_denied", "Доступ к Hibiki закрыт");
   return centralAccess(row.kanameSubject);
 }
+export function canRunHeavy(access: Access | null) {
+  return !access || (access.role === "overlord" && access.permissions.heavy);
+}
 export function requireHeavy(access: Access | null) {
-  invariant(!access || (access.role === "overlord" && access.permissions.heavy), 403, "heavy_forbidden", "Скачивание и перекодирование доступны владельцу");
+  invariant(canRunHeavy(access), 403, "heavy_forbidden", "Скачивание и перекодирование доступны владельцу");
 }
 export async function bindSubject(db: Db, ownerId: string, subject: string, storageRoot?: string) {
   const access = await centralAccess(subject);

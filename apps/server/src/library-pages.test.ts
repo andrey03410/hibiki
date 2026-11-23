@@ -418,3 +418,77 @@ it.each(["{", "{}"])("isolates an unreadable stored definition and its parents u
   await library.refreshDuePlaylistCounts();
   expect(await counts()).toEqual({ [good.id]: 1, [bad.id]: 1, [parent.id]: 1 });
 });
+
+it("publishes bounded cover candidates with card counts and refreshes them after source changes", async () => {
+  const { db, library, userId: ownerId } = ctx;
+  await db.item.createMany({ data: ["a", "b", "c", "d"].map(id => track(id)) });
+  await db.source.createMany({ data: ["a", "b", "c", "d"].map(id => ({
+    id: "source-" + id, key: "youtube:" + id, ownerId, itemId: id, provider: "youtube",
+    externalId: id.repeat(11), status: "available", thumbnail: "https://i.ytimg.com/vi/" + id.repeat(11) + "/hqdefault.jpg",
+  })) });
+  const playlist = await library.savePlaylist(ownerId, { title: "Обложки", definition: {
+    version: 1, sort: "source", rule: { type: "items", ids: ["d", "c", "b", "a"] },
+  } });
+  const summary = async () => (await overview()).json().playlists.find((card: PlaylistSummaryDto) => card.id === playlist.id);
+  await library.refreshDuePlaylistCounts();
+  const urls = (order: string) => [...order].map(id => "https://i.ytimg.com/vi/" + id.repeat(11) + "/mqdefault.jpg");
+  expect(await summary()).toMatchObject({ trackCount: 4, coverUrls: urls("dcb") });
+  await db.source.delete({ where: { id: "source-d" } });
+  await library.refreshDuePlaylistCounts();
+  expect(await summary()).toMatchObject({ trackCount: 4, coverUrls: urls("cba") });
+});
+
+it("starts with a bounded payload, keeps owned queue order, and reads edits before the next worker pass", async () => {
+  const { db, library, userId: ownerId } = ctx;
+  const ids = Array.from({ length: 120 }, (_, i) => "track-" + i);
+  await db.item.createMany({ data: ids.map(id => track(id)) });
+  const child = await library.savePlaylist(ownerId, { title: "Исходный", definition: {
+    version: 1, sort: "source", rule: { type: "items", ids },
+  } });
+  const parent = await library.savePlaylist(ownerId, { title: "Составной", definition: {
+    version: 1, sort: "source", rule: { type: "playlist", id: child.id },
+  } });
+  const url = `/api/playlists/${parent.id}/playback`;
+  const start = () => app.inject({ url, headers: { cookie } });
+  for (const cached of [false, true]) {
+    if (cached) await library.refreshDuePlaylistCounts();
+    const result = await start();
+    expect(result.statusCode, result.body).toBe(200);
+    expect(result.headers["cache-control"]).toBe("private, no-store");
+    const payload = result.json();
+    expect(Object.keys(payload).sort()).toEqual(["ids", "items"]);
+    expect(payload.ids).toEqual(ids);
+    expect(payload.items.map((item: ItemDto) => item.id)).toEqual(ids.slice(0, 8));
+  }
+  await library.savePlaylist(ownerId, { title: child.title, definition: {
+    ...child.definition, rule: { type: "items", ids: [ids[119]!, ids[0]!] },
+  } }, child.id);
+  expect((await start()).json().ids).toEqual([ids[119], ids[0]]);
+  await library.savePlaylist(ownerId, { title: child.title, definition: {
+    ...child.definition, rule: { type: "items", ids: [] },
+  } }, child.id);
+  expect((await start()).json()).toEqual({ ids: [], items: [] });
+  expect((await app.inject({ url, headers: { cookie: foreignCookie } })).statusCode).toBe(404);
+  expect((await app.inject({ url, headers: { authorization: bearer } })).statusCode).toBe(403);
+});
+
+it("uses the current history cutoff even if the worker has not refreshed its playlist yet", async () => {
+  const { db, library, userId: ownerId } = ctx;
+  const now = new Date("2026-11-23T12:00:00.000Z");
+  await db.item.create({ data: track("a") });
+  await db.listeningSummary.create({ data: { itemId: "a", ownerId, launches: 1, lastStartedAt: new Date(+now - 86400000) } });
+  const list = await library.savePlaylist(ownerId, { title: "Давние", definition: {
+    version: 1, sort: "last-started", rule: { type: "history", condition: "last-started-before", days: 1 },
+  } });
+  await library.refreshDuePlaylistCounts(now);
+  const start = () => app.inject({ url: `/api/playlists/${list.id}/playback`, headers: { cookie } });
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    vi.setSystemTime(now);
+    expect((await start()).json().ids).toEqual([]);
+    vi.setSystemTime(new Date(+now + 1));
+    expect((await start()).json().ids).toEqual(["a"]);
+  } finally {
+    vi.useRealTimers();
+  }
+});

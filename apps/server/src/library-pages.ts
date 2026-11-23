@@ -5,7 +5,7 @@ import { z } from "zod";
 import { librarySearchSchema, playlistDefinitionSchema, type LibrarySearch, type LibraryCardOverviewDto, type LibraryPageDto } from "@hibiki/contracts";
 import type { Db } from "./db";
 import { invariant } from "./errors";
-import { itemDto, itemInclude, jobDto } from "./library";
+import { hydrateLibraryItems, jobDto } from "./library";
 import { listTags } from "./taxonomy";
 import { browserOwner } from "./notes";
 
@@ -31,7 +31,8 @@ async function overview(tx: Tx, ownerId: string, cardsOnly: boolean): Promise<Li
     listTags(tx, ownerId, true),
     facetCounts(tx, ownerId, Prisma.sql`i.ownerId = ${ownerId}`),
     tx.playlist.findMany({ where, select: {
-      id: true, title: true, description: true, revision: true, manual: true, trackCount: true, definitionJson: !cardsOnly,
+      id: true, title: true, description: true, revision: true, manual: true, trackCount: true,
+      coverUrlsJson: cardsOnly, definitionJson: !cardsOnly,
       createdAt: true, updatedAt: true, youtubeLink: { select: { playlistId: true } },
     }, orderBy: { createdAt: "asc" } }),
     tx.job.findMany({ where, orderBy: { createdAt: "desc" }, take: 50 }),
@@ -40,26 +41,15 @@ async function overview(tx: Tx, ownerId: string, cardsOnly: boolean): Promise<Li
   return {
     tags: tags.filter(tag => !tag.archived),
     archivedTagNames: Object.fromEntries(tags.filter(tag => tag.archived).map(tag => [tag.id, tag.name])),
-    playlists: playlists.map(({ createdAt, updatedAt, youtubeLink, definitionJson, ...card }) => ({
+    playlists: playlists.map(({ createdAt, updatedAt, youtubeLink, definitionJson, coverUrlsJson, ...card }) => ({
       ...card, createdAt: createdAt.toISOString(), updatedAt: updatedAt.toISOString(),
       ...(youtubeLink ? { youtubeLinked: true } : {}),
+      ...(coverUrlsJson ? { coverUrls: JSON.parse(coverUrlsJson) as string[] } : {}),
       ...(cardsOnly ? {} : { definition: playlistDefinitionSchema.parse(JSON.parse(definitionJson)) }),
     })), jobs: jobs.map(jobDto), total,
     tagCounts: counts,
     revision: current,
   };
-}
-
-export async function hydrateLibraryItems(tx: Tx, ownerId: string, ids: string[]) {
-  const rows = await tx.item.findMany({
-    where: { ownerId, id: { in: ids } },
-    include: {
-      sources: { ...itemInclude.sources, where: { ownerId, OR: [{ fileId: null }, { file: { ownerId } }] } },
-      tags: { ...itemInclude.tags, where: { tag: { ownerId } } },
-    },
-  });
-  const byId = new Map(rows.map((row) => [row.id, itemDto(row)]));
-  return ids.flatMap((id) => byId.get(id) ?? []);
 }
 
 function durationBound(value: string) {

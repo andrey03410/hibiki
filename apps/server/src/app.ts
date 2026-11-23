@@ -12,19 +12,19 @@ import { z, ZodError } from "zod";
 import type { UserDto } from "@hibiki/contracts";
 import { librarySearchSchema, itemPatchSchema, playlistDefinitionSchema, tagInputSchema } from "@hibiki/contracts";
 import type { Db } from "./db";
-import { env, kanameEnabled, markActivity, meterStorage, ownerAccess, release, requireHeavy } from "./kaname";
+import { canRunHeavy, env, kanameEnabled, markActivity, meterStorage, ownerAccess, release, requireHeavy } from "./kaname";
 import { registerKaname } from "./kaname-routes";
 import { AuthService } from "./auth";
-import { LibraryService } from "./library";
+import { hydrateLibraryItems, LibraryService } from "./library";
 import { JobsService } from "./jobs";
 import { HttpError, invariant } from "./errors";
 import { allowedLocalPath, storagePath } from "./media";
 import { registerMcp } from "./mcp";
 import { uploadPolicy } from "./upload-policy";
 import { ArtworkService } from "./artwork";
-import { registerNotes } from "./notes";
+import { browserOwner, registerNotes } from "./notes";
 import { registerClassification } from "./classification";
-import { registerLibraryPages, searchLibraryIds, hydrateLibraryItems } from "./library-pages";
+import { registerLibraryPages, searchLibraryIds } from "./library-pages";
 import { registerReplacement } from "./replacement";
 import { registerHistory } from "./history";
 import { registerYoutubeSync } from "./youtube-sync";
@@ -232,7 +232,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       .header("vary", "Cookie, Authorization")
       .header("x-content-type-options", "nosniff");
     const { size } = z.object({ size: z.literal("thumb").optional() }).parse(request.query);
-    const thumbnail = !request.access || request.access.permissions.heavy && request.access.role === "overlord" ? size : undefined;
+    const thumbnail = canRunHeavy(request.access) ? size : undefined;
     const cover = await artwork.get(request.user!.id, idOf(request), thumbnail);
     if (cover.etag) {
       reply.header("etag", cover.etag);
@@ -400,6 +400,9 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       idOf(request),
       browserAccess(request),
     ),
+  );
+  app.get("/api/playlists/:id/playback", (request, reply) =>
+    library.playlistPlayback(browserOwner(request, reply), idOf(request)),
   );
   app.get("/api/playlists/:id/resolve", (request) =>
     library.resolve(request.user!.id, idOf(request), browserAccess(request)),

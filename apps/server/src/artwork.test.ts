@@ -134,6 +134,27 @@ describe("embedded audio artwork", () => {
     await ctx.library.deleteItem(ctx.userId, item.id);
     expect((await revalidate(cookie)).statusCode).toBe(404);
   });
+  it("publishes a playlist cover only for a local image that can be decoded", async () => {
+    const barePath = join(ctx.root, "plain.mp3");
+    const bare = (await ctx.library.importLocal(ctx.userId, barePath)).item;
+    const emptyIds = ["without-cover-1", "without-cover-2"];
+    await ctx.db.item.createMany({ data: emptyIds.map(id => ({
+      id, ownerId: ctx.userId, kind: "audio", title: id, originalTitle: id,
+    })) });
+    await ctx.db.source.createMany({ data: emptyIds.map(id => ({
+      id, key: id, ownerId: ctx.userId, itemId: id, provider: "local",
+      fileId: bare.sources[0]!.fileId!, status: "available",
+    })) });
+    const tagged = await importCover(png);
+    const playlist = await ctx.library.savePlaylist(ctx.userId, {
+      title: "Обложка", definition: { version: 1, sort: "source", rule: { type: "items", ids: [bare.id, ...emptyIds, tagged.id] } },
+    });
+    await ctx.library.refreshDuePlaylistCounts();
+    const overview = await get("/api/library/overview?playlists=summary");
+    expect(overview.json().playlists).toMatchObject([{
+      id: playlist.id, coverUrls: [artworkUrl(tagged.id) + "?size=thumb"],
+    }]);
+  });
   it("uses the library fallback when a raster signature has no decodable image", async () => {
     const item = await importCover(png.subarray(0, 12));
     const response = await get(artworkUrl(item.id) + "?size=thumb");

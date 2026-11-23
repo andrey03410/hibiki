@@ -36,13 +36,18 @@ function watchArtwork(element: Element, load: () => void) {
   };
 }
 
+export function useNearbyArtwork() {
+  const [nearby, setNearby] = useState(() => typeof IntersectionObserver === "undefined");
+  const attach = useCallback((element: Element | null) => {
+    if (element && !nearby) return watchArtwork(element, () => setNearby(true));
+  }, [nearby]);
+  return { nearby, attach };
+}
+
 export function ItemArtwork({ source, kind }: Props) {
   const url = libraryThumbnail(source);
   const [failed, setFailed] = useState<string>();
-  const [nearby, setNearby] = useState(() => typeof IntersectionObserver === "undefined");
-  const attach = useCallback((element: HTMLImageElement | null) => {
-    if (element && !nearby) return watchArtwork(element, () => setNearby(true));
-  }, [nearby]);
+  const { nearby, attach } = useNearbyArtwork();
   if (url && url !== failed)
     return <img ref={attach} src={nearby ? url : undefined} alt="" loading="lazy" decoding="async" fetchPriority="low"
       onError={() => setFailed(url)} />;

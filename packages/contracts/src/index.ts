@@ -108,6 +108,11 @@ export interface LibraryDto {
 export interface PlaylistSummaryDto extends Omit<PlaylistDto, "definition"> {
   manual: boolean;
   trackCount: number | null;
+  coverUrls?: string[];
+}
+export interface PlaylistPlaybackDto {
+  ids: string[];
+  items: ItemDto[];
 }
 export interface LibraryOverviewDto extends Omit<LibraryDto, "items"> {
   total: number;
