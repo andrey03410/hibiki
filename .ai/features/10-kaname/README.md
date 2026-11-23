@@ -1,6 +1,7 @@
 ---
 track: product
-stage: review
+stage: merged
+merged: 2026-11-23
 branch: codex/10-kaname
 pr: https://github.com/andrey03410/hibiki/pull/10
 ---

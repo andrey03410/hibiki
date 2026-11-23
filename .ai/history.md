@@ -44,3 +44,7 @@ GitHub: [andrey03410/hibiki](https://github.com/andrey03410/hibiki), видим�
 ## 23 ноября 2026 — навигация по тегам
 
 [Задача 09](features/09-library-tag-navigation/README.md) и [PR #9](https://github.com/andrey03410/hibiki/pull/9). В медиатеке появились регулируемая правая панель, дерево источников и студий, поиск по исполнителю и псевдонимам, фильтры И/ИЛИ и выбор исполнения. Проверены 316 автотестов, перенос, отмена разметки и интерфейс в Chrome. [Выкладка на VPS](https://github.com/andrey03410/hibiki/actions/runs/45160078044/job/137643020044).
+
+## 2026-11-23 · Единый вход, права, квоты и привязка медиатеки владельца
+
+[Задача](features/10-kaname/README.md) · [Приёмка](features/10-kaname/verify.md)
