@@ -2,7 +2,7 @@
 id: 12
 title: Обложки и быстрый запуск плейлистов
 track: product
-stage: tech
+stage: plan
 branch: codex/12-playlist-loading
 pr:
 started: 2026-11-23
