@@ -82,10 +82,14 @@ button[aria-pressed=true] {color:var(--lav)}
 .resize:focus-visible {outline-offset:-2px}
 .voice-quick {margin:0 0 13px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
 .voice-quick button {min-height:32px;padding:5px 12px;font-size:13px;font-weight:550}
-.vocal-split {display:inline-flex;align-items:stretch;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
-#vocalLabel {align-self:center;padding:0 9px;color:var(--muted);font-size:12px}
-.vocal-split button {border-left:1px solid var(--line);color:var(--muted)}
-.vocal-split button:last-child {border-radius:0 7px 7px 0}
+.voice-quick .ost-button {align-self:stretch}
+.vocal-split {
+  display:inline-grid;grid-template-columns:repeat(2,1fr);padding:3px;
+  border:1px solid var(--line);border-radius:9px;background:var(--surface)
+}
+#vocalLabel {grid-column:1 / -1;text-align:center;color:var(--muted);font-size:11px;line-height:14px}
+.vocal-split button {min-height:26px;padding:3px 12px;border-radius:5px 0 0 5px;color:var(--muted)}
+.vocal-split button + button {border-left:1px solid var(--line);border-radius:0 5px 5px 0}
 .vocal-split button:hover {background:#302b36}
 .voice-quick button[aria-pressed=true] {background:#40344d;color:#ecd9ff;box-shadow:inset 0 -2px 0 #b799da}
 #chosenDialog {width:min(390px,92vw);max-height:75dvh;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:0}
