@@ -2,7 +2,7 @@
 id: 12
 title: Обложки и быстрый запуск плейлистов
 track: product
-stage: plan
+stage: build
 branch: codex/12-playlist-loading
 pr:
 started: 2026-11-23
@@ -17,6 +17,6 @@ merged:
 
 - [x] [Бриф](brief.md)
 - [x] [Продуктовая постановка](product.md)
-- [ ] [Технические решения](tech.md) и [план](plan.md)
+- [x] [Технические решения](tech.md) и [план](plan.md)
 - [ ] Реализация и [проверка](verify.md)
 - [ ] Автономная приёмка и вливание
