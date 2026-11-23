@@ -80,8 +80,14 @@ button[aria-pressed=true] {color:var(--lav)}
 .resize::after {content:"";width:3px;height:34px;border-radius:3px;background:#5c5367}
 .resize:hover::after,.resize:focus-visible::after,.resize.dragging::after {background:var(--lav)}
 .resize:focus-visible {outline-offset:-2px}
-.voice-quick {margin:0 0 13px;display:flex;align-items:center;flex-wrap:wrap;gap:7px;color:var(--muted);font-size:12px}
-.voice-quick .view {flex-wrap:wrap;gap:2px}.voice-quick button {font-size:12px;padding:4px 8px}
+.voice-quick {margin:0 0 13px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
+.voice-quick button {min-height:32px;padding:5px 12px;font-size:13px;font-weight:550}
+.vocal-split {display:inline-flex;align-items:stretch;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+#vocalLabel {align-self:center;padding:0 9px;color:var(--muted);font-size:12px}
+.vocal-split button {border-left:1px solid var(--line);color:var(--muted)}
+.vocal-split button:last-child {border-radius:0 7px 7px 0}
+.vocal-split button:hover {background:#302b36}
+.voice-quick button[aria-pressed=true] {background:#40344d;color:#ecd9ff;box-shadow:inset 0 -2px 0 #b799da}
 #chosenDialog {width:min(390px,92vw);max-height:75dvh;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:0}
 #chosenDialog::backdrop {background:#08070bb0}
 #chosenDialog header {position:sticky;top:0;background:var(--surface);padding:14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}
@@ -124,9 +130,14 @@ button[aria-pressed=true] {color:var(--lav)}
 <span class="rail-foot">Макет фичи 09</span></aside>
 <div class="layout"><main class="main"><div class="top"><h1>Медиатека</h1><div class="view" aria-label="Вид выдачи" role="group"><button id="listView" aria-label="Список" aria-pressed="true" data-icon="list"></button><button id="cardView" aria-label="Карточки" aria-pressed="false" data-icon="grid"></button></div></div>
 <div class="tools"><label class="field"><i data-icon="search"></i><input type="search" id="mainQuery" aria-label="Поиск композиций" placeholder="Найти композицию"></label></div><div class="quick"><div class="view" role="group" aria-label="Тип записи"><button data-kind="" aria-pressed="true">Все</button><button data-kind="audio" aria-pressed="false">Аудио</button><button data-kind="video" aria-pressed="false">Видео</button></div><button class="pill" id="favorites" aria-pressed="false"><i data-icon="heart"></i>Избранное</button><button class="pill" id="advancedButton" aria-expanded="false" aria-controls="advanced"><i data-icon="sliders"></i>Фильтры</button></div>
-<div class="voice-quick"><span id="voiceLabel">Исполнение</span><div class="view" role="group" aria-labelledby="voiceLabel">
-<button data-voice="" aria-pressed="true">Все</button><button data-voice="ost" aria-pressed="false">Без вокала (OST)</button><button data-voice="voc" aria-pressed="false">С вокалом</button><button data-voice="male" aria-pressed="false">Мужской</button><button data-voice="female" aria-pressed="false">Женский</button><button data-voice="both" aria-pressed="false">Оба голоса</button>
-</div></div>
+<div class="voice-quick" role="group" aria-label="Исполнение">
+  <button type="button" class="pill ost-button" data-voice="ost" aria-pressed="false" title="Без вокала">OST</button>
+  <div class="vocal-split" role="group" aria-labelledby="vocalLabel" title="Одна половина — выбранный голос, обе — весь вокал">
+    <span id="vocalLabel">Вокал</span>
+    <button type="button" data-voice="male" aria-pressed="false">Мужской</button>
+    <button type="button" data-voice="female" aria-pressed="false">Женский</button>
+  </div>
+</div>
 <div class="advanced" id="advanced" hidden><label>Где доступно <select id="provider"><option value="">Везде</option><option value="local">Локальный файл</option><option value="youtube">YouTube</option></select></label></div><div class="result-line"><span id="count" role="status" class="counter"></span><button class="pill" id="playResults"><i data-icon="play"></i>Играть выдачу</button></div>
 <div id="entries" class="result-list"></div></main>
 <aside class="panel" id="tagPanel" aria-label="Навигация по тегам"><div id="splitter" class="resize" role="separator" tabindex="0" aria-label="Ширина панели тегов" aria-controls="tagPanel" aria-orientation="vertical" title="Потяните границу или используйте стрелки. Двойной щелчок — исходная ширина."></div><div class="panel-top"><div class="panel-title"><i data-icon="tree"></i><h2>Навигация</h2></div>
@@ -184,13 +195,13 @@ const tracks=[
  ['На бис','kon','rock','fast','both',0,185,'cover,end'],['Тихий перрон','vclan','piano','calm','ost',2,252],
  ['Дальний сигнал','civ','el','myst','ost',3,143],['Финальный аккорд','euph','orch','calm','ost',4,210],
  ['Вальс под дождём','blood','orch','myst','ost',3,201],['Красная луна','ep','el','agg','female',1,218],
- ['Ночной поезд','song','amb','calm','ost',5,249],['Утренний этюд','euph','piano','calm','ost',4,120]
+ ['Ночной поезд','song','amb','calm','voc',5,249],['Утренний этюд','euph','piano','calm','ost',4,120]
 ].map(([name,source,genre,mood,voice,art,seconds,extra=''],i)=>{
  const values=[source,genre,mood,voice,...extra.split(',').filter(Boolean)];
  const matches=new Set(values.flatMap(chain)); if(voice==='both'){matches.add('male');matches.add('female')}
  return {i,name,source,genre,mood,voice,art,seconds,values,matches,favorite:i%5===0,kind:i%4===0?'video':'audio',provider:i%3===0?'youtube':'local'}
 });
-const state={flat:false,selected:new Set(),logic:'and',voice:'',groups:new Set(['source']),branches:new Set(['anime','kyo']),queries:{},flatQuery:'',grid:false,favorite:false,kind:'',provider:''};
+const state={flat:false,selected:new Set(),logic:'and',voices:new Set(),groups:new Set(['source']),branches:new Set(['anime','kyo']),queries:{},flatQuery:'',grid:false,favorite:false,kind:'',provider:''};
 let playing=false,elapsed=0,queue=tracks,at=0,shown=[],lastDetail=null;
 function norm(s){return s.trim().toLocaleLowerCase()}
 function matchesTerm(t,q){return [t.name,t.alias||''].some(x=>norm(x).includes(norm(q)))}
@@ -198,9 +209,24 @@ function textMatch(item){
  const q=norm($('mainQuery').value); if(!q)return true;
  return [item.name,...Array.from(item.matches).flatMap(id=>[byId[id].name,byId[id].alias||''])].some(x=>norm(x).includes(q))
 }
+function toggleVoice(voice){
+ if(voice==='ost'){
+  const wasSelected=state.voices.has('ost');
+  state.voices.clear();
+  if(!wasSelected)state.voices.add('ost');
+ }else{
+  state.voices.delete('ost');
+  toggle(state.voices,voice);
+ }
+}
+function matchesPerformance(item){
+ if(state.voices.size===2)return item.matches.has('voc');
+ for(const voice of state.voices)if(!item.matches.has(voice))return false;
+ return true;
+}
 function passesQuickFilters(item){
  return (!state.kind || item.kind===state.kind)
-  && (!state.voice || item.matches.has(state.voice))
+  && matchesPerformance(item)
   && (!state.provider || item.provider===state.provider)
   && (!state.favorite || item.favorite) && textMatch(item);
 }
@@ -267,7 +293,7 @@ function drawCatalog(animate){
  setMode('treeMode',!state.flat);setMode('flatMode',state.flat);
  drawSelection();
  document.querySelectorAll('[data-logic]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.logic===state.logic)));
- document.querySelectorAll('[data-voice]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.voice===state.voice)));
+ document.querySelectorAll('[data-voice]').forEach(b=>b.setAttribute('aria-pressed',String(state.voices.has(b.dataset.voice))));
 }
 function renderEntries(){
  shown=tracks.filter(item=>passes(item));
@@ -295,6 +321,7 @@ function detail(i,button){
  const t=tracks[i],pop=$('detail');lastDetail=i;
  pop.innerHTML='<h3>'+esc(t.name)+'</h3>'+Object.keys(ids).map(g=>{
   const vals=t.values.filter(id=>byId[id].group===g);if(!vals.length)return '';
+  if(g==='voice'&&t.voice==='voc')return '<div class="detail-line"><b>Исполнение</b><button data-pick="voc" title="Показать весь вокал">С вокалом · голос не указан</button></div>';
   return '<div class="detail-line"><b>'+ids[g]+'</b><span>'+vals.map(id=>'<button data-pick="'+id+'">'+esc(chain(id).map(x=>byId[x].name).join(' › '))+'</button>').join('<br>')+'</span></div>'
  }).join('');pop.showPopover();const r=button.getBoundingClientRect(),h=pop.offsetHeight;
  pop.style.left=Math.max(6,Math.min(r.left,innerWidth-pop.offsetWidth-8))+'px';
@@ -317,7 +344,9 @@ document.addEventListener('click',event=>{
   const inside=$('detail').contains(b);const origin=$('entries').contains(b)?$('entries'):$('catalog');
   const dialog=$('chosenDialog'),fromDialog=dialog.contains(b);
   if(inside)$('detail').hidePopover();
-  if(byId[d.pick].group==='voice')state.voice=d.pick;else toggle(state.selected,d.pick);
+  if(byId[d.pick].group==='voice'){
+   state.voices=new Set(d.pick==='both'||d.pick==='voc'?['male','female']:[d.pick]);
+  }else toggle(state.selected,d.pick);
   redraw();
   if(fromDialog){
    if(state.selected.size){($('chosenList').querySelector('button')||$('closeChosen')).focus()}
@@ -336,7 +365,7 @@ document.addEventListener('click',event=>{
    after.animate([{height:oldHeight+'px',overflow:'clip'},{height:newHeight+'px',overflow:'clip'}],{duration:155,easing:'ease-out'})
   }
  }else if(d.logic){state.logic=d.logic;redraw()}
- else if(d.voice!==undefined){state.voice=d.voice;redraw()}
+ else if(d.voice){toggleVoice(d.voice);redraw()}
  else if(b.id==='allChosen'){
   $('chosenDialog').showModal();drawSelection();$('closeChosen').focus();
  }else if(b.id==='closeChosen')$('chosenDialog').close();
