@@ -62,8 +62,9 @@ import {
 import type {
   ItemDto,
   LibraryDto,
-  LibraryOverviewDto,
+  LibraryCardOverviewDto,
   PlaylistDto,
+  PlaylistSummaryDto,
   Rule,
   PlaylistDefinition,
   ResolvedPlaylist,
@@ -99,13 +100,13 @@ const EMPTY: LibraryDto = { items: [], tags: [], playlists: [], jobs: [] };
 type Toast = { id: number; text: string; error?: boolean };
 const DataContext = createContext<{
   library: LibraryDto;
-  overview: LibraryOverviewDto;
+  overview: LibraryCardOverviewDto;
   refresh: () => Promise<void>;
   notify: (text: string, error?: boolean) => void;
   openImport: () => void;
 }>({
   library: EMPTY,
-  overview: {...EMPTY, total: 0, tagCounts: {}, revision: ""},
+  overview: {...EMPTY, playlists: [], total: 0, tagCounts: {}, revision: ""},
   refresh: async () => {},
   notify: () => {},
   openImport: () => {},
@@ -426,7 +427,7 @@ function Workspace({
   kaname: boolean;
   logout: () => Promise<void>;
 }) {
-  const [overview, setOverview] = useState<LibraryOverviewDto>({...EMPTY, total: 0, tagCounts: {}, revision: ""}),
+  const [overview, setOverview] = useState<LibraryCardOverviewDto>({...EMPTY, playlists: [], total: 0, tagCounts: {}, revision: ""}),
     [settings, setSettings] = useState<any>(null),
     [ready, setReady] = useState(false),
     [error, setError] = useState(""),
@@ -436,7 +437,7 @@ function Workspace({
     [importSettingsLoading, setImportSettingsLoading] = useState(false),
     [playlistQuery, setPlaylistQuery] = useState(""),
     [tagQuery, setTagQuery] = useState("");
-  const library: LibraryDto = useMemo(() => ({...overview, items: []}), [overview]);
+  const library: LibraryDto = useMemo(() => ({items: [], playlists: [], tags: overview.tags, jobs: overview.jobs}), [overview.tags, overview.jobs]);
   const request = useRef(0);
   const overviewSignature = useRef("");
   const notes = useNotesController();
@@ -455,7 +456,7 @@ function Workspace({
   }
   async function refresh() {
     const sequence = ++request.current;
-    const result = await api<LibraryOverviewDto>("/library/overview");
+    const result = await api<LibraryCardOverviewDto>("/library/overview?playlists=summary");
     if (sequence !== request.current) return;
     const signature = JSON.stringify(result);
     if (signature !== overviewSignature.current) {
@@ -613,14 +614,14 @@ function Workspace({
               </button>
             </div>
             <nav className="playlist-nav">
-              {library.playlists.slice(0, 12).map((p, index) => (
+              {overview.playlists.slice(0, 12).map((p, index) => (
                 <NavLink key={p.id} to={`/playlists/${p.id}`}>
                   <span className={`playlist-dot dot-${index % 5}`} />
                   <span className="truncate">{p.title}</span>
-                  {p.definition.rule.type !== "items" && <Sparkles size={12} />}
+                  {!p.manual && <Sparkles size={12} />}
                 </NavLink>
               ))}
-              {!library.playlists.length && (
+              {!overview.playlists.length && (
                 <p className="sidebar-hint">
                   Здесь будут подборки,
                   <br />
@@ -662,7 +663,7 @@ function Workspace({
                 path="/playlists"
                 element={<PlaylistsPage query={playlistQuery} onQuery={setPlaylistQuery} onCreate={() => setCreateOpen(true)} />}
               />
-              <Route path="/playlists/:id" element={<PlaylistPage onBrowseTag={browseTag} />} />
+              <Route path="/playlists/:id" element={<WithCatalog includeItems={false}><PlaylistPage onBrowseTag={browseTag} /></WithCatalog>} />
               <Route path="/tags" element={<TagsPage query={tagQuery} onQuery={setTagQuery} onBrowse={browseTag} />} />
               {kaname && <Route path="/admin" element={<KanameSettings userId={user.id} adminPage />} />}
               <Route path="/jobs" element={<JobsPage />} />
@@ -731,21 +732,25 @@ function PageTop({ label, children }: { label: string; children?: ReactNode }) {
     </div>
   );
 }
-function WithCatalog({children}: {children: ReactNode}) {
+function WithCatalog({children, includeItems = true}: {children: ReactNode; includeItems?: boolean}) {
   const context = useData();
-  const [items, setItems] = useState<ItemDto[]>();
+  const [catalog, setCatalog] = useState<Pick<LibraryDto, "items" | "playlists">>();
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
+  const playlistVersion = JSON.stringify(context.overview.playlists.map(p => [p.id, p.revision, p.youtubeLinked]));
+  const itemVersion = includeItems ? context.overview.revision : undefined;
   useEffect(() => {
     let current = true;
     setError("");
-    api<LibraryDto>("/library").then(data => {if (current) setItems(data.items);})
+    const load = includeItems ? api<LibraryDto>("/library")
+      : api<{ playlists: PlaylistDto[] }>("/playlists").then(({ playlists }) => ({ items: [], playlists }));
+    load.then(({ items, playlists }) => { if (current) setCatalog({ items, playlists }); })
       .catch(e => {if (current) setError(e.message);});
     return () => {current = false;};
-  }, [context.overview.revision, retry]);
+  }, [includeItems, itemVersion, playlistVersion, retry]);
   if (error) return <div role="alert"><ErrorMessage error={error} /><Button onClick={() => setRetry(n => n + 1)}>Повторить</Button></div>;
-  if (!items) return <div role="status" className="loading-inline">Загружаем каталог…</div>;
-  return <DataContext.Provider value={{...context, library: {...context.library, items}}}>{children}</DataContext.Provider>;
+  if (!catalog) return <div role="status" className="loading-inline">Загружаем каталог…</div>;
+  return <DataContext.Provider value={{...context, library: {...context.library, ...catalog}}}>{children}</DataContext.Provider>;
 }
 
 const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId: string; search: ReturnType<typeof useLibrarySearch> }) {
@@ -782,26 +787,17 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   useEffect(() => () => {actions.current++;}, [pages, overview.revision]);
   const idQuery = useMemo(() => {
     let pending: Promise<string[]> | undefined;
-    return () => pending ??= api<{ids: string[]}>("/library/ids", "POST", searchBody(filters))
+    return () => pending ??= api<{ids: string[]}>("/library/ids", "POST", searchBody(filters), "low")
       .then(result => result.ids).catch(e => {pending = undefined; throw e;});
   }, [filters, overview.revision]);
   const pageComplete = !loading && !nextCursor && !error && items.length === total;
   const pageIds = useMemo(() => items.map(item => item.id), [items]);
   const allIds = () => pageComplete ? Promise.resolve(pageIds) : idQuery();
-  async function play(item?: ItemDto) {
-    const request = ++actions.current;
+  function play(item?: ItemDto) {
     const index = item ? items.findIndex(entry => entry.id === item.id) : 0;
-    if (item && player.current?.id === item.id) {
-      player.activateItem(items, index, undefined, {fromLibrary: true});
-      return;
-    }
-    try {
-      const queueIds = await allIds();
-      if (request !== actions.current || (item && !queueIds.includes(item.id))) return;
-      const options = {fromLibrary: true, queueIds};
-      if (item) player.activateItem(items, index, undefined, options);
-      else player.start(items, 0, undefined, options);
-    } catch (e) { if (request === actions.current) notify((e as Error).message, true); }
+    const options = {fromLibrary: true, loadQueueIds: pageComplete ? undefined : idQuery};
+    if (item) player.activateItem(items, index, undefined, options);
+    else player.start(items, 0, undefined, options);
   }
   const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
   const restrictsFacets = filters.query.trim() || filters.kind || filters.provider || filters.availability || filters.favoriteOnly
@@ -1006,6 +1002,7 @@ function ItemTable({
     const playLabel = playing ? "Приостановить"
       : !inLibrary && video && (!active || player.waitingForVideo || player.mode === "original") ? "Смотреть"
       : "Воспроизвести";
+    const itemLoading = active && player.loadingLabel;
     const coverLabel = `${playLabel} ${item.title}`;
     const activate = () => onActivate ? onActivate(item) : player.activateItem(items, index, playlistId, { fromLibrary: inLibrary });
     const cover = (
@@ -1015,7 +1012,7 @@ function ItemTable({
         <ItemArtwork source={artworkSource} kind={item.kind} />
         {available && (
           <span className="entry-cover-control" aria-hidden="true">
-            {playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
+            {itemLoading ? <span className="cover-loading" /> : playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
           </span>
         )}
       </button>
@@ -1067,7 +1064,7 @@ function ItemTable({
             </button>
           )}
           <button
-            disabled={active}
+            disabled={active || !player.queueEditable}
             onClick={() => {
               player.playNext(item, playlistId);
               notify("Запись будет играть следующей");
@@ -1077,6 +1074,7 @@ function ItemTable({
             Играть следующей
           </button>
           <button
+            disabled={!player.queueEditable}
             onClick={() => {
               player.enqueue(item, playlistId);
               notify("Добавлено в очередь");
@@ -1144,7 +1142,7 @@ function ItemTable({
               voices={item.voices} onTag={onTag} onPerformance={onPerformance}/>
             {showMissing && <small className="missing-reasons">Не указано · {missingClassification(item.tags,item.performance,item.voices).map(k => missingLabels[k]).join(", ")}</small>}
             <div className="entry-meta">
-              <span>{kindLabel} · {formatDuration(item.duration)}</span>
+              <span>{itemLoading || kindLabel} · {formatDuration(item.duration)}</span>
               {badges.map(({ provider, status, label }) => {
                 const Icon = provider === "youtube" ? Youtube : provider === "local" ? HardDrive : CircleAlert;
                 return (
@@ -1420,7 +1418,7 @@ function BatchTags({ ids, close }: { ids: string[]; close: () => void }) {
   const [preview,setPreview] = useState<{revision:string; changes:{id:string;tagIds?:string[];performance?:Performance;voices?:Voice[]}[];
     removed:{label:string;count:number}[] }>();
   async function prepare() {
-    const {revision} = await api<LibraryOverviewDto>("/library/overview");
+    const {revision} = await api<LibraryCardOverviewDto>("/library/overview?playlists=summary");
     const items = await fetchItems(ids);
     if(items.length !== ids.length) throw Error("Состав выборки изменился. Выберите записи заново.");
     if (group !== "performance") {
@@ -1468,9 +1466,23 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
   onQuery: (query: string) => void;
   onCreate: () => void;
 }) {
-  const { library } = useData();
+  const { overview, notify } = useData();
+  const player = usePlayer();
   const { notes } = useNotes();
-  const playlists = library.playlists.filter((p) =>
+  const request = useRef(0);
+  useEffect(() => () => { request.current++; }, []);
+  async function play(id: string) {
+    const selected = ++request.current;
+    try {
+      const result = await api<ResolvedPlaylist>(`/playlists/${id}/resolve`);
+      if (selected !== request.current) return;
+      if (result.items.length) player.start(result.items, 0, id);
+      else notify("В плейлисте пока нет записей");
+    } catch (error) {
+      if (selected === request.current) notify((error as Error).message, true);
+    }
+  }
+  const playlists = overview.playlists.filter((p) =>
     matchesSearch(query, p.title, p.description, noteFor(notes, "playlist", p.id)),
   );
   return (
@@ -1499,7 +1511,7 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
       <NotesLoadError />
       <div className="playlist-grid">
         {playlists.map((p) => (
-          <PlaylistCard key={p.id} playlist={p} />
+          <PlaylistCard key={p.id} playlist={p} play={play} />
         ))}
       </div>
       {!playlists.length && query && (
@@ -1515,60 +1527,19 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
     </>
   );
 }
-function PlaylistCard({ playlist }: { playlist: PlaylistDto }) {
-  const { library, overview } = useData(),
-    player = usePlayer(),
-    [resolved, setResolved] = useState<ResolvedPlaylist | null>(null);
+function PlaylistCard({ playlist, play }: { playlist: PlaylistSummaryDto; play: (id: string) => void }) {
   const { notes } = useNotes();
-  const historyRevision = useHistoryRevision(
-    playlist.definition.sort === "last-started" || usesListeningHistory(playlist.definition.rule, library),
-  );
-  useEffect(() => {
-    let stopped = false;
-    api<ResolvedPlaylist>(`/playlists/${playlist.id}/resolve`)
-      .then((data) => {
-        if (!stopped) setResolved(data);
-      })
-      .catch(() => {});
-    return () => {
-      stopped = true;
-    };
-  }, [
-    playlist.id,
-    playlist.revision,
-    historyRevision,
-    overview.revision,
-    library.playlists.map((p) => p.revision).join(","),
-  ]);
   return (
     <article className="playlist-card">
+      <button type="button" className="playlist-card-action" aria-label={`Воспроизвести ${playlist.title}`}
+        onClick={() => play(playlist.id)} />
       <div className="playlist-cover-wrap">
-        <Link
-          to={`/playlists/${playlist.id}`}
-          aria-label={`Открыть ${playlist.title}`}
-        >
-          <Cover title={playlist.title} items={resolved?.items} />
-        </Link>
+        <Cover title={playlist.title} />
         <span className="cover-type">
-          {playlist.youtubeLinked ? (
-            <Youtube size={13} />
-          ) : playlist.definition.rule.type === "items" ? (
-            <ListMusic size={13} />
-          ) : (
-            <Sparkles size={13} />
-          )}{" "}
-          {playlist.youtubeLinked ? "СВЯЗЬ С YOUTUBE" : playlist.definition.rule.type === "items"
-            ? "ВАШ ВЫБОР"
-            : "ПО ПРАВИЛАМ"}
+          {playlist.youtubeLinked ? <Youtube size={13} /> : playlist.manual ? <ListMusic size={13} /> : <Sparkles size={13} />}
+          {playlist.youtubeLinked ? "СВЯЗЬ С YOUTUBE" : playlist.manual ? "ВАШ ВЫБОР" : "ПО ПРАВИЛАМ"}
         </span>
-        <button
-          className="card-play"
-          aria-label={`Воспроизвести ${playlist.title}`}
-          disabled={!resolved?.items.length}
-          onClick={() => resolved && player.start(resolved.items, 0, playlist.id)}
-        >
-          <Play size={20} fill="currentColor" />
-        </button>
+        <span className="card-play" aria-hidden="true"><Play size={20} fill="currentColor" /></span>
       </div>
       <Link className="playlist-card-title" to={`/playlists/${playlist.id}`}>
         {playlist.title}
@@ -1576,19 +1547,8 @@ function PlaylistCard({ playlist }: { playlist: PlaylistDto }) {
       {noteFor(notes, "playlist", playlist.id) && <NoteIndicator />}
       <p>{playlist.description || "Ваша подборка в Hibiki"}</p>
       <span className="small muted">
-        {resolved
-          ? `${resolved.total} ${mediaWord(resolved.total)} · ${humanDuration(resolved.duration)}`
-          : "Вычисляем состав…"}
+        {playlist.trackCount === null ? "—" : `${playlist.trackCount} ${mediaWord(playlist.trackCount)}`}
       </span>
-      <button
-        type="button"
-        className="button subtle compact playlist-card-listen"
-        aria-label={`Слушать ${playlist.title}`}
-        disabled={!resolved?.items.length}
-        onClick={() => resolved && player.start(resolved.items, 0, playlist.id, { mode: "audio" })}
-      >
-        <Headphones size={15} /> Слушать
-      </button>
     </article>
   );
 }

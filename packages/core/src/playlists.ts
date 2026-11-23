@@ -18,6 +18,8 @@ export interface PlaylistHistory {
 export type PlaylistLibrary = Pick<LibraryDto, "items" | "tags" | "playlists"> & {
   history?: ReadonlyMap<string, PlaylistHistory>;
   now?: Date;
+  /** First millisecond when an evaluated time-dependent condition becomes true. */
+  onFutureHistoryCutoff?: (at: number) => void;
 };
 export const PLAYLIST_LIMITS = { depth: 40, expandedNodes: 10_000 } as const;
 
@@ -294,14 +296,16 @@ export function resolvePlaylist(
         }[rule.condition];
         for (const item of items.values()) {
           const summary = library.history?.get(item.id);
+          const cutoff = rule.condition === "last-started-before" && summary?.lastStartedAt
+            ? summary.lastStartedAt.getTime() + rule.days! * 86_400_000 + 1 : undefined;
+          if (cutoff !== undefined && cutoff > now) library.onFutureHistoryCutoff?.(cutoff);
           const matches = rule.condition === "never-started"
             ? !summary?.launches
             : rule.condition === "never-completed"
               ? !summary?.completed
               : rule.condition === "skipped-at-least"
                 ? (summary?.skipped ?? 0) >= rule.count!
-                : summary?.lastStartedAt != null &&
-                  summary.lastStartedAt.getTime() < now - rule.days! * 86_400_000;
+                : cutoff !== undefined && now >= cutoff;
           if (matches) addReasons(result.selected, item.id, [explanation]);
         }
         break;

@@ -374,7 +374,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     return { ok: true };
   });
   app.get("/api/playlists", async (request) => ({
-    playlists: (await library.snapshot(request.user!.id)).playlists,
+    playlists: await library.listPlaylists(request.user!.id),
   }));
   app.post("/api/playlists/preview", (request) => {
     const input = z

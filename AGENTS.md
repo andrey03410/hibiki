@@ -29,6 +29,8 @@ watch layout с очередью справа, audio artwork, fullscreen overlay
 
 [09. Навигация по тегам](.ai/features/09-library-tag-navigation/README.md) — панель медиатеки, группы тегов, псевдонимы, исполнение и перенос коллекции.
 
+[11. Запуск и управление воспроизведением](.ai/features/11-player-feedback/README.md) — быстрый старт из медиатеки, управление с клавиатуры и мыши, громкость и буферизация, плавная шкала и счётчики плейлистов.
+
 ## Стек и проверки
 
 TypeScript · Node.js >=22.16 · npm workspaces · Fastify 5 · SQLite + Prisma 7 ·

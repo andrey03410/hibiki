@@ -309,12 +309,12 @@ input[type="range"].mini-player-seek {
 
 .mini-player-seek::-webkit-slider-runnable-track {
   height: 3px;
-  background: linear-gradient(to right, #d5b6ef var(--progress), #514356 var(--progress));
+  background: var(--seek-track);
 }
 
 .mini-player-seek::-moz-range-track {
   height: 3px;
-  background: linear-gradient(to right, #d5b6ef var(--progress), #514356 var(--progress));
+  background: var(--seek-track);
 }
 
 input[type="range"].mini-player-seek::-webkit-slider-thumb {
@@ -464,10 +464,6 @@ input[type="range"].mini-player-seek::-moz-range-thumb {
   box-shadow: 0 4px 22px #08060b66;
 }
 
-.playlist-card-listen {
-  margin-top: 9px;
-}
-
 @media (max-width: 1180px) {
   .mini-player { left: 203px; }
 }
@@ -530,4 +526,58 @@ input[type="range"].mini-player-seek::-moz-range-thumb {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+
+input[type="range"].playback-seek {
+  --buffer-color: #8c729a;
+  --seek-track: linear-gradient(to right, #d5b6ef var(--progress), transparent var(--progress)), var(--buffered, none), #49394f;
+}
+input[type="range"].playback-seek:not(.mini-player-seek) {
+  background: var(--seek-track);
+}
+.mini-volume {
+  position: relative;
+}
+.mini-volume-panel:not([hidden]) {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 12px);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px solid #65536f;
+  border-radius: 8px;
+  background: #28202f;
+  color: #f0e5f5;
+  box-shadow: 0 4px 16px #120d18a8;
+  z-index: 2;
+}
+.mini-volume-panel input { width: 90px; }
+.mini-volume-panel output { width: 4ch; text-align: right; }
+.playback-loading {
+  align-self: flex-start;
+  padding: 5px 16px;
+  color: #dfcde9;
+  background: #211b27;
+  font-size: 12px;
+  pointer-events: none;
+}
+.watch-stage:not(.is-youtube):is(:fullscreen, .is-viewport-fullscreen) .playback-loading {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  border-radius: 6px;
+}
+.cover-loading {
+  width: 15px;
+  height: 15px;
+  border: 2px solid #45345155;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: cover-loading-spin 1s linear infinite;
+}
+@keyframes cover-loading-spin { to { transform: rotate(1turn); } }
+@media (prefers-reduced-motion: reduce) {
+  .cover-loading { animation: none; }
 }

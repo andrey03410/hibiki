@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
-import { librarySearchSchema, type LibrarySearch, type LibraryOverviewDto, type LibraryPageDto } from "@hibiki/contracts";
+import { librarySearchSchema, playlistDefinitionSchema, type LibrarySearch, type LibraryCardOverviewDto, type LibraryPageDto } from "@hibiki/contracts";
 import type { Db } from "./db";
 import { invariant } from "./errors";
-import { itemDto, itemInclude, jobDto, playlistDto } from "./library";
+import { itemDto, itemInclude, jobDto } from "./library";
 import { listTags } from "./taxonomy";
 import { browserOwner } from "./notes";
 
@@ -24,20 +24,27 @@ async function revision(tx: Tx, ownerId: string) {
   return String(row.libraryRevision);
 }
 
-async function overview(tx: Tx, ownerId: string): Promise<LibraryOverviewDto> {
+async function overview(tx: Tx, ownerId: string, cardsOnly: boolean): Promise<LibraryCardOverviewDto> {
   const where = { ownerId };
   const [total, tags, counts, playlists, jobs, current] = await Promise.all([
     tx.item.count({ where }),
     listTags(tx, ownerId, true),
     facetCounts(tx, ownerId, Prisma.sql`i.ownerId = ${ownerId}`),
-    tx.playlist.findMany({ where, include: { youtubeLink: { select: { playlistId: true } } }, orderBy: { createdAt: "asc" } }),
+    tx.playlist.findMany({ where, select: {
+      id: true, title: true, description: true, revision: true, manual: true, trackCount: true, definitionJson: !cardsOnly,
+      createdAt: true, updatedAt: true, youtubeLink: { select: { playlistId: true } },
+    }, orderBy: { createdAt: "asc" } }),
     tx.job.findMany({ where, orderBy: { createdAt: "desc" }, take: 50 }),
     revision(tx, ownerId),
   ]);
   return {
     tags: tags.filter(tag => !tag.archived),
     archivedTagNames: Object.fromEntries(tags.filter(tag => tag.archived).map(tag => [tag.id, tag.name])),
-    playlists: playlists.map(playlistDto), jobs: jobs.map(jobDto), total,
+    playlists: playlists.map(({ createdAt, updatedAt, youtubeLink, definitionJson, ...card }) => ({
+      ...card, createdAt: createdAt.toISOString(), updatedAt: updatedAt.toISOString(),
+      ...(youtubeLink ? { youtubeLinked: true } : {}),
+      ...(cardsOnly ? {} : { definition: playlistDefinitionSchema.parse(JSON.parse(definitionJson)) }),
+    })), jobs: jobs.map(jobDto), total,
     tagCounts: counts,
     revision: current,
   };
@@ -307,9 +314,9 @@ export function registerLibraryPages(app: FastifyInstance, db: Db) {
     } satisfies LibraryPageDto;
   }
 
-  app.get("/api/library/overview", (request, reply) => {
+  app.get<{ Querystring: { playlists?: string } }>("/api/library/overview", (request, reply) => {
     const ownerId = browserOwner(request, reply);
-    return db.$transaction((tx) => overview(tx, ownerId));
+    return db.$transaction((tx) => overview(tx, ownerId, request.query.playlists === "summary"));
   });
   app.post("/api/library/page", (request, reply) => {
     const ownerId = browserOwner(request, reply);

@@ -735,6 +735,62 @@ export class LibraryService {
     });
     return playlistDto(row);
   }
+  async listPlaylists(ownerId: string) {
+    const rows = await this.db.playlist.findMany({
+      where: { ownerId }, include: { youtubeLink: { select: { playlistId: true } } }, orderBy: { createdAt: "asc" },
+    });
+    return rows.map(playlistDto);
+  }
+  private async playlistInputs(ownerId: string) {
+    const [snapshot, history] = await Promise.all([
+      this.snapshot(ownerId),
+      this.db.listeningSummary.findMany({
+        where: { ownerId },
+        select: { itemId: true, launches: true, completed: true, skipped: true, lastStartedAt: true },
+      }),
+    ]);
+    return { ...snapshot, history: new Map(history.map(entry => [entry.itemId, entry])) };
+  }
+  async refreshDuePlaylistCounts(now = new Date(), signal?: AbortSignal) {
+    const work = await this.db.playlistCountWork.findFirst({
+      where: { dueAt: { lte: BigInt(+now) } }, orderBy: [{ dueAt: "asc" }, { ownerId: "asc" }],
+    });
+    if (!work) return false;
+    const { ownerId, version, dueAt } = work;
+    const claim = { ownerId, version, dueAt };
+    try {
+      await ownerAccess(this.db, ownerId);
+      signal?.throwIfAborted();
+      const snapshot = await this.playlistInputs(ownerId);
+      let nextCutoff = Infinity;
+      const inputs = {
+        ...snapshot, now,
+        onFutureHistoryCutoff: (at: number) => { nextCutoff = Math.min(nextCutoff, at); },
+      };
+      const counts = new Map<string, number>();
+      for (const playlist of snapshot.playlists) {
+        signal?.throwIfAborted();
+        counts.set(playlist.id, resolvePlaylist(playlist.definition, inputs, playlist.id).total);
+      }
+      const watchHistory = snapshot.playlists.some(p => usesPrivateHistory(p.definition));
+      await this.db.$transaction(async tx => {
+        // Writes can arrive while the worker evaluates a snapshot. Publish all counts together
+        // only if no writer invalidated this version and another worker hasn't published it.
+        const current = await tx.playlistCountWork.updateMany({
+          where: claim, data: { dueAt: Number.isFinite(nextCutoff) ? BigInt(nextCutoff) : null, watchHistory },
+        });
+        if (!current.count) return;
+        await tx.$executeRaw`UPDATE Playlist SET trackCount = counts.value
+          FROM json_each(${JSON.stringify(Object.fromEntries(counts))}) AS counts
+          WHERE Playlist.ownerId = ${ownerId} AND Playlist.id = counts.key AND Playlist.trackCount IS NOT counts.value`;
+      });
+    } catch (error) {
+      signal?.throwIfAborted();
+      await this.db.playlistCountWork.updateMany({ where: claim, data: { dueAt: BigInt(+now + 60_000) } });
+      if (!(error instanceof HttpError && error.status === 403)) throw error;
+    }
+    return true;
+  }
   async preview(ownerId: string, definition: PlaylistDefinition, id?: string, browser = true) {
     const checked = playlistDefinitionSchema.parse(definition);
     requireHistoryAccess(checked, browser);
@@ -754,18 +810,8 @@ export class LibraryService {
     browser: boolean,
   ) {
     try {
-      const [snapshot, history] = await Promise.all([
-        this.snapshot(ownerId),
-        this.db.listeningSummary.findMany({
-          where: { ownerId },
-          select: { itemId: true, launches: true, completed: true, skipped: true, lastStartedAt: true },
-        }),
-      ]);
-      const result = resolvePlaylist(
-        definition,
-        { ...snapshot, history: new Map(history.map((entry) => [entry.itemId, entry])) },
-        id,
-      );
+      const snapshot = await this.playlistInputs(ownerId);
+      const result = resolvePlaylist(definition, snapshot, id);
       if (!browser && usesPrivateHistory(
         definition, new Map(snapshot.playlists.map((playlist) => [playlist.id, playlist])),
       )) return { ...result, reasons: {}, excluded: [] };

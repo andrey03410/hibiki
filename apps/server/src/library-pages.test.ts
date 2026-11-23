@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
-import type { ItemDto } from "@hibiki/contracts";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { ItemDto, PlaylistDefinition, PlaylistSummaryDto, Rule } from "@hibiki/contracts";
 import { createApp } from "./app";
 import { testContext } from "./test-utils";
 
@@ -23,7 +23,7 @@ afterEach(async () => {
 
 const post = (path: string, payload: Record<string, unknown>, session = cookie) =>
   app.inject({ method: "POST", url: `/api/library/${path}`, payload, headers: { cookie: session } });
-const overview = () => app.inject({ url: "/api/library/overview", headers: { cookie } });
+const overview = () => app.inject({ url: "/api/library/overview?playlists=summary", headers: { cookie } });
 function track(id: string, ownerId = ctx.userId) {
   return { id, ownerId, kind: "audio", title: id, originalTitle: id, createdAt: new Date("2025-01-01T12:00:00Z") };
 }
@@ -274,4 +274,101 @@ it("rejects a stale batch preview and applies a larger reviewed selection as one
   const applied = await apply((await overview()).json().revision);
   expect(applied.statusCode,applied.body).toBe(200);
   expect(await ctx.db.item.count({where:{ownerId:ctx.userId,performance:"ost"}})).toBe(201);
+});
+
+it("lists lightweight playlist cards with an unknown count before the first worker pass", async () => {
+  const list = await ctx.library.savePlaylist(ctx.userId, {
+    title: "Первый", definition: { version: 1, sort: "source", rule: { type: "items", ids: [] } },
+  });
+  const cards = (await overview()).json().playlists;
+  expect(cards).toMatchObject([{ id: list.id, manual: true, trackCount: null }]);
+  expect(cards[0]).not.toHaveProperty("definition");
+  expect((await overview()).json().playlists).toEqual(cards);
+});
+
+it("refreshes unique nested counts after rule, item and tag changes without changing playlist revisions", async () => {
+  const { db, library, userId: ownerId } = ctx;
+  await db.item.createMany({ data: [track("a"), { ...track("b"), kind: "video" }] });
+  const tag = await library.createTag(ownerId, { name: "Море" });
+  const create = (title: string, rule: Rule, id?: string) =>
+    library.savePlaylist(ownerId, { title, definition: { version: 1, sort: "source", rule } }, id);
+  const manual = await create("ручной", { type: "items", ids: ["a", "a"] });
+  const parent = await create("общий", { type: "union", rules: [
+    { type: "playlist", id: manual.id }, { type: "tag", id: tag.id },
+  ] });
+  const empty = await create("исключения", { type: "difference", include: { type: "playlist", id: parent.id }, exclude: { type: "items", ids: ["a", "b"] } });
+  const original = await db.playlist.findUniqueOrThrow({ where: { id: parent.id } });
+  const counts = async () => Object.fromEntries((await overview()).json().playlists.map(
+    (p: PlaylistSummaryDto) => [p.id, p.trackCount]));
+  expect(await counts()).toEqual({ [manual.id]: null, [parent.id]: null, [empty.id]: null });
+  expect(await library.refreshDuePlaylistCounts()).toBe(true);
+  expect(await counts()).toEqual({ [manual.id]: 1, [parent.id]: 1, [empty.id]: 0 });
+  expect(await library.refreshDuePlaylistCounts()).toBe(false);
+  await db.itemTag.create({ data: { itemId: "b", tagId: tag.id } });
+  await library.refreshDuePlaylistCounts();
+  expect(await counts()).toEqual({ [manual.id]: 1, [parent.id]: 2, [empty.id]: 0 });
+  await db.itemTag.deleteMany({ where: { tagId: tag.id } });
+  await create("ручной", { type: "items", ids: ["a", "b"] }, manual.id);
+  await library.refreshDuePlaylistCounts();
+  expect(await counts()).toEqual({ [manual.id]: 2, [parent.id]: 2, [empty.id]: 0 });
+  expect(await db.playlist.findUniqueOrThrow({ where: { id: parent.id } })).toMatchObject({
+    revision: original.revision, updatedAt: original.updatedAt,
+  });
+});
+
+it("wakes at the strict history cutoff and reacts to new listening and history cleanup", async () => {
+  const { db, library, userId: ownerId } = ctx;
+  const start = new Date("2026-01-01T00:00:00Z");
+  await db.item.createMany({ data: [track("a"), track("b")] });
+  const child = await library.savePlaylist(ownerId, { title: "давно", definition: {
+    version: 1, sort: "source", rule: { type: "history", condition: "last-started-before", days: 1 },
+  } });
+  await library.savePlaylist(ownerId, { title: "родитель", definition: {
+    version: 1, sort: "source", rule: { type: "playlist", id: child.id },
+  } });
+  const counts = async () => (await overview()).json().playlists.map((p: PlaylistSummaryDto) => p.trackCount);
+  expect(await counts()).toEqual([null, null]);
+  await db.listeningSummary.create({ data: { itemId: "a", ownerId, launches: 1, lastStartedAt: start } });
+  await library.refreshDuePlaylistCounts(start);
+  expect(await counts()).toEqual([0, 0]);
+  const boundary = new Date(+start + 86_400_000);
+  expect(await library.refreshDuePlaylistCounts(boundary)).toBe(false);
+  const past = new Date(+boundary + 1);
+  expect(await library.refreshDuePlaylistCounts(past)).toBe(true);
+  expect(await counts()).toEqual([1, 1]);
+  await db.listeningSummary.update({ where: { itemId: "a" }, data: { lastStartedAt: past } });
+  expect(await library.refreshDuePlaylistCounts(past)).toBe(true);
+  expect(await counts()).toEqual([0, 0]);
+  await db.listeningSummary.deleteMany({ where: { ownerId } });
+  expect(await library.refreshDuePlaylistCounts(past)).toBe(true);
+  expect(await library.refreshDuePlaylistCounts(new Date(+past + 2 * 86_400_000))).toBe(false);
+});
+
+it("rejects stale counts if a writer changes the rules during the worker's evaluation", async () => {
+  const { db, library, userId: ownerId } = ctx;
+  await db.item.create({ data: track("one") });
+  const manual = await library.savePlaylist(ownerId, { title: "ручной", definition: {
+    version: 1, sort: "source", rule: { type: "items", ids: ["one"] },
+  } });
+  const readSnapshot = library.snapshot.bind(library);
+  vi.spyOn(library, "snapshot").mockImplementationOnce(async owner => {
+    const snapshot = await readSnapshot(owner);
+    await library.savePlaylist(owner, { title: manual.title, definition: {
+      version: 1, sort: "source", rule: { type: "items", ids: [] },
+    } }, manual.id);
+    return snapshot;
+  });
+  await library.refreshDuePlaylistCounts();
+  expect((await overview()).json().playlists[0].trackCount).toBeNull();
+  await library.refreshDuePlaylistCounts();
+  expect((await overview()).json().playlists[0].trackCount).toBe(0);
+  await db.listeningSummary.create({ data: { ownerId, itemId: "one", launches: 1 } });
+  expect(await library.refreshDuePlaylistCounts()).toBe(false);
+});
+
+it("keeps definitions in overview responses for tabs opened before summary cards shipped", async () => {
+  const definition: PlaylistDefinition = { version: 1, sort: "source", rule: { type: "items", ids: [] } };
+  await ctx.library.savePlaylist(ctx.userId, { title: "Ручной", definition });
+  const oldTab = await app.inject({ url: "/api/library/overview", headers: { cookie } });
+  expect(oldTab.json().playlists[0].definition).toEqual(definition);
 });

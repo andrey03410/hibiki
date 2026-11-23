@@ -1,6 +1,60 @@
 import type { ItemDto, PlaybackMode } from "@hibiki/contracts";
 import { playbackSources, type PlaybackSettings } from "./player-model";
 
+// Keep boundary navigation waiting across a failed request and an explicit retry.
+// Starting another queue releases waiters and invalidates the old response.
+export class LibraryQueueLoad {
+  private status: "complete" | "loading" | "error" = "complete";
+  private listeners = new Set<() => void>();
+  private request?: { run: () => Promise<void>; release: () => void; ready: Promise<void> };
+  get tail() { return this.request?.ready; }
+  snapshot = () => this.status;
+  subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  };
+  private publish(status: typeof this.status) {
+    if (status === this.status) return;
+    this.status = status;
+    this.listeners.forEach(listener => listener());
+  }
+  cancel() {
+    this.request?.release();
+    this.request = undefined;
+    this.publish("complete");
+  }
+  start(load: () => Promise<string[]>, apply: (ids: string[]) => void) {
+    this.cancel();
+    let release!: () => void;
+    const ready = new Promise<void>(resolve => { release = resolve; });
+    const request = { ready, release, run: async () => {
+      this.publish("loading");
+      try {
+        const ids = await load();
+        if (request !== this.request) return;
+        apply(ids);
+        this.cancel();
+      } catch {
+        if (request === this.request) this.publish("error");
+      }
+    } };
+    this.request = request;
+    void request.run();
+  }
+  retry() {
+    if (this.status === "error") void this.request?.run();
+  }
+}
+
+export function completeLibraryOrder(state: PlaybackSettings, ids: string[]) {
+  const current = state.queue[state.queueIndex];
+  const queue = [...new Set(ids)];
+  // The library can change between the page and the ID response. Finish the
+  // playing entry even if it has just fallen outside the filter.
+  if (current && !queue.includes(current)) queue.splice(state.queueIndex, 0, current);
+  return { queue, queueIndex: current ? queue.indexOf(current) : 0 };
+}
+
 // A saved queue contains IDs. A missing detail row is only a deletion after a
 // successful lookup, so browsing a different page never prunes the queue.
 export class QueueCatalog {
@@ -53,12 +107,17 @@ export class QueueCatalog {
     }
   }
   async nextInQueue(read: () => PlaybackSettings, direction: 1 | -1, ended: boolean,
-    failed: ReadonlySet<string>, active: () => boolean) {
+    failed: ReadonlySet<string>, active: () => boolean, unloadedTail: () => Promise<void> | undefined = () => undefined) {
     while (active()) {
       const state = read();
       const generation = this.generation;
+      const tail = unloadedTail();
       const index = ended && state.repeat === "one" ? state.queueIndex
-        : await this.findPlayable(state.queue, state.queueIndex, direction, state.repeat === "all", state.mode, failed, active);
+        : await this.findPlayable(state.queue, state.queueIndex, direction, !tail && state.repeat === "all", state.mode, failed, active);
+      if (index < 0 && tail && (direction > 0 || state.repeat === "all")) {
+        await tail;
+        continue;
+      }
       const latest = read();
       if (active() && this.generation === generation && latest.queue === state.queue && latest.queueIndex === state.queueIndex &&
           latest.mode === state.mode && latest.repeat === state.repeat) return {index, state: latest};

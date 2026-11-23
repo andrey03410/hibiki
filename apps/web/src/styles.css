@@ -1091,6 +1091,20 @@ input[type="checkbox"]:checked:after {
   gap: 23px;
   margin: 7px 0 35px;
 }
+.playlist-card {
+  position: relative;
+}
+.playlist-card-action {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 8px;
+}
 .playlist-cover-wrap {
   position: relative;
 }
@@ -1099,7 +1113,7 @@ input[type="checkbox"]:checked:after {
   border-radius: 8px;
   transition: filter 0.2s;
 }
-.playlist-card .cover:hover {
+.playlist-card-action:is(:hover, :focus-visible) ~ .playlist-cover-wrap .cover {
   filter: brightness(1.15);
 }
 .cover-type {
@@ -1136,14 +1150,14 @@ input[type="checkbox"]:checked:after {
   transition: transform 0.2s;
   opacity: 0;
 }
-.playlist-card:hover .card-play,
-.card-play:focus-visible {
+.playlist-card-action:is(:hover, :focus-visible) ~ .playlist-cover-wrap .card-play {
   opacity: 1;
 }
-.card-play:hover {
-  transform: scale(1.06);
-}
 .playlist-card-title {
+  position: relative;
+  z-index: 2;
+  width: fit-content;
+  max-width: 100%;
   display: block;
   font-family: "Manrope", sans-serif;
   font-size: 13px;
@@ -3260,9 +3274,6 @@ input[type="range"]::-moz-range-thumb {
   transform: translateY(0);
   transition: opacity 0.2s, transform 0.2s;
 }
-.watch-fullscreen-reveal {
-  display: none;
-}
 .watch-stage:is(:fullscreen, .is-viewport-fullscreen).is-controls-idle:not(:has(.watch-controls :focus-visible)) {
   cursor: none;
 }
@@ -3271,12 +3282,18 @@ input[type="range"]::-moz-range-thumb {
   pointer-events: none;
   transform: translateY(12px);
 }
-/* An iframe cannot bubble pointer events; the first movement restores its controls. */
-.watch-stage:is(:fullscreen, .is-viewport-fullscreen).is-controls-idle:not(:has(.watch-controls :focus-visible)) .watch-fullscreen-reveal {
-  display: block;
-  position: absolute;
-  inset: 0;
-  z-index: 2;
+/* Keep Hibiki controls outside the interactive YouTube frame. In idle mode
+   its bottom edge stays reachable without covering the provider's controls. */
+.watch-stage.is-youtube:is(:fullscreen, .is-viewport-fullscreen) .watch-controls {
+  position: relative;
+  padding-top: 12px;
+  background: #130d1b;
+}
+.watch-stage.is-youtube:is(:fullscreen, .is-viewport-fullscreen).is-controls-idle:not(:has(.watch-controls :focus-visible)) .watch-controls {
+  height: 20px;
+  padding: 0;
+  overflow: hidden;
+  transform: none;
 }
 .watch-stage:fullscreen .watch-fullscreen-title,
 .watch-stage.is-viewport-fullscreen .watch-fullscreen-title {

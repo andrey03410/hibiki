@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
-import { CompactPlaybackQueue, CompactPlaybackQueueRow, PlaybackSeekBar } from "./PlaybackControls";
+import { CompactPlaybackQueue, CompactPlaybackQueueRow, PlaybackSeekBar, PlaybackVolume } from "./PlaybackControls";
 
 it("renders a labeled seek control with shared playback time", () => {
   const handlers = { onSeek: vi.fn(), onScrubStart: vi.fn(), onScrubEnd: vi.fn() };
@@ -47,4 +47,22 @@ it("explains why a compact queue entry cannot be selected", () => {
     unavailableReason: "В видео нет звуковой дорожки",
   }));
   expect(html).toMatch(/<button[^>]*aria-disabled="true"[^>]*aria-describedby="([^"]+)"[\s\S]*<small id="\1">В видео нет звуковой дорожки/);
+});
+
+it("shows separated local buffered ranges beneath the shared progress fill", () => {
+  const html = renderToStaticMarkup(createElement(PlaybackSeekBar, {
+    position: 12, duration: 100, buffered: [[0, 20], [70, 85]],
+    onSeek() {}, onScrubStart() {}, onScrubEnd() {},
+  }));
+  expect(html).toContain("--buffered:");
+  expect(html).toMatch(/0% 20%, transparent 20% 70%, var\(--buffer-color\) 70% 85%/);
+});
+
+it("shows a volume trigger in the mini-player and a slider with the same level in the watch player", () => {
+  const props = {volume: 0.35, onVolume() {}, onMute() {}};
+  const mini = renderToStaticMarkup(createElement(PlaybackVolume, {...props, compact: true}));
+  const watch = renderToStaticMarkup(createElement(PlaybackVolume, props));
+  expect(mini).toMatch(/<button[^>]*aria-label="Громкость, 35%"[^>]*aria-expanded="false"/);
+  expect(watch).toContain('aria-valuetext="35%"');
+  expect(watch).toContain('aria-label="Выключить звук"');
 });
