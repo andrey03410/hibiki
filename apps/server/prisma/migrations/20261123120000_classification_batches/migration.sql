@@ -6,6 +6,7 @@ CREATE TABLE "ClassificationBatch" (
     "state" TEXT NOT NULL,
     "packageJson" TEXT NOT NULL,
     "journalJson" TEXT,
+    "reportJson" TEXT NOT NULL DEFAULT '{}',
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX "ClassificationBatch_ownerId_createdAt_idx" ON "ClassificationBatch"("ownerId","createdAt");

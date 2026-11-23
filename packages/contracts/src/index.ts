@@ -17,6 +17,7 @@ export interface TagDto {
   aliases?: string[];
   parentIds?: string[];
   archived?: boolean;
+  legacyFlat?: boolean;
 }
 export interface SourceDto {
   id: string;
@@ -107,6 +108,7 @@ export interface LibraryDto {
 export interface LibraryOverviewDto extends Omit<LibraryDto, "items"> {
   total: number;
   tagCounts: Record<string, number>;
+  archivedTagNames?: Record<string, string>;
   revision: string;
 }
 export interface LibraryPageDto {
@@ -305,6 +307,7 @@ export const tagSchema = z
     name: z.string().min(1).max(200),
     color: z.string().max(64),
     ...tagCatalogFields,
+    legacyFlat: z.boolean().optional(),
   })
   .strict() satisfies z.ZodType<TagDto>;
 export const sourceSchema = z
@@ -420,7 +423,7 @@ export { missingClassification } from "./classification";
 export function validateCatalog(tags: TagDto[]): void {
   const byId = new Map(tags.map(tag => [tag.id, tag]));
   if (byId.size !== tags.length) throw new Error("Повтор идентификатора тега");
-  const paths = new Set<string>();
+  const paths = new Map<string, { legacy: boolean; names: Set<string> }>();
   const children = new Map<string, string[]>();
   const indegree = new Map<string, number>();
   for (const tag of tags) {
@@ -440,8 +443,12 @@ export function validateCatalog(tags: TagDto[]): void {
     if (!tag.archived) {
       for (const parent of parents.length ? parents : [null]) {
         const path = JSON.stringify([tag.group ?? "extra", parent, tag.name.trim().normalize("NFC").toLowerCase()]);
-        if (paths.has(path)) throw new Error("Тег с таким названием уже есть в этой ветке");
-        paths.add(path);
+        const legacy = !!tag.legacyFlat && (tag.group ?? "extra") === "extra" && parent === null;
+        const prior = paths.get(path);
+        if (prior && (!legacy || !prior.legacy || prior.names.has(tag.name)))
+          throw new Error("Тег с таким названием уже есть в этой ветке");
+        if (prior) prior.names.add(tag.name);
+        else paths.set(path, { legacy, names: new Set([tag.name]) });
       }
     }
   }

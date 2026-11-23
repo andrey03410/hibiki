@@ -55,6 +55,7 @@ type Pack = z.infer<typeof packSchema>;
 type Tx = Prisma.TransactionClient;
 type ItemState = {
   id: string;
+  title?: string;
   performance: string;
   voices: string;
   favorite: boolean;
@@ -69,6 +70,7 @@ type SavedTag = {
   aliases: string;
   parentIds: string;
   archived: boolean;
+  legacyFlat: boolean;
   color: string;
   note: string | null;
 };
@@ -83,6 +85,7 @@ type StoredBatch = {
   revision: number;
   packageJson: string;
   journalJson: string | null;
+  reportJson: string;
 };
 
 const invalid = (value: unknown, message: string) =>
@@ -100,6 +103,7 @@ const fields = {
   aliases: true,
   parentIds: true,
   archived: true,
+  legacyFlat: true,
   color: true,
   note: true,
 } as const;
@@ -112,6 +116,7 @@ function dto(tag: SavedTag): TagDto {
     aliases: JSON.parse(tag.aliases),
     parentIds: JSON.parse(tag.parentIds),
     archived: tag.archived,
+    ...(tag.legacyFlat ? { legacyFlat: true } : {}),
   };
 }
 function tagRow(owner: string, t: Pack["tags"][number]): SavedTag {
@@ -123,16 +128,27 @@ function tagRow(owner: string, t: Pack["tags"][number]): SavedTag {
     group: t.group,
     aliases: JSON.stringify(t.aliases),
     parentIds: JSON.stringify(t.parents.map((p) => managedId(owner, p))),
+    legacyFlat: false,
     archived: false,
     color: "#b8a5ff",
     note: null,
   };
 }
+function performanceLabel(performance: string, voices: readonly string[]) {
+  if (performance === "ost") return "Без вокала (OST)";
+  if (performance !== "vocal") return "Не указано";
+  if (voices.length === 2) return "С вокалом · оба голоса";
+  if (voices.includes("male")) return "С вокалом · мужской";
+  if (voices.includes("female")) return "С вокалом · женский";
+  return "С вокалом · голос не указан";
+}
+
 async function itemsFor(tx: Tx, ownerId: string, ids: string[]) {
   const rows = await tx.item.findMany({
     where: { ownerId, id: { in: ids } },
     select: {
       id: true,
+      title: true,
       performance: true,
       voices: true,
       favorite: true,
@@ -228,6 +244,10 @@ async function prepare(tx: Tx, ownerId: string, p: Pack) {
   const missing: Record<string, number> = {};
   let incomplete = 0,
     favoritesAdded = 0;
+  const performanceChanges = new Map<
+    string,
+    { before: string; after: string; count: number }
+  >();
   const examples = new Map<
     string,
     { before: string; after: string; count: number }
@@ -242,6 +262,27 @@ async function prepare(tx: Tx, ownerId: string, p: Pack) {
       "Голоса допустимы только у вокальной композиции",
     );
     const before = beforeItems.get(i.id)!;
+    const legacy = new Set(
+      before.tags
+        .filter((id) => archiveSet.has(id))
+        .map((id) => dto(byId.get(id)!).name.toLowerCase()),
+    );
+    const oldLabels = [
+      legacy.has("ost") && "OST",
+      legacy.has("vocals") && "vocals",
+    ].filter(Boolean);
+    const prior =
+      before.performance === "unknown" && oldLabels.length
+        ? oldLabels.join(" + ")
+        : performanceLabel(before.performance, JSON.parse(before.voices));
+    const next = performanceLabel(i.performance, i.voices);
+    const pair = JSON.stringify([prior, next]);
+    const previous = performanceChanges.get(pair);
+    performanceChanges.set(pair, {
+      before: prior,
+      after: next,
+      count: (previous?.count ?? 0) + 1,
+    });
     const assigned = i.tags.map((k) => managed.get(k)!.id);
     const tags = [
       ...new Set([
@@ -308,6 +349,9 @@ async function prepare(tx: Tx, ownerId: string, p: Pack) {
       incomplete,
       missing,
       favoritesAdded,
+      performanceChanges: [...performanceChanges.values()].sort(
+        (a, b) => b.count - a.count,
+      ),
       examples: [...examples.values()]
         .sort((a, b) => b.count - a.count)
         .slice(0, 30),
@@ -324,14 +368,21 @@ export async function previewClassification(
     serialized = JSON.stringify(p),
     digest = hash(serialized);
   return db.$transaction(async (tx) => {
-    const { summary } = await prepare(tx, owner, p);
-    const last = await tx.$queryRaw<
-      StoredBatch[]
-    >`SELECT * FROM ClassificationBatch WHERE ownerId=${owner} AND digest=${digest} AND (state='applied' OR (state='preview' AND revision=${summary.revision})) ORDER BY rowid DESC LIMIT 1`;
+    const last = await tx.$queryRaw<StoredBatch[]>`
+      SELECT id,state,reportJson FROM ClassificationBatch
+      WHERE ownerId=${owner} AND digest=${digest}
+        AND (state='applied' OR (state='preview' AND revision=(SELECT libraryRevision FROM User WHERE id=${owner})))
+      ORDER BY rowid DESC LIMIT 1
+    `;
     if (last.length)
-      return { ...summary, id: last[0].id, state: last[0].state };
+      return {
+        ...JSON.parse(last[0].reportJson),
+        id: last[0].id,
+        state: last[0].state,
+      };
+    const { summary } = await prepare(tx, owner, p);
     const id = randomUUID();
-    await tx.$executeRaw`INSERT INTO ClassificationBatch (id,ownerId,digest,revision,state,packageJson) VALUES (${id},${owner},${digest},${summary.revision},'preview',${serialized})`;
+    await tx.$executeRaw`INSERT INTO ClassificationBatch (id,ownerId,digest,revision,state,packageJson,reportJson) VALUES (${id},${owner},${digest},${summary.revision},'preview',${serialized},${JSON.stringify(summary)})`;
     return { ...summary, id, state: "preview" };
   }, options);
 }
@@ -373,7 +424,8 @@ async function writeChanges(tx: Tx, owner: string, changes: ItemChange[]) {
 export async function applyClassification(db: Db, owner: string, id: string) {
   return db.$transaction(async (tx) => {
     const batch = await findBatch(tx, owner, id);
-    if (batch.state === "applied") return { id, state: "applied" };
+    if (batch.state === "applied")
+      return { ...JSON.parse(batch.reportJson), id, state: "applied" };
     invariant(
       batch.state === "preview",
       409,
@@ -415,7 +467,8 @@ export async function applyClassification(db: Db, owner: string, id: string) {
 export async function undoClassification(db: Db, owner: string, id: string) {
   return db.$transaction(async (tx) => {
     const batch = await findBatch(tx, owner, id);
-    if (batch.state === "undone") return { id, state: "undone", skipped: 0 };
+    if (batch.state === "undone")
+      return { ...JSON.parse(batch.reportJson), id, state: "undone" };
     invariant(
       batch.state === "applied" && batch.journalJson,
       409,
@@ -437,27 +490,42 @@ export async function undoClassification(db: Db, owner: string, id: string) {
       owner,
       journal.changes.map((c) => c.before.id),
     );
-    let skipped = 0;
+    const skippedChanges: {
+      itemId?: string;
+      tagId?: string;
+      label: string;
+      field: string;
+    }[] = [];
     const restore: ItemChange[] = [];
     for (const c of journal.changes) {
       const item = current.get(c.before.id);
       if (!item) {
-        skipped++;
+        skippedChanges.push({
+          itemId: c.before.id,
+          label: c.before.title ?? c.before.id,
+          field: "Запись удалена",
+        });
         continue;
       }
       const target = { ...item };
+      const skip = (field: string) =>
+        skippedChanges.push({ itemId: item.id, label: item.title, field });
       if (
         item.performance === c.after.performance &&
         item.voices === c.after.voices
       ) {
         target.performance = c.before.performance;
         target.voices = c.before.voices;
-      } else skipped++;
+      } else if (
+        c.before.performance !== c.after.performance ||
+        c.before.voices !== c.after.voices
+      )
+        skip("Исполнение и голоса");
       if (item.favorite === c.after.favorite)
         target.favorite = c.before.favorite;
-      else if (c.before.favorite !== c.after.favorite) skipped++;
+      else if (c.before.favorite !== c.after.favorite) skip("Избранное");
       if (sameIds(item.tags, c.after.tags)) target.tags = c.before.tags;
-      else skipped++;
+      else if (!sameIds(c.before.tags, c.after.tags)) skip("Теги");
       restore.push({ before: item, after: target });
     }
     await writeChanges(tx, owner, restore);
@@ -510,13 +578,39 @@ export async function undoClassification(db: Db, owner: string, id: string) {
     const removable = journal.created
       .filter((t) => !keep.has(t.id))
       .map((t) => t.id);
-    skipped += journal.created.filter((t) => keep.has(t.id)).length;
+    for (const t of journal.created) {
+      if (keep.has(t.id))
+        skippedChanges.push({
+          tagId: t.id,
+          label: present.get(t.id)?.label ?? t.label ?? t.name,
+          field: "Значение каталога",
+        });
+    }
     if (removable.length)
       await tx.tag.deleteMany({
         where: { ownerId: owner, id: { in: removable } },
       });
-    await tx.$executeRaw`UPDATE ClassificationBatch SET state='undone' WHERE id=${id} AND ownerId=${owner}`;
-    return { id, state: "undone", skipped };
+    try {
+      const restored = await tx.tag.findMany({
+        where: { ownerId: owner },
+        select: fields,
+      });
+      validateCatalog(restored.map(dto));
+    } catch (error) {
+      invariant(
+        false,
+        409,
+        "undo_catalog_conflict",
+        "Отмена создаст конфликт в каталоге: " + (error as Error).message,
+      );
+    }
+    const report = {
+      ...JSON.parse(batch.reportJson),
+      skipped: skippedChanges.length,
+      skippedChanges,
+    };
+    await tx.$executeRaw`UPDATE ClassificationBatch SET state='undone',reportJson=${JSON.stringify(report)} WHERE id=${id} AND ownerId=${owner}`;
+    return { ...report, id, state: "undone" };
   }, options);
 }
 export function registerClassification(app: FastifyInstance, db: Db) {
@@ -540,8 +634,12 @@ export function registerClassification(app: FastifyInstance, db: Db) {
   app.get("/api/classification/latest", async (req, rep) => {
     const owner = browserOwner(req, rep);
     const [batch] = await db.$queryRaw<
-      { id: string; state: string }[]
-    >`SELECT id,state FROM ClassificationBatch WHERE ownerId=${owner} ORDER BY rowid DESC LIMIT 1`;
-    return { batch: batch ?? null };
+      { id: string; state: string; reportJson: string }[]
+    >`SELECT id,state,reportJson FROM ClassificationBatch WHERE ownerId=${owner} ORDER BY rowid DESC LIMIT 1`;
+    return {
+      batch: batch
+        ? { ...JSON.parse(batch.reportJson), id: batch.id, state: batch.state }
+        : null,
+    };
   });
 }

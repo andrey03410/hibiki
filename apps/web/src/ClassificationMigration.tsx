@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { api } from "./api";
 import { missingLabels } from "./taxonomy";
 
+type SkippedChange = { itemId?: string; tagId?: string; label: string; field: string };
+
 type Batch = {
   id: string;
   state: "preview" | "applied" | "undone";
@@ -12,9 +14,30 @@ type Batch = {
   missing?: Record<string, number>;
   favoritesAdded?: number;
   skipped?: number;
+  skippedChanges?: SkippedChange[];
+  performanceChanges?: { before: string; after: string; count: number }[];
   examples?: { before: string; after: string; count: number }[];
 };
 const stateNames = { preview: "Предпросмотр", applied: "Применён", undone: "Отменён" };
+
+export function SkippedChanges({ skipped, changes }: { skipped?: number; changes?: SkippedChange[] }) {
+  if (!changes?.length) return skipped === undefined ? null : <p>Сохранено последующих изменений: {skipped}</p>;
+  return (
+    <details open className="migration-skipped">
+      <summary>Сохранено последующих изменений: {skipped ?? changes.length}</summary>
+      <div className="migration-examples">
+        <table aria-label="Изменения, сохранённые при отмене">
+          <thead><tr><th scope="col">Запись или тег</th><th scope="col">Что сохранено</th></tr></thead>
+          <tbody>{changes.map(({itemId,tagId,label,field}) => (
+            <tr key={JSON.stringify([itemId,tagId,field])}>
+              <td title={itemId ?? tagId}>{label}</td><td>{field}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+    </details>
+  );
+}
 
 export function ClassificationMigration({ reload }: { reload: () => Promise<void> }) {
   const [open, setOpen] = useState(false),
@@ -101,6 +124,19 @@ export function ClassificationMigration({ reload }: { reload: () => Promise<void
                       </li>
                     ))}
                   </ul>
+                  {!!batch.performanceChanges?.length && (
+                    <div className="migration-examples">
+                      <table>
+                        <caption>Исполнение</caption>
+                        <thead><tr><th>Было</th><th>Станет</th><th>Записей</th></tr></thead>
+                        <tbody>{batch.performanceChanges.map(row => (
+                          <tr key={JSON.stringify([row.before,row.after])}>
+                            <td>{row.before}</td><td>{row.after}</td><td>{row.count}</td>
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                    </div>
+                  )}
                   {!!batch.examples?.length && (
                     <div className="migration-examples">
                       <table>
@@ -145,7 +181,7 @@ export function ClassificationMigration({ reload }: { reload: () => Promise<void
                   Отменить пакет
                 </button>
               )}
-              {batch.skipped !== undefined && <p>Сохранено последующих изменений: {batch.skipped}</p>}
+              <SkippedChanges skipped={batch.skipped} changes={batch.skippedChanges} />
             </section>
           )}
           {error && (

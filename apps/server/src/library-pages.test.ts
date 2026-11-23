@@ -28,6 +28,20 @@ function track(id: string, ownerId = ctx.userId) {
   return { id, ownerId, kind: "audio", title: id, originalTitle: id, createdAt: new Date("2025-01-01T12:00:00Z") };
 }
 
+it("returns an owner's archived display names separately from the active tag directory", async () => {
+  const ownerId = ctx.userId;
+  await ctx.db.tag.createMany({data:[
+    {id:"saved", ownerId, name:"internal.key", label:"Прежнее имя", archived:true},
+    {id:"active", ownerId, name:"Текущий тег"},
+    {id:"other", ownerId:ctx.otherUserId, name:"Чужой архив", archived:true},
+  ]});
+  const response = await overview();
+  expect(response.statusCode).toBe(200);
+  const result = response.json();
+  expect(result.archivedTagNames).toEqual({saved:"Прежнее имя"});
+  expect(result.tags.map((t:{id:string}) => t.id)).toEqual(["active"]);
+});
+
 it("pages an owned selection in stable groups of 100 and rejects stale cursors", async () => {
   const ids = Array.from({ length: 203 }, (_, n) => `a${String(n).padStart(3, "0")}`);
   await ctx.db.item.createMany({ data: [...ids.toReversed().map((id) => track(id)), track("foreign", ctx.otherUserId)] });

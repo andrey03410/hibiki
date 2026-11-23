@@ -15,6 +15,7 @@ const icons = { source: FolderTree, artist: Mic2, genre: Disc3, mood: Heart, ext
 
 export function TagNavigation({
   catalog,
+  archivedTagNames,
   counts,
   search,
   onChange,
@@ -23,6 +24,7 @@ export function TagNavigation({
   hasPlayer,
 }: {
   catalog: TagCatalog;
+  archivedTagNames?: Record<string, string>;
   counts?: Record<string, number>;
   search: LibrarySearch;
   onChange: Dispatch<SetStateAction<LibrarySearch>>;
@@ -90,7 +92,8 @@ export function TagNavigation({
   const chosen = search.tagIds;
   function chip(id: string, full = false) {
     const tag = catalog.byId.get(id);
-    const label = tag?.name ?? "Прежний тег";
+    const archivedName = archivedTagNames && Object.hasOwn(archivedTagNames, id) ? archivedTagNames[id] : undefined;
+    const label = tag?.name ?? archivedName ?? "Прежний тег";
     const path = catalog.paths(id).join(" / ") || label;
     return (
       <button

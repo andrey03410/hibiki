@@ -28,14 +28,15 @@ async function overview(tx: Tx, ownerId: string): Promise<LibraryOverviewDto> {
   const where = { ownerId };
   const [total, tags, counts, playlists, jobs, current] = await Promise.all([
     tx.item.count({ where }),
-    listTags(tx, ownerId),
+    listTags(tx, ownerId, true),
     facetCounts(tx, ownerId, Prisma.sql`i.ownerId = ${ownerId}`),
     tx.playlist.findMany({ where, include: { youtubeLink: { select: { playlistId: true } } }, orderBy: { createdAt: "asc" } }),
     tx.job.findMany({ where, orderBy: { createdAt: "desc" }, take: 50 }),
     revision(tx, ownerId),
   ]);
   return {
-    tags,
+    tags: tags.filter(tag => !tag.archived),
+    archivedTagNames: Object.fromEntries(tags.filter(tag => tag.archived).map(tag => [tag.id, tag.name])),
     playlists: playlists.map(playlistDto), jobs: jobs.map(jobDto), total,
     tagCounts: counts,
     revision: current,
@@ -124,7 +125,11 @@ function itemFilter(ownerId: string, search: LibrarySearch, zone?: string) {
   if (tagIds.length) {
     const all = search.tagMode !== "or" ? sql`HAVING count(DISTINCT a.ancestor) = ${tagIds.length}` : Prisma.empty;
     clauses.push(sql`i.id IN (
-      SELECT it.itemId FROM ancestry a JOIN ItemTag it ON it.tagId = a.descendant
+      SELECT it.itemId FROM (
+        SELECT descendant, ancestor FROM ancestry
+        UNION ALL
+        SELECT id, id FROM Tag WHERE ownerId = ${ownerId} AND archived
+      ) a JOIN ItemTag it ON it.tagId = a.descendant
       WHERE a.ancestor IN (SELECT value FROM json_each(${JSON.stringify(tagIds)}))
       GROUP BY it.itemId ${all}
     )`);

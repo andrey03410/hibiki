@@ -838,7 +838,7 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   }
 
   return (
-    <TagNavigation catalog={catalog} counts={tagCounts ?? (restrictsFacets ? undefined : overview.tagCounts)}
+    <TagNavigation catalog={catalog} archivedTagNames={overview.archivedTagNames} counts={tagCounts ?? (restrictsFacets ? undefined : overview.tagCounts)}
       search={filters} onChange={setFilters} userId={userId} hasPlayer={!!player.current}>
       <div className="title-row library-title-row">
         <h1>Медиатека</h1>

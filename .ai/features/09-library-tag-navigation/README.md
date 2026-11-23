@@ -2,9 +2,9 @@
 id: 09
 title: Навигация по тегам медиатеки
 track: product
-stage: build
+stage: review
 branch: codex/09-library-tag-navigation
-pr:
+pr: https://github.com/andrey03410/hibiki/pull/9
 started: 2026-11-23
 merged:
 ---

@@ -80,7 +80,14 @@ describe("library classification packages", () => {
       data: { voices: '["male"]' },
     });
     const undo = await undoClassification(ctx.db, ctx.userId, batch.id);
-    expect(undo.skipped).toBeGreaterThan(0);
+    expect(undo.skippedChanges).toContainEqual({
+      itemId: item.id,
+      label: "Curated",
+      field: "Исполнение и голоса",
+    });
+    expect(
+      (await undoClassification(ctx.db, ctx.userId, batch.id)).skippedChanges,
+    ).toEqual(undo.skippedChanges);
     expect(
       await ctx.db.item.findUniqueOrThrow({ where: { id: item.id } }),
     ).toMatchObject({
@@ -91,6 +98,66 @@ describe("library classification packages", () => {
     expect(
       await ctx.db.tag.findUniqueOrThrow({ where: { id: old.id } }),
     ).toMatchObject({ archived: false });
+  });
+  it("rejects undo atomically if a later manual tag occupies the restored path", async () => {
+    const { input, old, item } = await fixture();
+    const batch = await previewClassification(ctx.db, ctx.userId, input);
+    await applyClassification(ctx.db, ctx.userId, batch.id);
+    const manual = await ctx.library.createTag(ctx.userId, {
+      name: "Любимое",
+      group: "extra",
+    });
+    await expect(
+      undoClassification(ctx.db, ctx.userId, batch.id),
+    ).rejects.toThrow();
+    expect(
+      await ctx.db.tag.findUniqueOrThrow({ where: { id: old.id } }),
+    ).toHaveProperty("archived", true);
+    expect(
+      await ctx.db.tag.findUniqueOrThrow({ where: { id: manual.id } }),
+    ).toHaveProperty("archived", false);
+    expect(
+      await ctx.db.item.findUniqueOrThrow({ where: { id: item.id } }),
+    ).toHaveProperty("performance", "vocal");
+  });
+  it("counts every performance transition, including old conflicting OST and vocals tags", async () => {
+    const { input, item } = await fixture();
+    const other = await ctx.library.upsertYoutube(ctx.userId, {
+      externalId: "bcdefghijkl",
+      title: "Other",
+    });
+    const tags = await Promise.all(
+      ["OST", "vocals"].map((name) =>
+        ctx.library.createTag(ctx.userId, { name }),
+      ),
+    );
+    for (const id of [item.id, other.item.id])
+      await ctx.library.updateItem(ctx.userId, id, {
+        tagIds: tags.map((t) => t.id),
+      });
+    const result = await previewClassification(ctx.db, ctx.userId, {
+      ...input,
+      archiveTagIds: tags.map((t) => t.id),
+      items: [
+        { ...input.items[0], voices: [] },
+        {
+          ...input.items[0],
+          id: other.item.id,
+          performance: "ost",
+          voices: [],
+        },
+      ],
+    });
+    expect(result.performanceChanges).toEqual(
+      expect.arrayContaining([
+        {
+          before: "OST + vocals",
+          after: "С вокалом · голос не указан",
+          count: 1,
+        },
+        { before: "OST + vocals", after: "Без вокала (OST)", count: 1 },
+      ]),
+    );
   });
   it("requires a fresh revision and rejects foreign IDs, invalid graphs and repeated assignments", async () => {
     const { input, item } = await fixture();

@@ -6,6 +6,7 @@ import { HttpError, invariant } from "./errors";
 export function tagDto(row: Tag): TagDto {
   return {
     id: row.id, name: row.label ?? row.name, color: row.color, group: row.group as TagGroup,
+    ...(row.legacyFlat ? { legacyFlat: true } : {}),
     aliases: JSON.parse(row.aliases), parentIds: JSON.parse(row.parentIds), archived: row.archived,
   };
 }
@@ -29,6 +30,10 @@ export async function saveTag(tx: Prisma.TransactionClient, ownerId: string, pat
     id: tagId, name: input.name, color: input.color ?? "#b8a5ff", group: input.group ?? "extra",
     parentIds, aliases: [...new Set(input.aliases ?? [])], archived: input.archived ?? false,
   };
+  // Editing a color or alias keeps an existing exact identity. Moving or renaming
+  // it uses the uniqueness rules that apply to every new catalog path.
+  if (current?.legacyFlat && next.group === current.group && next.name === (current.label ?? current.name))
+    next.legacyFlat = true;
   // Original clients create-or-get a flat tag by its exact name.
   if (!id && patch.group === undefined && !patch.parentIds && !patch.aliases && patch.archived === undefined) {
     const prior = rows.find(row => !row.archived && row.group === "extra" && (row.label ?? row.name) === next.name);
@@ -40,7 +45,7 @@ export async function saveTag(tx: Prisma.TransactionClient, ownerId: string, pat
     throw new HttpError(409, "invalid_catalog", (error as Error).message);
   }
   const data = {
-    label: next.name, color: next.color, group: next.group, archived: next.archived,
+    label: next.name, color: next.color, group: next.group, archived: next.archived, legacyFlat: !!next.legacyFlat,
     aliases: JSON.stringify(next.aliases), parentIds: JSON.stringify(next.parentIds),
   };
   const row = current
