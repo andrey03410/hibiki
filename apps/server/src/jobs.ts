@@ -18,6 +18,7 @@ import {
 } from "./youtube.js";
 import {
   applyArchive,
+  planArchiveTags,
   archiveRequiresBrowser,
   exportLibrary,
   fileChecksum,
@@ -697,9 +698,11 @@ export class JobsService {
           }
           checked.preview.duplicates = {
             items: duplicateItems,
-            tags: checked.manifest.tags.filter((tag) =>
-              existing.tags.some((value) => value.name === tag.name),
-            ).length,
+            tags: planArchiveTags(
+              job.ownerId,
+              checked.manifest,
+              existing.tags,
+            ).filter((tag) => tag.existing).length,
             playlists: checked.manifest.playlists.filter((playlist) =>
               existing.playlists.some(
                 (value) => value.title === playlist.title,

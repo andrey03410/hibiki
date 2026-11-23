@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 import { ZipFile } from "yazl";
-import { exportLibrary, inspectArchive, applyArchive } from "./portability.js";
+import { exportLibrary, inspectArchive, applyArchive, planArchiveTags } from "./portability.js";
 import { testContext, wav } from "./test-utils.js";
 
 async function zip(
@@ -55,6 +55,83 @@ describe("portable library", () => {
       expect((await ctx.db.item.findUniqueOrThrow({ where: { id: target.id } })).note).toBe("my newer note");
       expect((await ctx.db.listeningSummary.findUniqueOrThrow({ where: { itemId: target.id } })).launches).toBe(3);
     }
+  });
+  it("keeps two archived memberships with the same former label distinct on a new account", () => {
+    const first = { id: "a", name: "first", label: "Theme", color: "#eeeeee", archived: true };
+    const second = { ...first, id: "b", name: "second" };
+    const plan = planArchiveTags("owner", { origin: "old-account", tags: [first, second] }, []);
+    expect(new Set(plan.map(entry => entry.id)).size).toBe(2);
+    expect(plan.filter(entry => entry.existing)).toHaveLength(0);
+  });
+  it("round-trips typed homonyms, mapped parent IDs, aliases, old playlist memberships and vocal credits", async () => {
+    const { db, userId, otherUserId, root } = ctx;
+    await db.tag.createMany({
+      data: [
+        {
+          id: "studio",
+          ownerId: userId,
+          name: "opaque-studio",
+          label: "Kyoto Animation",
+          group: "source",
+          aliases: '["KyoAni"]',
+        },
+        {
+          id: "work",
+          ownerId: userId,
+          name: "opaque-work",
+          label: "CLANNAD",
+          group: "source",
+          parentIds: '["studio"]',
+        },
+        {
+          id: "vn",
+          ownerId: userId,
+          name: "opaque-vn",
+          label: "CLANNAD",
+          group: "source",
+        },
+        { id: "legacy", ownerId: userId, name: "OST", archived: true },
+      ],
+    });
+    const { item } = await ctx.library.upsertYoutube(userId, {
+      externalId: "abcdefghijk",
+      title: "Original",
+    });
+    await db.item.update({
+      where: { id: item.id },
+      data: { performance: "vocal", voices: '["female"]' },
+    });
+    await db.itemTag.createMany({
+      data: ["work", "legacy"].map((tagId) => ({ itemId: item.id, tagId })),
+    });
+    const archive = join(root, "classification.zip");
+    await exportLibrary(db, userId, root, archive, { includeFiles: false });
+    const checked = await inspectArchive(archive, join(root, "check-taxonomy"));
+    await applyArchive(db, otherUserId, root, checked);
+    const rows = await db.tag.findMany({ where: { ownerId: otherUserId } });
+    const studio = rows.find((t) => t.label === "Kyoto Animation")!;
+    expect(JSON.parse(studio.aliases)).toEqual(["KyoAni"]);
+    expect(rows.filter((t) => t.label === "CLANNAD")).toHaveLength(2);
+    expect(rows.find((t) => t.name === "opaque-work")?.parentIds).toBe(
+      JSON.stringify([studio.id]),
+    );
+    expect(studio.id).not.toBe("studio");
+    expect(rows.find((t) => t.name === "OST")?.archived).toBe(true);
+    const imported = await db.item.findFirstOrThrow({
+      where: { ownerId: otherUserId },
+    });
+    expect(imported).toMatchObject({
+      performance: "vocal",
+      voices: '["female"]',
+    });
+    await db.item.update({
+      where: { id: imported.id },
+      data: { voices: '["male"]' },
+    });
+    await applyArchive(db, otherUserId, root, checked);
+    expect(
+      await db.item.findUniqueOrThrow({ where: { id: imported.id } }),
+    ).toMatchObject({ voices: '["male"]' });
   });
   it("copies files and rewrites every item/tag/playlist/queue reference for the new owner", async () => {
     const input = join(ctx.root, "tone.wav");

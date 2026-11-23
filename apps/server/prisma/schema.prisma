@@ -14,6 +14,7 @@ model User {
   createdAt DateTime @default(now())
   sessions Session[]
   tokens ApiToken[]
+  classificationBatches ClassificationBatch[]
   items Item[]
   tags Tag[]
   playlists Playlist[]
@@ -281,6 +282,7 @@ model ClassificationBatch {
   state String
   packageJson String
   journalJson String?
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
   @@index([ownerId, createdAt])
 }
