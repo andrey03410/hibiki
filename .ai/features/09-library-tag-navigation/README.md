@@ -2,7 +2,7 @@
 id: 09
 title: Навигация по тегам медиатеки
 track: product
-stage: plan
+stage: build
 branch: codex/09-library-tag-navigation
 pr:
 started: 2026-11-23
@@ -16,7 +16,7 @@ merged:
 - [x] [Бриф](brief.md)
 - [x] [Продуктовая постановка](product.md) и [интерактивный дизайн](design.html) — согласованы
 - [x] [Техника](tech.md)
-- [ ] План
+- [x] [План](plan.md)
 - [ ] Реализация и проверка
 - [ ] Приёмка владельцем и вливание
 
