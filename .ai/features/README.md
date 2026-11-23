@@ -11,3 +11,5 @@
 | [09. Навигация по тегам медиатеки](09-library-tag-navigation/README.md) | `review` | [PR #9](https://github.com/andrey03410/hibiki/pull/9), каталог, правая панель, разметка, предпросмотр и отмена |
 
 Процесс — [feature](../../.claude/skills/feature/SKILL.md).
+
+[10. Интеграция с Kaname](10-kaname/README.md) — SSO, роли площадки, квоты, отчёты и локальное администрирование.

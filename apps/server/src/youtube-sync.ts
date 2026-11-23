@@ -1,3 +1,4 @@
+import { checkItems, ownerAccess, type Access } from "./kaname";
 import { createHash, randomUUID } from "node:crypto";
 import { playlistDefinitionSchema } from "@hibiki/contracts";
 import { Prisma, type YoutubeLink } from "@prisma/client";
@@ -191,6 +192,7 @@ async function linkItems(
   before: SnapshotEntry[],
   entries: YoutubeMetadata[],
   checkedAt: Date,
+  access: Access | null,
 ) {
   const survivingIds = await ownedItemIds(
     tx,
@@ -258,6 +260,7 @@ async function linkItems(
     return { externalId, itemId, title };
   });
   if (newItems.length) {
+    await checkItems(tx, ownerId, newItems.length, access);
     await tx.item.createMany({ data: newItems });
     await tx.source.createMany({ data: newSources });
   }
@@ -333,6 +336,7 @@ async function publish(
   link: YoutubeLink,
   pending: PendingPreview,
   now: Date,
+  access: Access | null,
   signal?: AbortSignal,
 ) {
   const rows = await linkItems(
@@ -340,7 +344,7 @@ async function publish(
     link.ownerId,
     snapshot(link),
     pending.entries,
-    now,
+    now, access,
   );
   const added = new Set(pending.report.added.map((entry) => entry.externalId));
   const tag = link.tagId
@@ -431,6 +435,7 @@ export class YoutubeSyncService {
   }
 
   async create(ownerId: string, input: string, signal?: AbortSignal) {
+    const access = await ownerAccess(this.db, ownerId);
     let url: string;
     try {
       url = normalizeYoutubePlaylistUrl(input);
@@ -475,7 +480,7 @@ export class YoutubeSyncService {
             ownerId,
             [],
             result.entries,
-            checkedAt,
+            checkedAt, access,
           );
           const playlist = await tx.playlist.update({
             where: { id: initial.id },
@@ -521,6 +526,7 @@ export class YoutubeSyncService {
 
   async apply(ownerId: string, playlistId: string, previewId: string) {
     const link = await this.load(ownerId, playlistId);
+    const access = await ownerAccess(this.db, ownerId);
     const preview = reports(link).preview;
     invariant(
       preview?.report.id === previewId,
@@ -537,7 +543,7 @@ export class YoutubeSyncService {
       return this.refresh(link, { confirmed: previewId });
     try {
       return await this.withCurrent(link, async (tx, mode) => {
-        const data = await publish(tx, link, preview, now);
+        const data = await publish(tx, link, preview, now, access);
         return this.save(tx, link, mode, data);
       });
     } catch (error) {
@@ -653,7 +659,12 @@ export class YoutubeSyncService {
       orderBy: [{ lastCheckedAt: "asc" }, { playlistId: "asc" }],
     });
     if (!link) return false;
-    await this.refresh(link, { background: true, signal });
+    try { await this.refresh(link, { background: true, signal }); }
+    catch (error) {
+      if (!(error instanceof HttpError && error.status === 403)) throw error;
+      await this.db.youtubeLink.updateMany({ where: { playlistId: link.playlistId, version: link.version },
+        data: { lastCheckedAt: this.now(), error: "Доступ к Hibiki закрыт" } });
+    }
     return true;
   }
 
@@ -729,7 +740,9 @@ export class YoutubeSyncService {
     } = {},
   ) {
     const { background, confirmed, signal } = options;
+    await ownerAccess(this.db, link.ownerId);
     const { result, checkedAt, error } = await this.fetch(link.url, signal);
+    const access = await ownerAccess(this.db, link.ownerId);
     try {
       return await this.withCurrent(link, async (tx, mode) => {
         signal?.throwIfAborted();
@@ -753,7 +766,7 @@ export class YoutubeSyncService {
           });
         const pending = { entries: result.entries, report };
         if (confirmed ? confirmed === report.id : mode === "auto") {
-          const data = await publish(tx, link, pending, checkedAt, signal);
+          const data = await publish(tx, link, pending, checkedAt, access, signal);
           if (mode === "auto")
             await addNotice(tx, link, "applied", report, checkedAt);
           signal?.throwIfAborted();
@@ -834,7 +847,7 @@ export class YoutubeSyncService {
     if (
       !(
         failure instanceof HttpError &&
-        failure.code === "youtube_playlist_limit"
+        ["youtube_playlist_limit", "kaname_item_quota"].includes(failure.code)
       )
     )
       throw failure;

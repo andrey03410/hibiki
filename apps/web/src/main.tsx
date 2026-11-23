@@ -1,3 +1,4 @@
+import { KanameSettings } from "./KanameSettings";
 import React, {
   useEffect,
   useMemo,
@@ -233,10 +234,12 @@ function EmptyState({
 }
 
 function Auth({
+  kaname,
   setup,
   onLogin,
 }: {
   setup: boolean;
+  kaname: boolean;
   onLogin: (user: UserDto) => void;
 }) {
   const registrationEnabled = import.meta.env.VITE_PROVISIONED_ACCOUNTS_ONLY !== "1";
@@ -298,7 +301,7 @@ function Auth({
               ? "Создайте личную медиатеку на этом устройстве."
               : "Войдите, чтобы продолжить с того же места."}
           </p>
-          <form onSubmit={submit}>
+          {kaname ? <a className="primary" href={["/admin", "/settings"].includes(location.pathname) ? "/api/auth/kaname/login?next=" + encodeURIComponent(location.pathname) : "/api/auth/kaname/login"}>Войти через Kaname <ArrowUpRight size={17} /></a> : <form onSubmit={submit}>
             <label>
               Логин
               <input
@@ -331,8 +334,8 @@ function Auth({
               {register ? "Создать медиатеку" : "Войти"}
               <ArrowUpRight size={17} />
             </Button>
-          </form>
-          {registrationEnabled && <p className="auth-switch">
+          </form>}
+          {!kaname && registrationEnabled && <p className="auth-switch">
             {register ? "Уже есть аккаунт?" : "Первый раз здесь?"}{" "}
             <button
               onClick={() => {
@@ -360,6 +363,7 @@ function Auth({
 function App() {
   const [user, setUser] = useState<UserDto | null>(null),
     [setup, setSetup] = useState(false),
+    [kaname, setKaname] = useState(false),
     [loading, setLoading] = useState(true),
     [loadError, setLoadError] = useState("");
   function enter(user: UserDto | null) {
@@ -372,6 +376,7 @@ function App() {
       const data = await api("/me");
       enter(data.user);
       setSetup(data.setupRequired);
+      setKaname(Boolean(data.kanameEnabled));
       setLoadError("");
     } catch (e) {
       setLoadError((e as Error).message);
@@ -403,20 +408,22 @@ function App() {
     <Workspace
       key={user.id}
       user={user}
+      kaname={kaname}
       logout={async () => {
         await api("/auth/logout", "POST");
         enter(null);
       }}
     />
   ) : (
-    <Auth setup={setup} onLogin={enter} />
+    <Auth kaname={kaname} setup={setup} onLogin={enter} />
   );
 }
 function Workspace({
-  user,
+  user, kaname,
   logout,
 }: {
   user: UserDto;
+  kaname: boolean;
   logout: () => Promise<void>;
 }) {
   const [overview, setOverview] = useState<LibraryOverviewDto>({...EMPTY, total: 0, tagCounts: {}, revision: ""}),
@@ -657,8 +664,9 @@ function Workspace({
               />
               <Route path="/playlists/:id" element={<PlaylistPage onBrowseTag={browseTag} />} />
               <Route path="/tags" element={<TagsPage query={tagQuery} onQuery={setTagQuery} onBrowse={browseTag} />} />
+              {kaname && <Route path="/admin" element={<KanameSettings userId={user.id} adminPage />} />}
               <Route path="/jobs" element={<JobsPage />} />
-              <Route path="/settings" element={<WithCatalog><SettingsPage user={user} /></WithCatalog>} />
+              <Route path="/settings" element={<WithCatalog><SettingsPage user={user} kaname={kaname} /></WithCatalog>} />
               <Route
                 path="*"
                 element={
@@ -3223,7 +3231,7 @@ function JobsPage() {
     </>
   );
 }
-function SettingsPage({ user }: { user: UserDto }) {
+function SettingsPage({ user, kaname }: { user: UserDto; kaname: boolean }) {
   const { library, notify, refresh, openImport } = useData(),
     [tokens, setTokens] = useState<
       { id: string; name: string; createdAt: string }[]
@@ -3275,6 +3283,7 @@ function SettingsPage({ user }: { user: UserDto }) {
         </div>
       </div>
       <div className="settings-layout">
+        {kaname && <KanameSettings userId={user.id} />}
         <YoutubeSyncSettings />
         <HistorySettings items={library.items} playlists={library.playlists} />
         <section className="settings-card">

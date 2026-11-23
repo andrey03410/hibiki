@@ -1,3 +1,4 @@
+import { ownerAccess, checkItems, reserve, release, meterStorage, type Access } from "./kaname";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, constants } from "node:fs";
 import { copyFile, lstat, mkdir, realpath, rm } from "node:fs/promises";
@@ -285,6 +286,7 @@ export async function exportLibrary(
     includeFiles: boolean;
     includeNotes?: boolean;
     includeHistorySummary?: boolean;
+    storage?: { id: string; access: Access };
     signal?: AbortSignal;
   },
 ): Promise<{ counts: ImportPreview["counts"]; missingFiles: string[] }> {
@@ -443,6 +445,7 @@ export async function exportLibrary(
         archive.addFile(entries.get(file.id)!, file.path, { compress: false });
     const complete = pipeline(
       archive.outputStream,
+      meterStorage(db, ownerId, options.storage?.access ?? null, options.storage?.id ?? ""),
       createWriteStream(temporary, { flags: "wx" }),
       { signal: options.signal },
     );
@@ -606,6 +609,7 @@ export async function inspectArchive(
   archivePath: string,
   workDir: string,
   signal?: AbortSignal,
+  onEntry?: (bytes: number) => Promise<void>,
 ): Promise<CheckedArchive> {
   signal?.throwIfAborted();
   await mkdir(workDir, { recursive: true });
@@ -672,6 +676,7 @@ export async function inspectArchive(
             );
           if (name === "manifest.json" && entry.uncompressedSize > MAX_MANIFEST)
             throw new Error("Манифест слишком большой");
+          if (name !== "manifest.json") await onEntry?.(entry.uncompressedSize);
           const stream = await new Promise<Readable>((res, rej) =>
             zip.openReadStream(entry, (error, result) =>
               error ? rej(error) : res(result!),
@@ -967,6 +972,7 @@ export async function applyArchive(
   checked: CheckedArchive,
   signal?: AbortSignal,
 ): Promise<{ added: number; reused: number; missingFiles: string[] }> {
+  const access = await ownerAccess(db, ownerId);
   const manifest = validateManifest(checked.manifest);
   signal?.throwIfAborted();
   const manifestFiles = new Map(manifest.files.map((file) => [file.id, file]));
@@ -994,6 +1000,7 @@ export async function applyArchive(
       copied?: string;
     }
   >();
+  const reservation = randomUUID();
   try {
     // Copy and checksum large bytes before opening the SQLite write transaction.
     for (const file of manifest.files) {
@@ -1018,6 +1025,7 @@ export async function applyArchive(
         copied: undefined as string | undefined,
       };
       if (!usable && file.included) {
+        if (!existing || existing.path.startsWith("missing/")) await reserve(db, ownerId, file.bytes, access, reservation);
         const relative = `imported/${ownerId}/${randomUUID()}${path.extname(file.path)}`;
         const destination = path.join(storageRoot, relative);
         await mkdir(path.dirname(destination), { recursive: true });
@@ -1187,6 +1195,7 @@ export async function applyArchive(
           const newId = existingId ?? deterministic;
           maps.items.set(item.id, newId);
           if (!existingId) {
+            await checkItems(tx, ownerId, 1, access);
             await tx.item.create({
               data: {
                 id: newId,
@@ -1395,6 +1404,7 @@ export async function applyArchive(
           update: { json: JSON.stringify(settings) },
         });
         signal?.throwIfAborted();
+        await release(tx, reservation);
         return { added, reused, missingFiles: checked.preview.missingFiles };
       },
       { timeout: 120000 },
@@ -1408,5 +1418,7 @@ export async function applyArchive(
   } catch (error) {
     await Promise.all(cleanup.map((file) => rm(file, { force: true })));
     throw error;
+  } finally {
+    await release(db, reservation);
   }
 }

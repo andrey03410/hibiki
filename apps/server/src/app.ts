@@ -12,6 +12,8 @@ import { z, ZodError } from "zod";
 import type { UserDto } from "@hibiki/contracts";
 import { librarySearchSchema, itemPatchSchema, playlistDefinitionSchema, tagInputSchema } from "@hibiki/contracts";
 import type { Db } from "./db";
+import { env, kanameEnabled, markActivity, meterStorage, ownerAccess, release, requireHeavy } from "./kaname";
+import { registerKaname } from "./kaname-routes";
 import { AuthService } from "./auth";
 import { LibraryService } from "./library";
 import { JobsService } from "./jobs";
@@ -81,6 +83,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     { auth, library, jobs },
   );
   app.decorateRequest("user", null);
+  app.decorateRequest("access", null);
   await app.register(cookie);
   await app.register(multipart, uploadPolicy(false));
   app.setErrorHandler((error, _request, reply) => {
@@ -123,7 +126,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
         !["GET", "HEAD", "OPTIONS"].includes(request.method))
     ) {
       const allowed = new Set([
-        process.env.PUBLIC_URL ?? "http://localhost:8790",
+        process.env.KANAME_SITE_URL ?? process.env.PUBLIC_URL ?? "http://localhost:8790",
         "http://localhost:5174",
         "http://127.0.0.1:8790",
         "http://127.0.0.1:5174",
@@ -137,10 +140,16 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     }
     if (!request.url.startsWith("/api/") && !request.url.startsWith("/files/"))
       return;
+    if (["/api/auth/kaname/login", "/api/auth/kaname/callback", "/api/auth/logout"].includes(request.url.split("?")[0])) return;
     const header = request.headers.authorization;
     request.user = header?.startsWith("Bearer ")
       ? await auth.userByToken(header.slice(7))
       : await auth.userBySession(request.cookies.hibiki_session);
+    if (request.user && kanameEnabled()) {
+      request.access = await ownerAccess(db, request.user.id);
+      if (request.url.startsWith("/files/") || request.url.split("?")[0] === "/api/settings" || !["GET", "HEAD", "OPTIONS"].includes(request.method))
+        await markActivity(db, request.user.id);
+    }
     const workspace = request.headers["x-hibiki-workspace"];
     if (workspace !== undefined && workspace !== request.user?.id) {
       throw new HttpError(409, "workspace_changed", "Аккаунт изменился. Открываем его медиатеку.");
@@ -152,19 +161,21 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     if (!publicRoute)
       invariant(request.user, 401, "unauthorized", "Войдите в Hibiki");
   });
-  const setSession = async (reply: any, userId: string) => {
-    const secret = await auth.createSession(userId);
+  const setSession = async (reply: any, userId: string, kaname = false) => {
+    const secret = await auth.createSession(userId, kaname);
     reply.setCookie("hibiki_session", secret, {
       path: "/",
       httpOnly: true,
       sameSite: "lax",
-      secure: (process.env.PUBLIC_URL ?? "").startsWith("https:"),
+      secure: (kaname ? env("KANAME_SITE_URL") : process.env.PUBLIC_URL ?? "").startsWith("https:"),
       maxAge: 30 * 86400,
     });
   };
+  registerKaname(app, db, auth, setSession);
   app.get("/api/me", async (request) => ({
     user: request.user,
-    setupRequired: (await db.user.count()) === 0,
+    setupRequired: !kanameEnabled() && (await db.user.count()) === 0,
+    ...(kanameEnabled() ? { kanameEnabled: true } : {}),
   }));
   for (const action of ["register", "login"] as const)
     app.post(`/api/auth/${action}`, async (request, reply) => {
@@ -221,7 +232,8 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       .header("vary", "Cookie, Authorization")
       .header("x-content-type-options", "nosniff");
     const { size } = z.object({ size: z.literal("thumb").optional() }).parse(request.query);
-    const cover = await artwork.get(request.user!.id, idOf(request), size);
+    const thumbnail = !request.access || request.access.permissions.heavy && request.access.role === "overlord" ? size : undefined;
+    const cover = await artwork.get(request.user!.id, idOf(request), thumbnail);
     if (cover.etag) {
       reply.header("etag", cover.etag);
       const validators = request.headers["if-none-match"]?.split(",").map(tag => tag.trim().replace(/^W\//, ""));
@@ -248,6 +260,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     return { ok: true };
   });
   app.post("/api/items/import-local", async (request) => {
+    requireHeavy(request.access);
     const { paths } = z
       .object({ paths: z.array(z.string()).min(1).max(50) })
       .parse(request.body);
@@ -268,6 +281,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     ownerId: string,
     archive = false,
   ) => {
+    const access = await ownerAccess(db, ownerId);
     const dir = join(storageRoot, "uploads", ownerId);
     await mkdir(dir, { recursive: true });
     const items = [];
@@ -285,11 +299,12 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
         "archive_required",
         "Выберите архив .zip библиотеки Hibiki",
       );
-      const temporaryDir = join(dir, randomUUID());
+      const hold = randomUUID();
+      const temporaryDir = join(dir, hold);
       await mkdir(temporaryDir);
       const tmp = join(temporaryDir, filename);
       try {
-        await pipeline(part.file, createWriteStream(tmp, { flags: "wx" }));
+        await pipeline(part.file, meterStorage(db, ownerId, access, hold), createWriteStream(tmp, { flags: "wx" }));
         invariant(
           !part.file.truncated,
           413,
@@ -300,14 +315,15 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
           invariant(!archiveJob, 400, "one_archive", "Загрузите один архив");
           archiveJob = await jobs.create(ownerId, "import", {
             archivePath: tmp,
-          }, browserAccess(request));
+          }, browserAccess(request), hold);
         } else
           items.push(
-            (await library.importLocal(ownerId, tmp, { title: undefined }))
+            (await library.importLocal(ownerId, tmp, { creditId: hold }))
               .item,
           );
       } finally {
         await rm(temporaryDir, { recursive: true, force: true });
+        await release(db, hold);
       }
     }
     invariant(
@@ -337,6 +353,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       "upload_expired",
       "Ссылка загрузки истекла",
     );
+    await ownerAccess(db, grant.ownerId);
     return receiveUpload(request, grant.ownerId, grant.archive);
   });
   app.get("/api/tags", async (request) => ({
@@ -462,7 +479,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     reply
       .type(file.mime)
       .header("accept-ranges", "bytes")
-      .header("cache-control", "private, max-age=3600")
+      .header("cache-control", kanameEnabled() ? "private, no-store" : "private, max-age=3600")
       .header("x-content-type-options", "nosniff");
     const range = request.headers.range;
     if (range) {

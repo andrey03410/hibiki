@@ -1,3 +1,4 @@
+import { meterStorage, release, requireHeavy, retain } from "./kaname";
 import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { lstat, mkdir, readdir, rm } from "node:fs/promises";
@@ -137,9 +138,10 @@ export function registerReplacement(app: FastifyInstance, db: Db, library: Libra
   const base = "/api/items/:id/replacements";
   const active = new Set<string>();
   const directory = (id: string) => storagePath(storageRoot, stageDirectory(id));
-  const removeStage = (id: string) => rm(directory(id), { recursive: true, force: true }).catch((error) => {
-    app.log.warn({ err: error }, "Could not remove a staged replacement");
-  });
+  const removeStage = async (id: string) => {
+    await rm(directory(id), { recursive: true, force: true });
+    await release(db, "stage-" + id);
+  };
 
   async function sweepStaging() {
     const cutoff = new Date(Date.now() - stagedLifetime);
@@ -203,19 +205,21 @@ export function registerReplacement(app: FastifyInstance, db: Db, library: Libra
         invariant(filename && filename !== "." && filename !== "..", 400, "file_required", "Выберите файл");
         await mkdir(directory(id), { recursive: true, mode: 0o700 });
         stagedPath = join(stageDirectory(id), filename);
-        await pipeline(part.file, createWriteStream(storagePath(storageRoot, stagedPath), {
+        await pipeline(part.file, meterStorage(db, ownerId, request.access, "stage-" + id), createWriteStream(storagePath(storageRoot, stagedPath), {
           flags: "wx", mode: 0o600,
         }));
         invariant(!part.file.truncated, 413, "file_too_large", "Файл превышает 2 ГиБ");
       }
       invariant(stagedPath, 400, "file_required", "Выберите файл");
       const media = await inspectFile(storagePath(storageRoot, stagedPath));
+      if (!media.browserCompatible) requireHeavy(request.access);
       const preview: Preview = {
         title: media.title.trim().slice(0, 500) || basename(stagedPath),
         duration: media.duration,
         warnings: media.browserCompatible ? [] : ["При подтверждении Hibiki подготовит копию для воспроизведения."],
         checkedAt: new Date().toISOString(),
       };
+      await retain(db, "stage-" + id);
       return await db.sourceProposal.create({
         data: { id, ownerId, itemId, kind: "local", stagedPath, metadataJson: JSON.stringify(preview) },
       });
@@ -310,7 +314,7 @@ export function registerReplacement(app: FastifyInstance, db: Db, library: Libra
         invariant((await lstat(staged).catch(() => null))?.isFile(),
           422, "replacement_file_missing", "Загруженный файл недоступен. Выберите его заново.");
         await library.importLocal(ownerId, staged, {
-          itemId,
+          itemId, creditId: "stage-" + proposalId,
           applyReplacement: async (tx: Prisma.TransactionClient, sourceId: string) => {
             await tx.sourceProposal.update({
               where: { id: proposalId, ownerId, itemId, status: "applying" },
