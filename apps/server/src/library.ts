@@ -1,4 +1,4 @@
-import { ownerAccess, checkItems, requireHeavy, reserve, release } from "./kaname";
+import { canRunHeavy, ownerAccess, checkItems, requireHeavy, reserve, release } from "./kaname";
 import { randomUUID } from "node:crypto";
 import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -6,6 +6,7 @@ import type { Db } from "./db";
 import type { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
 import { HttpError, invariant } from "./errors";
+import { ArtworkService } from "./artwork";
 import {
   stageMediaCopy,
   hashFile,
@@ -21,6 +22,7 @@ import type {
   LibraryDto,
   PlaylistDefinition,
   PlaylistDto,
+  PlaylistPlaybackDto,
   TagInput,
   ItemPatch,
   Performance,
@@ -86,6 +88,34 @@ export function itemDto(row: IncludedItem): ItemDto {
     })),
   };
 }
+export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[]) {
+  const rows = await tx.item.findMany({
+    where: { ownerId, id: { in: ids } },
+    include: ownedItemInclude(ownerId),
+  });
+  const byId = new Map(rows.map(row => [row.id, itemDto(row)]));
+  return ids.flatMap(id => byId.get(id) ?? []);
+}
+
+function* playlistCoverCandidates(items: ItemDto[]) {
+  for (const item of items) {
+    for (const { provider, thumbnail, externalId } of item.sources) {
+      if (provider === "youtube" && thumbnail && externalId && /^[\w-]{11}$/.test(externalId))
+        yield { url: `https://i.ytimg.com/vi/${externalId}/mqdefault.jpg` };
+      else if (provider === "local" && thumbnail === `/api/items/${encodeURIComponent(item.id)}/artwork`)
+        yield { url: `${thumbnail}?size=thumb`, itemId: item.id };
+    }
+  }
+}
+
+async function playlistHistory(db: Prisma.TransactionClient, ownerId: string) {
+  const rows = await db.listeningSummary.findMany({
+    where: { ownerId },
+    select: { itemId: true, launches: true, completed: true, skipped: true, lastStartedAt: true },
+  });
+  return new Map(rows.map(entry => [entry.itemId, entry]));
+}
+
 export function playlistDto(row: {
   id: string;
   title: string;
@@ -135,10 +165,39 @@ export function jobDto(row: {
   };
 }
 export class LibraryService {
+  private readonly artwork: ArtworkService;
+
   constructor(
     public db: Db,
     public storageRoot: string,
-  ) {}
+  ) {
+    this.artwork = new ArtworkService(db, storageRoot);
+  }
+
+  private async playlistCoverUrls(
+    ownerId: string, items: ItemDto[], localChecks: Map<string, boolean>, size?: "thumb", signal?: AbortSignal,
+  ) {
+    const covers = new Set<string>();
+    let hasLocal = false;
+    for (const { url, itemId } of playlistCoverCandidates(items)) {
+      signal?.throwIfAborted();
+      if (itemId) {
+        if (hasLocal) continue;
+        if (!localChecks.has(itemId)) {
+          const available = await this.artwork.get(ownerId, itemId, size).then(() => true, error => {
+            if (error instanceof HttpError && error.status === 404) return false;
+            throw error;
+          });
+          localChecks.set(itemId, available);
+        }
+        if (!localChecks.get(itemId)) continue;
+        hasLocal = true;
+      }
+      covers.add(url);
+      if (covers.size === 3) break;
+    }
+    return [...covers];
+  }
   async backfillAudioTracks(signal?: AbortSignal) {
     const batchSize = 64;
     let after: string | undefined;
@@ -755,25 +814,31 @@ export class LibraryService {
   private async playlistInputs(ownerId: string, onInvalidPlaylist?: (id: string) => void) {
     const [snapshot, history] = await Promise.all([
       this.snapshot(ownerId, false, onInvalidPlaylist),
-      this.db.listeningSummary.findMany({
-        where: { ownerId },
-        select: { itemId: true, launches: true, completed: true, skipped: true, lastStartedAt: true },
-      }),
+      playlistHistory(this.db, ownerId),
     ]);
-    return { ...snapshot, history: new Map(history.map(entry => [entry.itemId, entry])) };
+    return { ...snapshot, history };
   }
   async refreshDuePlaylistCounts(now = new Date(), signal?: AbortSignal) {
     const work = await this.db.playlistCountWork.findFirst({
-      where: { dueAt: { lte: BigInt(+now) } }, orderBy: [{ dueAt: "asc" }, { ownerId: "asc" }],
+      where: { OR: [
+        { dueAt: { lte: BigInt(+now) } },
+        { dueAt: null, OR: [
+          { publishedVersion: null },
+          { NOT: { publishedVersion: { equals: this.db.playlistCountWork.fields.version } } },
+        ] },
+      ] }, orderBy: [{ dueAt: "asc" }, { ownerId: "asc" }],
     });
     if (!work) return false;
     const { ownerId, version, dueAt } = work;
-    const claim = { ownerId, version, dueAt };
+    const claim = { ownerId, version, dueAt, publishedVersion: work.publishedVersion, validUntil: work.validUntil };
     try {
-      await ownerAccess(this.db, ownerId);
+      const access = await ownerAccess(this.db, ownerId);
+      const coverSize = canRunHeavy(access) ? "thumb" : undefined;
       signal?.throwIfAborted();
-      const counts = new Map<string, number | null>();
-      const snapshot = await this.playlistInputs(ownerId, id => counts.set(id, null));
+      type Card = { count: number; covers: string[]; ids: string[] };
+      const cards = new Map<string, Card | null>();
+      const localCoverChecks = new Map<string, boolean>();
+      const snapshot = await this.playlistInputs(ownerId, id => cards.set(id, null));
       let nextCutoff = Infinity;
       const inputs = {
         ...snapshot, now,
@@ -782,30 +847,99 @@ export class LibraryService {
       for (const playlist of snapshot.playlists) {
         signal?.throwIfAborted();
         try {
-          counts.set(playlist.id, resolvePlaylist(playlist.definition, inputs, playlist.id).total);
+          const { items, total } = resolvePlaylist(playlist.definition, inputs, playlist.id);
+          cards.set(playlist.id, {
+            count: total,
+            covers: await this.playlistCoverUrls(ownerId, items, localCoverChecks, coverSize, signal),
+            ids: items.map(item => item.id),
+          });
         } catch (error) {
           if (!(error instanceof InvalidPlaylistError)) throw error;
-          counts.set(playlist.id, null);
+          cards.set(playlist.id, null);
         }
       }
       const watchHistory = snapshot.playlists.some(p => usesPrivateHistory(p.definition));
+      const validUntil = Number.isFinite(nextCutoff) ? BigInt(nextCutoff) : null;
       await this.db.$transaction(async tx => {
-        // Writes can arrive while the worker evaluates a snapshot. Publish all counts together
-        // only if no writer invalidated this version and another worker hasn't published it.
+        // Publish counts, covers and queue orders from the same snapshot. A
+        // concurrent library edit or worker publication invalidates this claim.
         const current = await tx.playlistCountWork.updateMany({
-          where: claim, data: { dueAt: Number.isFinite(nextCutoff) ? BigInt(nextCutoff) : null, watchHistory },
+          where: claim,
+          data: { dueAt: validUntil, publishedVersion: version, validUntil, watchHistory },
         });
         if (!current.count) return;
-        await tx.$executeRaw`UPDATE Playlist SET trackCount = counts.value
-          FROM json_each(${JSON.stringify(Object.fromEntries(counts))}) AS counts
-          WHERE Playlist.ownerId = ${ownerId} AND Playlist.id = counts.key AND Playlist.trackCount IS NOT counts.value`;
+        await tx.$executeRaw`UPDATE Playlist SET trackCount = json_extract(card.value, '$.count'),
+          coverUrlsJson = json_extract(card.value, '$.covers'), queueIdsJson = json_extract(card.value, '$.ids')
+          FROM json_each(${JSON.stringify(Object.fromEntries(cards))}) AS card
+          WHERE Playlist.ownerId = ${ownerId} AND Playlist.id = card.key
+            AND (trackCount IS NOT json_extract(card.value, '$.count')
+              OR coverUrlsJson IS NOT json_extract(card.value, '$.covers')
+              OR queueIdsJson IS NOT json_extract(card.value, '$.ids'))`;
       });
     } catch (error) {
       signal?.throwIfAborted();
-      await this.db.playlistCountWork.updateMany({ where: claim, data: { dueAt: BigInt(+now + 60_000) } });
+      await this.db.playlistCountWork.updateMany({
+        where: claim,
+        data: { dueAt: BigInt(+now + 60_000) },
+      });
       if (!(error instanceof HttpError && error.status === 403)) throw error;
     }
     return true;
+  }
+  async playlistPlayback(ownerId: string, id: string): Promise<PlaylistPlaybackDto> {
+    return this.db.$transaction(async tx => {
+      const row = await tx.playlist.findFirst({ where: { ownerId, id }, select: { queueIdsJson: true } });
+      invariant(row, 404, "playlist_not_found", "Плейлист не найден");
+      const work = await tx.playlistCountWork.findUnique({ where: { ownerId } });
+      const now = new Date();
+      const fresh = work && work.publishedVersion === work.version &&
+        (work.validUntil === null || work.validUntil > BigInt(+now));
+      const ids = fresh && row.queueIdsJson !== null
+        ? JSON.parse(row.queueIdsJson) as string[]
+        : await this.livePlaylistIds(tx, ownerId, id, now);
+      return { ids, items: ids.length ? await hydrateLibraryItems(tx, ownerId, ids.slice(0, 8)) : [] };
+    });
+  }
+  private async livePlaylistIds(tx: Prisma.TransactionClient, ownerId: string, id: string, now: Date) {
+    const rows = await tx.playlist.findMany({
+      where: { ownerId },
+      select: { id: true, title: true, definitionJson: true },
+    });
+    const playlists = rows.flatMap(row => {
+      try {
+        return [{ id: row.id, title: row.title, definition: playlistDefinitionSchema.parse(JSON.parse(row.definitionJson)) }];
+      } catch (error) {
+        if (!(error instanceof SyntaxError || error instanceof ZodError)) throw error;
+        if (row.id === id) throw new HttpError(422, "invalid_playlist", error.message);
+        return [];
+      }
+    });
+    const definition = playlists.find(playlist => playlist.id === id)!.definition;
+    const [rowsForRules, tags, history] = await Promise.all([
+      tx.$queryRaw<(Pick<ItemDto, "id" | "title" | "kind" | "duration" | "favorite"> & {
+        createdAt: Date; tagIds: string; local: bigint;
+      })[]>`
+        SELECT i.id, i.title, i.kind, i.duration, i.favorite, i.createdAt,
+          (SELECT json_group_array(t.id) FROM ItemTag AS it JOIN Tag AS t ON t.id = it.tagId
+            WHERE it.itemId = i.id AND t.ownerId = i.ownerId) AS tagIds,
+          EXISTS (SELECT 1 FROM Source AS s WHERE s.itemId = i.id AND s.ownerId = i.ownerId
+            AND s.provider = 'local' AND s.status = 'available'
+            AND (s.fileId IS NULL OR EXISTS (SELECT 1 FROM MediaFile AS f WHERE f.id = s.fileId AND f.ownerId = i.ownerId))) AS local
+        FROM Item AS i WHERE i.ownerId = ${ownerId} ORDER BY i.createdAt DESC`,
+      listTags(tx, ownerId, true),
+      playlistHistory(tx, ownerId),
+    ]);
+    const items = rowsForRules.map(({ tagIds, local, createdAt, ...item }) => ({
+      ...item, createdAt: new Date(createdAt).toISOString(),
+      tags: (JSON.parse(tagIds) as string[]).map(id => ({ id })),
+      sources: local ? [{ provider: "local", status: "available" } as const] : [],
+    }));
+    try {
+      return resolvePlaylist(definition, { items, tags, playlists, history, now }, id).items.map(item => item.id);
+    } catch (error) {
+      if (!(error instanceof InvalidPlaylistError)) throw error;
+      throw new HttpError(422, "invalid_playlist", error.message);
+    }
   }
   async preview(ownerId: string, definition: PlaylistDefinition, id?: string, browser = true) {
     const checked = playlistDefinitionSchema.parse(definition);

@@ -15,7 +15,13 @@ export interface PlaylistHistory {
   skipped: number;
   lastStartedAt: Date | null;
 }
-export type PlaylistLibrary = Pick<LibraryDto, "items" | "tags" | "playlists"> & {
+type PlaylistItem = Pick<ItemDto, "id" | "kind" | "title" | "duration" | "favorite" | "createdAt"> & {
+  tags: Pick<ItemDto["tags"][number], "id">[];
+  sources: Pick<ItemDto["sources"][number], "provider" | "status">[];
+};
+export type PlaylistLibrary<T extends PlaylistItem = ItemDto> = Pick<LibraryDto, "tags"> & {
+  items: T[];
+  playlists: Pick<PlaylistDto, "id" | "title" | "definition">[];
   history?: ReadonlyMap<string, PlaylistHistory>;
   now?: Date;
   /** First millisecond when an evaluated time-dependent condition becomes true. */
@@ -93,7 +99,7 @@ export function collectReferences(input: Rule): {
 
 export function validatePlaylist(
   definition: PlaylistDefinition,
-  library: PlaylistLibrary,
+  library: PlaylistLibrary<PlaylistItem>,
   editingPlaylistId?: string,
 ): { valid: boolean; issues: string[] } {
   const issues = new Set<string>();
@@ -199,7 +205,7 @@ function applyExclusions(evaluation: Evaluation): Evaluation {
 function sortSelection(
   selected: Reasons,
   definition: PlaylistDefinition,
-  items: Map<string, ItemDto>,
+  items: ReadonlyMap<string, PlaylistItem>,
   history: PlaylistLibrary["history"],
 ): Reasons {
   const ids = [...selected.keys()];
@@ -236,11 +242,11 @@ function sortSelection(
 
 export class InvalidPlaylistError extends Error {}
 
-export function resolvePlaylist(
+export function resolvePlaylist<T extends PlaylistItem>(
   definition: PlaylistDefinition,
-  library: PlaylistLibrary,
+  library: PlaylistLibrary<T>,
   editingPlaylistId?: string,
-): ResolvedPlaylist {
+): Omit<ResolvedPlaylist, "items"> & { items: T[] } {
   const validation = validatePlaylist(definition, library, editingPlaylistId);
   if (!validation.valid) throw new InvalidPlaylistError(validation.issues.join("; "));
   const items = new Map(library.items.map((item) => [item.id, item]));

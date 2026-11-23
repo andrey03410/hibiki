@@ -1150,7 +1150,7 @@ input[type="checkbox"]:checked:after {
   transition: transform 0.2s;
   opacity: 0;
 }
-.playlist-card-action:is(:hover, :focus-visible) ~ .playlist-cover-wrap .card-play {
+.playlist-card-action:is(:hover, :focus-visible, [aria-busy="true"]) ~ .playlist-cover-wrap .card-play {
   opacity: 1;
 }
 .playlist-card-title {

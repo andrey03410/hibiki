@@ -88,14 +88,20 @@ interface Controller {
   waitingForVideo: boolean;
   loadingLabel: string;
   mode: PlaybackMode;
-  start: (items: ItemDto[], index?: number, playlistId?: string, options?: StartOptions) => void;
+  start: (items: ItemDto[], index?: number, playlistId?: string, options?: StartOptions) => Promise<void>;
   activateItem: (items: ItemDto[], index: number, playlistId?: string, options?: StartOptions) => void;
   enqueue: (item: ItemDto, playlistId?: string) => void;
   playNext: (item: ItemDto, playlistId?: string) => void;
   toggle: () => void;
   watchCurrent: () => void;
 }
-type StartOptions = { mode?: PlaybackMode; fromLibrary?: boolean; loadQueueIds?: () => Promise<string[]> };
+type StartOptions = {
+  mode?: PlaybackMode;
+  fromLibrary?: boolean;
+  loadQueueIds?: () => Promise<string[]>;
+  queueIds?: string[];
+  isCurrent?: () => boolean;
+};
 const PlayerContext = createContext<Controller | null>(null);
 export const usePlayer = () => useContext(PlayerContext)!;
 
@@ -546,16 +552,19 @@ export function PlayerProvider({
     playEntry(state, index, "manual");
   }
   async function start(entries: ItemDto[], index = 0, playlistId?: string, options: StartOptions = {}, selectedItem = false) {
-    if (!entries.length) return;
+    if (!entries.length || options.isCurrent?.() === false) return;
     const token = intent.command();
+    const isCurrent = () => token === intent.selection && options.isCurrent?.() !== false;
     setSelectionFailure(undefined);
     catalog.put(entries);
     const selected = entries[index];
     if (!selected) return;
-    const { fromLibrary = false, loadQueueIds } = options;
+    const { fromLibrary = false, loadQueueIds, queueIds } = options;
     const mode = fromLibrary ? "audio" : options.mode ?? "original";
     const shuffle = !fromLibrary && live.current.shuffle;
-    let newOrder = startPlaybackQueue(entries, index, shuffle, playlistId);
+    let newOrder = queueIds
+      ? startPlaybackQueue(queueIds.map(id => ({ id })), queueIds.indexOf(selected.id), shuffle, playlistId)
+      : startPlaybackQueue(entries, index, shuffle, playlistId);
     let state = { ...live.current, ...newOrder, mode, shuffle };
     let playable = canStartSelectedItem(selected, mode, fromLibrary && selectedItem) ? state.queueIndex : -1;
     let complete = !loadQueueIds;
@@ -566,27 +575,27 @@ export function PlayerProvider({
         // finds a playable entry in the full filtered order.
         try {
           const ids = await loadQueueIds();
-          if (token !== intent.selection) return;
+          if (!isCurrent()) return;
           newOrder = startPlaybackQueue(ids.map(id => ({id})), 0, false);
           state = {...live.current, ...newOrder, mode, shuffle};
-          playable = await catalog.findPlayable(state.queue, -1, 1, false, mode, undefined, () => token === intent.selection);
+          playable = await catalog.findPlayable(state.queue, -1, 1, false, mode, undefined, isCurrent);
           complete = true;
         } catch (e) {
-          if (token === intent.selection) {
+          if (isCurrent()) {
             setSelectionFailure({
               token, message: (e as Error).message,
-              retry: () => { if (intent.selection === token) void start(entries, index, playlistId, options, selectedItem); },
+              retry: () => { if (isCurrent()) void start(entries, index, playlistId, options, selectedItem); },
             });
           }
           return;
         }
       }
     } else if (playable < 0) {
-      const candidate = await findNext(1, state, token, true, true, setError, () => intent.selection === token);
+      const candidate = await findNext(1, state, token, true, true, setError, isCurrent);
       if (candidate === undefined) return;
       playable = candidate;
     }
-    if (token !== intent.selection) return;
+    if (!isCurrent()) return;
     if (playable < 0) {
       setOfferAudioSkip(false);
       setError(mode === "audio"
@@ -1706,7 +1715,7 @@ export function PlayerProvider({
   useLayoutEffect(() => {commands.current = {start, activateItem, toggle, watchCurrent, addToQueue};});
   const controller = useMemo<Controller>(() => ({
     current, playing, waitingForVideo, loadingLabel, mode: settings.mode, queueEditable,
-    start: (...args) => {void commands.current.start(...args);},
+    start: (...args) => commands.current.start(...args),
     activateItem: (...args) => commands.current.activateItem(...args),
     toggle: () => commands.current.toggle(),
     watchCurrent: () => commands.current.watchCurrent(),

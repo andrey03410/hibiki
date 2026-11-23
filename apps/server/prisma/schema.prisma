@@ -145,6 +145,8 @@ model Playlist {
   definitionJson String
   manual Boolean @default(false)
   trackCount Int?
+  coverUrlsJson String?
+  queueIdsJson String?
   revision Int @default(1)
   note String?
   createdAt DateTime @default(now())
@@ -160,6 +162,8 @@ model PlaylistCountWork {
   version Int @default(0)
   dueAt BigInt?
   watchHistory Boolean @default(true)
+  publishedVersion Int?
+  validUntil BigInt?
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   @@index([dueAt, ownerId])
 }

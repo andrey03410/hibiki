@@ -14,6 +14,7 @@ it("closes password login when the installation uses Kaname", async () => {
 });
 
 import { AuthService } from "./auth";
+import { ArtworkService } from "./artwork";
 import { bindSubject, ownerAccess, reserve, usage } from "./kaname";
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
@@ -123,4 +124,24 @@ it("serializes the last slot and byte reservations including cross-process write
     await f.library.upsertYoutube(f.userId, { externalId: "thirdaaaaaa" });
     expect(await f.db.item.count({ where: { ownerId: f.userId } })).toBe(51);
   } finally { await second.$disconnect(); await f.close(); }
+});
+
+it("checks playlist cover metadata without converting thumbnails for regular Kaname members", async () => {
+  const f = await fixture();
+  const artwork = vi.spyOn(ArtworkService.prototype, "get");
+  try {
+    const file = path.join(f.root, "plain.wav");
+    await writeFile(file, wav());
+    const { item } = await f.library.importLocal(f.userId, file);
+    const list = await f.library.savePlaylist(f.userId, { title: "Обложка", definition: {
+      version: 1, sort: "source", rule: { type: "items", ids: [item.id] },
+    } });
+    await f.library.refreshDuePlaylistCounts();
+    expect(artwork).toHaveBeenCalledExactlyOnceWith(f.userId, item.id, undefined);
+    const cards = await f.app.inject({ url: "/api/library/overview?playlists=summary", headers: f.alice });
+    expect(cards.json().playlists).toMatchObject([{ id: list.id, trackCount: 1, coverUrls: [] }]);
+  } finally {
+    artwork.mockRestore();
+    await f.close();
+  }
 });
