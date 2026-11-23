@@ -43,6 +43,7 @@ export class LibraryPages {
     this.failedAppend = false;
     try {
       let page = await this.fetch();
+      const tagCounts = page.tagCounts;
       let count = 1;
       let items = page.items;
       // Revalidate visible pages in place so a favorite or tag edit keeps scroll depth.
@@ -53,7 +54,7 @@ export class LibraryPages {
       }
       if (request !== this.generation) return;
       this.pageCount = count;
-      this.update({...page, items, loading: false});
+      this.update({...page, items, tagCounts, loading: false});
     } catch (error) {
       if (request === this.generation) this.update({loading: false, error: (error as Error).message});
     }

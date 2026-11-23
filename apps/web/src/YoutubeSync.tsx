@@ -219,12 +219,14 @@ export function YoutubeLinkedPlaylist({
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const requestNumber = useRef(0);
+  const [pendingTag,setPendingTag] = useState<{before:string|null; after:string}|null>(null);
   const path = `/playlists/${encodeURIComponent(playlist.id)}/youtube-sync`;
   const link = state?.playlistId === playlist.id ? state.link : null;
 
   useEffect(() => {
     let mounted = true;
     setSelection("");
+    setPendingTag(null);
     setError("");
     setMessage("");
     function load() {
@@ -475,23 +477,19 @@ export function YoutubeLinkedPlaylist({
       </details>
       <label>
         Тег для новых позиций YouTube
-        <select
-          value={
-            knownTags.some((tag) => tag.id === link.tagId) ? link.tagId! : ""
-          }
-          disabled={busy}
-          onChange={(event) =>
-            edit({ type: "tag", tagId: event.target.value || null })
-          }
-        >
+        <select value={pendingTag?.after ?? link.tagId ?? ""} disabled={busy}
+          onChange={e => setPendingTag(e.target.value === (link.tagId ?? "") ? null : {before:link.tagId,after:e.target.value})}>
           <option value="">Без тега</option>
-          {knownTags.map((tag) => (
-            <option key={tag.id} value={tag.id}>
-              {tag.name}
-            </option>
-          ))}
+          {link.tagId && !knownTags.some(t => t.id === link.tagId && !t.archived) && <option value={link.tagId}>Прежнее точное назначение</option>}
+          {knownTags.filter(t => !t.archived).map(tag => <option key={tag.id} value={tag.id}>{tag.name}</option>)}
         </select>
       </label>
+      {pendingTag && <div className="batch-preview">
+        <p>Текущие записи сохранят свои назначения. Для новых позиций будет использоваться {knownTags.find(t => t.id === pendingTag.after)?.name ?? "импорт без тега"}.</p>
+        <button type="button" className="button subtle compact" onClick={() => setPendingTag(null)}>Отмена</button>
+        <button type="button" className="button primary compact" disabled={busy || link.tagId !== pendingTag.before}
+          onClick={async () => {await update("edit",{type:"tag",tagId:pendingTag.after || null});setPendingTag(null);}}>Применить к новым позициям</button>
+      </div>}
     </section>
   );
 }

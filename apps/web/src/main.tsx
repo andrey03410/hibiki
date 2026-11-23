@@ -73,6 +73,12 @@ import { api, setWorkspaceOwner, formatDuration, humanDuration, mediaWord } from
 import { ItemArtwork } from "./ItemArtwork.tsx";
 import { LibraryPages, fetchItems, searchBody } from "./library-pages";
 import { PlayerProvider, usePlayer } from "./player.tsx";
+import { missingClassification } from "@hibiki/contracts/classification";
+import { TagNavigation } from "./TagNavigation";
+import { ClassificationMigration } from "./ClassificationMigration";
+import { GroupSelect, TagPicker, PerformanceEditor } from "./ClassificationEditor";
+import { batchTagChanges, compositionDelta, groupKeys, groups, groupOf, itemPerformance, missingLabels, TagCatalog,
+  type BatchMode, type Performance, type PerformanceFilter, type TagGroup, type Voice } from "./taxonomy";
 import { ItemTagList } from "./LibraryItemControls.tsx";
 import { playbackSources } from "./player-model.ts";
 import { defaultLibrarySearch, librarySourceBadges, matchesSearch, sourceAvailability, type LibraryView } from "./library-search.ts";
@@ -86,6 +92,7 @@ import { useHistoryRevision } from "./history-events.ts";
 import type { HistoryPreference } from "./listening-client.ts";
 import "./styles.css";
 import "./library-view.css";
+import "./taxonomy.css";
 
 const EMPTY: LibraryDto = { items: [], tags: [], playlists: [], jobs: [] };
 type Toast = { id: number; text: string; error?: boolean };
@@ -749,7 +756,7 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
     }
   });
   const pages = useMemo(() => new LibraryPages(cursor => api("/library/page", "POST", {...searchBody(filters), cursor})), [filters]);
-  const {items, loading, error, nextCursor, total} = useSyncExternalStore(pages.subscribe, pages.snapshot);
+  const {items, loading, error, nextCursor, total, tagCounts} = useSyncExternalStore(pages.subscribe, pages.snapshot);
   const sentinel = useRef<HTMLDivElement>(null);
   useEffect(() => {
     void pages.refresh();
@@ -788,7 +795,10 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
       else player.start(items, 0, undefined, options);
     } catch (e) { if (request === actions.current) notify((e as Error).message, true); }
   }
-  const tagCounts = useMemo(() => new Map(Object.entries(overview.tagCounts)), [overview.tagCounts]);
+  const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
+  const restrictsFacets = filters.query.trim() || filters.kind || filters.provider || filters.availability || filters.favoriteOnly
+    || filters.minDuration || filters.maxDuration || filters.addedFrom || filters.addedThrough || filters.performanceFilter
+    || filters.needsClassification || filters.missingGroup;
   const selectedIds = new Set(selected);
   const hasSelection = selected.length > 0;
   const [selectionScope, setSelectionScope] = useState<{query: typeof idQuery; ids: string[]}>();
@@ -828,7 +838,8 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   }
 
   return (
-    <>
+    <TagNavigation catalog={catalog} counts={tagCounts ?? (restrictsFacets ? undefined : overview.tagCounts)}
+      search={filters} onChange={setFilters} userId={userId} hasPlayer={!!player.current}>
       <div className="title-row library-title-row">
         <h1>Медиатека</h1>
         <Button className="primary" onClick={openImport} aria-label="Добавить медиа" title="Добавить медиа">
@@ -841,7 +852,6 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
           value={filters}
           onChange={setFilters}
           tags={library.tags}
-          tagCounts={tagCounts}
           count={total}
           selectAll={total > 0 ? selectAll : undefined}
           view={view}
@@ -875,6 +885,9 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
           items={items}
           view={view}
           selected={selected}
+          selectedTags={filters.tagIds}
+          showMissing={!!(filters.needsClassification || filters.missingGroup)}
+          onPerformance={value => setFilters(old => ({...old,performanceFilter:value}))}
           onSelected={setSelected}
           onActivate={item => void play(item)}
           onTag={(id) => setFilters((old) => (
@@ -920,7 +933,7 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
       {batchOpen && (
         <BatchTags ids={selected} close={() => setBatchOpen(false)} />
       )}
-    </>
+    </TagNavigation>
   );
 });
 function ItemTable({
@@ -930,6 +943,7 @@ function ItemTable({
   onSelected,
   onActivate,
   onTag,
+  selectedTags, showMissing, onPerformance,
   reorder,
   playlistId,
   view,
@@ -940,12 +954,16 @@ function ItemTable({
   onSelected?: (ids: string[]) => void;
   onActivate?: (item: ItemDto) => void;
   onTag?: (id: string) => void;
+  selectedTags?:string[];
+  showMissing?:boolean;
+  onPerformance?:(value:PerformanceFilter) => void;
   reorder?: (id: string, direction: number) => void;
   playlistId?: string;
   view?: LibraryView;
 }) {
   const player = usePlayer(),
-    { refresh, notify } = useData();
+    { library, refresh, notify } = useData();
+  const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
   const { notes } = useNotes();
   const [editTarget, setEditTarget] = useState<{ id: string; focusSource?: boolean }>(),
     [remove, setRemove] = useState<ItemDto | null>(null),
@@ -1114,6 +1132,9 @@ function ItemTable({
           {cover}
           <div className="entry-description">
             <div className="item-name-actions">{itemTitle}</div>
+            <ItemTagList tags={item.tags} catalog={catalog} selected={selectedTags} performance={item.performance}
+              voices={item.voices} onTag={onTag} onPerformance={onPerformance}/>
+            {showMissing && <small className="missing-reasons">Не указано · {missingClassification(item.tags,item.performance,item.voices).map(k => missingLabels[k]).join(", ")}</small>}
             <div className="entry-meta">
               <span>{kindLabel} · {formatDuration(item.duration)}</span>
               {badges.map(({ provider, status, label }) => {
@@ -1136,7 +1157,6 @@ function ItemTable({
           </div>
         </div>
         <div className="entry-tools">{favorite}{menu}</div>
-        <ItemTagList tags={item.tags} onTag={onTag} />
       </article>
     );
   });
@@ -1223,9 +1243,13 @@ function FavoriteButton({ item, withLabel = false }: { item: ItemDto; withLabel?
 function EditItem({ item, close, focusSource }: { item: ItemDto; close: () => void; focusSource?: boolean }) {
   const { library, refresh, notify } = useData(),
     [title, setTitle] = useState(item.title),
-    [tagIds, setTagIds] = useState(item.tags.map((t) => t.id)),
+    [tagIds, setTagIds] = useState(item.tags.filter(t => !t.archived).map((t) => t.id)),
+    [performance,setPerformance] = useState<Performance>(item.performance ?? "unknown"),
+    [voices,setVoices] = useState<Voice[]>(item.voices ?? []),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
+  const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
+  const missing = missingClassification(tagIds.flatMap(id => catalog.byId.get(id) ?? []),performance,voices);
   const replacement = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!focusSource) return;
@@ -1247,7 +1271,11 @@ function EditItem({ item, close, focusSource }: { item: ItemDto; close: () => vo
           e.preventDefault();
           setBusy(true);
           try {
-            await api(`/items/${item.id}`, "PATCH", { title, tagIds });
+            const submitter = (e.nativeEvent as SubmitEvent).submitter;
+            await api(`/items/${item.id}`, "PATCH", {
+              ...(title !== item.title && {title}), tagIds, performance, voices,
+              completeClassification: submitter instanceof HTMLButtonElement && submitter.name === "complete",
+            });
             await refresh();
             notify("Запись обновлена");
             close();
@@ -1270,38 +1298,19 @@ function EditItem({ item, close, focusSource }: { item: ItemDto; close: () => vo
         <p className="small muted">
           Название источника: {item.originalTitle || "Неизвестно"}
         </p>
-        <label>Теги</label>
-        <div className="tag-picker">
-          {library.tags.map((tag) => (
-            <label
-              className={`tag-option ${tagIds.includes(tag.id) ? "active" : ""}`}
-              key={tag.id}
-            >
-              <input
-                type="checkbox"
-                checked={tagIds.includes(tag.id)}
-                onChange={(e) =>
-                  setTagIds((old) =>
-                    e.target.checked
-                      ? [...old, tag.id]
-                      : old.filter((id) => id !== tag.id),
-                  )
-                }
-              />
-              <span style={{ background: tag.color }} />
-              {tag.name}
-              {tagIds.includes(tag.id) && <Check size={13} />}
-            </label>
-          ))}
-        </div>
+        <div className="edit-classification">{groupKeys.map(key => <details key={key} className="edit-group">
+          <summary>{groups[key]}<span>{catalog.active.filter(tag => tagIds.includes(tag.id) && groupOf(tag) === key).length}</span></summary>
+          <TagPicker catalog={catalog} group={key} ids={tagIds} onChange={setTagIds}/>
+        </details>)}</div>
+        <PerformanceEditor performance={performance} voices={voices} onChange={(p,v) => {setPerformance(p);setVoices(v);}}/>
+        <p className="small muted" role="status">{missing.length ? "Осталось указать: " + missing.map(key => missingLabels[key]).join(", ") : "Все обязательные поля заполнены"}</p>
         <ErrorMessage error={error} />
         <div className="modal-actions">
           <Button type="button" className="subtle" onClick={close}>
             Закрыть
           </Button>
-          <Button type="submit" className="primary" busy={busy}>
-            Сохранить название и теги
-          </Button>
+          <Button type="submit" className={missing.length ? "primary" : "subtle"} busy={busy}>Сохранить</Button>
+          <Button type="submit" name="complete" className="primary" disabled={!!missing.length} busy={busy}>Завершить разметку</Button>
         </div>
       </form>
       <NoteEditor kind="item" id={item.id} />
@@ -1395,80 +1404,56 @@ function ItemListeningSummary({ itemId }: { itemId: string }) {
   );
 }
 function BatchTags({ ids, close }: { ids: string[]; close: () => void }) {
-  const { library, refresh, notify } = useData(),
-    [tags, setTags] = useState<string[]>([]),
-    [mode, setMode] = useState("add"),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  return (
-    <Modal
-      title={`Теги для ${ids.length} записей`}
-      subtitle="Измените разметку выбранных записей за один шаг."
-      close={close}
-    >
-      <label>
-        Действие
-        <select value={mode} onChange={(e) => setMode(e.target.value)}>
-          <option value="add">Добавить к существующим</option>
-          <option value="replace">Заменить все теги</option>
-          <option value="remove">Убрать выбранные теги</option>
-        </select>
-      </label>
-      <div className="tag-picker">
-        {library.tags.map((t) => (
-          <label className="check-row" key={t.id}>
-            <input
-              type="checkbox"
-              checked={tags.includes(t.id)}
-              onChange={(e) =>
-                setTags((old) =>
-                  e.target.checked
-                    ? [...old, t.id]
-                    : old.filter((id) => id !== t.id),
-                )
-              }
-            />
-            {t.name}
-          </label>
-        ))}
-      </div>
-      <ErrorMessage error={error} />
-      <div className="modal-actions">
-        <Button className="subtle" onClick={close}>
-          Отмена
-        </Button>
-        <Button
-          className="primary"
-          busy={busy}
-          onClick={async () => {
-            setBusy(true);
-            try {
-              for (let start = 0; start < ids.length; start += 100) {
-                const records = await fetchItems(ids.slice(start, start + 100));
-                await api("/items/batch", "POST", {
-                  changes: records.map(item => {
-                    const old = item.tags.map(tag => tag.id);
-                    const tagIds = mode === "replace" ? tags : mode === "remove"
-                      ? old.filter(id => !tags.includes(id)) : [...new Set([...old, ...tags])];
-                    return {id: item.id, tagIds};
-                  }),
-                });
-              }
-              await refresh();
-              notify("Теги обновлены");
-              close();
-            } catch (e) {
-              setError((e as Error).message);
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          Применить
-        </Button>
-      </div>
-    </Modal>
-  );
+  const {library,refresh,notify} = useData();
+  const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
+  const [group,setGroup] = useState<TagGroup|"performance">("source"), [chosen,setChosen] = useState<string[]>([]);
+  const [mode,setMode] = useState<BatchMode>("add"), [busy,setBusy] = useState(false), [error,setError] = useState("");
+  const [performance,setPerformance] = useState<Performance>("unknown"), [voices,setVoices] = useState<Voice[]>([]);
+  const [preview,setPreview] = useState<{revision:string; changes:{id:string;tagIds?:string[];performance?:Performance;voices?:Voice[]}[];
+    removed:{label:string;count:number}[] }>();
+  async function prepare() {
+    const {revision} = await api<LibraryOverviewDto>("/library/overview");
+    const items = await fetchItems(ids);
+    if(items.length !== ids.length) throw Error("Состав выборки изменился. Выберите записи заново.");
+    if (group !== "performance") {
+      const {changes,removed} = batchTagChanges(items,chosen,group,mode);
+      setPreview({revision, changes, removed:removed.map(({tag,count}) => ({label:catalog.paths(tag.id).join(" / ") || tag.name,count}))});
+    } else {
+      const current = itemPerformance(performance,voices).label;
+      const changes = items.filter(t => itemPerformance(t.performance,t.voices).label !== current);
+      const removed = new Map<string,number>();
+      for (const item of changes) {
+        const label = itemPerformance(item.performance,item.voices).label;
+        removed.set(label, (removed.get(label) ?? 0)+1);
+      }
+      setPreview({revision, changes:changes.map(({id}) => ({id,performance,voices})),removed:[...removed].map(([label,count]) => ({label,count}))});
+    }
+  }
+  async function submit() {
+    setBusy(true);setError("");
+    try {
+      if (!preview) await prepare();
+      else {
+        await api("/items/batch","POST",{expectedRevision:preview.revision,changes:preview.changes});
+        await refresh(); notify("Разметка обновлена"); close();
+      }
+    } catch(e) {setPreview(undefined);setError((e as Error).message);} finally {setBusy(false);}
+  }
+  return <Modal title={`Разметка для ${ids.length} записей`} close={close}>
+    <fieldset className="batch-choices" disabled={busy} onChange={() => setPreview(undefined)}>
+      <GroupSelect value={group} allowPerformance onChange={g => {setGroup(g);setChosen([]);}}/>
+      {group === "performance" ? <PerformanceEditor performance={performance} voices={voices} onChange={(p,v) => {setPerformance(p);setVoices(v);}}/>
+        : <><label>Действие<select value={mode} onChange={e => setMode(e.target.value as BatchMode)}>
+          <option value="add">Добавить к существующим</option><option value="replace">Заменить значения раздела</option>
+          <option value="remove">Убрать выбранные значения</option></select></label>
+          <TagPicker key={group} group={group} catalog={catalog} ids={chosen} onChange={setChosen}/></>}
+    </fieldset>
+    {preview && <section className="batch-preview" aria-live="polite"><h3>Изменится записей: {preview.changes.length}</h3>
+      {preview.removed.length > 0 && <><p>Будут сняты</p><ul>{preview.removed.map(r => <li key={r.label}>{r.label} · {r.count}</li>)}</ul></>}
+    </section>}
+    <ErrorMessage error={error}/><div className="modal-actions"><Button className="subtle" onClick={close}>Отмена</Button>
+      <Button className="primary" disabled={preview?.changes.length === 0} busy={busy} onClick={() => void submit()}>{preview ? "Применить" : "Показать изменения"}</Button>
+    </div></Modal>;
 }
 function PlaylistsPage({ query, onQuery, onCreate }: {
   query: string;
@@ -1823,6 +1808,7 @@ function PlaylistPage({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
       {edit && (
         <PlaylistEditor
           playlist={playlist}
+          currentItems={resolved?.items}
           close={() => setEdit(false)}
           onSaved={() => {
             setEdit(false);
@@ -1976,6 +1962,7 @@ function RuleEditor({
 }) {
   const { library } = useData(),
     [search, setSearch] = useState("");
+  const catalog = useMemo(() => new TagCatalog(library.tags),[library.tags]);
   return (
     <div className={`rule-editor depth-${depth % 2}`}>
       <div className="rule-type-row">
@@ -2078,29 +2065,15 @@ function RuleEditor({
           </span>
         </>
       )}
-      {rule.type === "tag" && (
-        <label>
-          Тег
-          <select
-            value={rule.id}
-            onChange={(e) => onChange({ ...rule, id: e.target.value })}
-          >
-            <option value="" disabled>
-              Выберите тег
-            </option>
-            {library.tags.map((t) => (
-              <option value={t.id} key={t.id}>
-                {t.name}
-              </option>
-            ))}
-          </select>
-          {!library.tags.length && (
-            <span className="small muted">
-              Создайте тег на странице «Теги».
-            </span>
-          )}
-        </label>
-      )}
+      {rule.type === "tag" && <>
+        <label>Тег<select value={rule.id} onChange={e => onChange({type:"tag",id:e.target.value})}>
+          <option value="" disabled>Выберите тег</option>
+          {rule.id && !catalog.byId.has(rule.id) && <option value={rule.id}>Прежнее точное назначение</option>}
+          {catalog.active.map(t => <option value={t.id} key={t.id}>{catalog.paths(t.id).join(" / ")}</option>)}
+        </select></label>
+        {catalog.byId.get(rule.id)?.group === "source" && <label className="check-row"><input type="checkbox" checked={!!rule.descendants}
+          onChange={e => onChange({...rule,descendants:e.target.checked})}/>Включая дочерние теги</label>}
+      </>}
       {rule.type === "playlist" && (
         <label>
           Плейлист
@@ -2283,11 +2256,13 @@ function PlaylistEditor(props: React.ComponentProps<typeof PlaylistEditorForm>) 
 function PlaylistEditorForm({
   playlist,
   initialIds,
+  currentItems,
   close,
   onSaved,
 }: {
   playlist?: PlaylistDto;
   initialIds?: string[];
+  currentItems?: ItemDto[];
   close: () => void;
   onSaved: (p: PlaylistDto) => void;
 }) {
@@ -2320,6 +2295,8 @@ function PlaylistEditorForm({
     return () => { active = false; };
   }, [needsHistory, historyRevision]);
   const key = JSON.stringify(definition);
+  const delta = useMemo(() => currentItems && preview && playlist && key !== JSON.stringify(playlist.definition)
+    ? compositionDelta(currentItems, preview.items) : undefined, [currentItems, preview, key, playlist]);
   useEffect(() => {
     if (playlist?.youtubeLinked) return;
     let disposed = false;
@@ -2457,6 +2434,11 @@ function PlaylistEditorForm({
                 {humanDuration(preview.duration)} · без повторов
               </p>
             )}
+            {delta && !previewBusy && <details className="preview-excluded">
+              <summary>Добавится: {delta.added.length} · Уйдёт: {delta.removed.length}</summary>
+              {delta.added.map(item => <p key={item.id}>+ {item.title}</p>)}
+              {delta.removed.map(item => <p key={item.id}>− {item.title}</p>)}
+            </details>}
             <ErrorMessage error={previewError} />
             {needsHistory && (
               <div className="small muted">
@@ -2547,15 +2529,21 @@ function TagsPage({ query, onQuery, onBrowse }: {
   const { library, overview, refresh, notify } = useData(),
     [edit, setEdit] = useState<TagDto | "new" | null>(null),
     [name, setName] = useState(""),
+    [group,setGroup] = useState<TagGroup>("extra"), [aliases,setAliases] = useState(""),
+    [parents,setParents] = useState<string[]>([]), [section,setSection] = useState<TagGroup|"">(""),
     [color, setColor] = useState(TAG_COLORS[0]!),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [remove, setRemove] = useState<TagDto | null>(null);
   const { notes } = useNotes();
-  const tags = library.tags.filter((tag) => matchesSearch(query, tag.name, noteFor(notes, "tag", tag.id)));
+  const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
+  const tags = catalog.active.filter(tag => (!section || groupOf(tag) === section) && matchesSearch(query, tag.name, ...(tag.aliases ?? []), ...catalog.paths(tag.id), noteFor(notes,"tag",tag.id)));
   const counts = useMemo(() => new Map(Object.entries(overview.tagCounts)), [overview.tagCounts]);
   function open(tag: TagDto | "new") {
     setEdit(tag);
+    setGroup(tag === "new" ? section || "extra" : groupOf(tag));
+    setAliases(tag === "new" ? "" : (tag.aliases ?? []).join("\n"));
+    setParents(tag === "new" ? [] : tag.parentIds ?? []);
     setName(tag === "new" ? "" : tag.name);
     setColor(tag === "new" ? TAG_COLORS[0]! : tag.color);
     setError("");
@@ -2571,17 +2559,21 @@ function TagsPage({ query, onQuery, onBrowse }: {
       </div>
       <div className="section-heading">
         <h2>Найдено <span>{tags.length}</span></h2>
+        <select aria-label="Раздел каталога" value={section} onChange={e => setSection(e.target.value as typeof section)}>
+          <option value="">Все разделы</option>{groupKeys.map(key => <option key={key} value={key}>{groups[key]}</option>)}
+        </select>
         <label className="search-input">
           <Search size={16} />
           <input
             type="search"
             aria-label="Поиск тегов"
-            placeholder="Поиск по названию и заметкам…"
+            placeholder="Название или псевдоним…"
             value={query}
             onChange={(event) => onQuery(event.target.value)}
           />
         </label>
       </div>
+      <ClassificationMigration reload={refresh}/>
       <NotesLoadError />
       <div className="tag-grid tag-directory">
         {tags.map((tag) => {
@@ -2595,7 +2587,7 @@ function TagsPage({ query, onQuery, onBrowse }: {
                 </span>
                 <span className="tag-browse-description">
                   <span className="tag-browse-name">{tag.name}{noteFor(notes, "tag", tag.id) && <NoteIndicator />}</span>
-                  <small>{count} {mediaWord(count)}</small>
+                  <small>{catalog.paths(tag.id).map(p => p.includes(" › ") ? p.slice(0,p.lastIndexOf(" › ")) : groups[groupOf(tag)]).join(" / ")} · {count} {mediaWord(count)}</small>
                 </span>
                 <ChevronRight size={15} aria-hidden="true" />
               </button>
@@ -2649,7 +2641,7 @@ function TagsPage({ query, onQuery, onBrowse }: {
                 await api(
                   edit === "new" ? "/tags" : `/tags/${edit.id}`,
                   edit === "new" ? "POST" : "PATCH",
-                  { name, color },
+                  { name, color, group, aliases: aliases.split(/\r?\n/).map(a => a.trim()).filter(Boolean), parentIds: group === "source" ? parents : [] },
                 );
                 await refresh();
                 notify(edit === "new" ? "Тег создан" : "Тег обновлён");
@@ -2672,6 +2664,11 @@ function TagsPage({ query, onQuery, onBrowse }: {
                 autoFocus
               />
             </label>
+            <GroupSelect value={group} onChange={g => {if(g !== "performance") setGroup(g);}}/>
+            <label>Псевдонимы (по одному на строку)<textarea rows={3} value={aliases} onChange={e => setAliases(e.target.value)}/></label>
+            {group === "source" && <details className="edit-group"><summary>Родители в дереве <span>{parents.length}</span></summary>
+              <TagPicker catalog={catalog} ids={parents} group="source" excludeId={edit === "new" ? undefined : edit.id} onChange={setParents}/>
+            </details>}
             <label>Цвет</label>
             <div className="color-picker">
               {TAG_COLORS.map((c) => (

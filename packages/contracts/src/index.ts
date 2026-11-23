@@ -414,13 +414,7 @@ export const settingsSchema = z
   })
   .catchall(z.unknown()) satisfies z.ZodType<Settings>;
 
-export function missingClassification(tags: TagDto[], performance: Performance = "unknown", voices: readonly Voice[] = []): MissingGroup[] {
-  const groups = new Set(tags.filter(tag => !tag.archived).map(tag => tag.group));
-  const missing: MissingGroup[] = (["source", "artist", "genre", "mood"] as const).filter(group => !groups.has(group));
-  if (performance === "unknown") missing.push("performance");
-  if (performance === "vocal" && !voices.length) missing.push("voice");
-  return missing;
-}
+export { missingClassification } from "./classification";
 
 /** Validate an owner's complete graph, including parent edges retained for archived labels. */
 export function validateCatalog(tags: TagDto[]): void {

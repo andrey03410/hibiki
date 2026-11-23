@@ -1,27 +1,61 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ItemTagList } from "./LibraryItemControls.tsx";
+import type { TagDto } from "@hibiki/contracts";
+import { ItemTagList } from "./LibraryItemControls";
 
-describe("media entry tags", () => {
-  const tags = ["OST", "Key", "Clannad", "Instrumental", "Piano", "Strings", "Opening"].map((name, index) => ({
-    id: String(index),
-    name,
-    color: "#b09be2",
-  }));
+import { TagCatalog } from "./taxonomy";
 
-  it("shows five tags and puts only the two remaining tag filters in a dismissible popup", () => {
-    const markup = renderToStaticMarkup(createElement(ItemTagList, { tags, onTag: () => {} }));
-    const [visible, overflow] = markup.split('popover="auto"');
-    expect(visible).toContain('aria-label="Показать ещё 2 тега"');
-    expect(visible).toMatch(/>Piano<\/button>/);
-    expect(visible).not.toContain("Strings");
-    expect(overflow).toMatch(/>Strings<\/button>.*>Opening<\/button>/);
+describe("compact entry classification", () => {
+  const tags: TagDto[] = [
+    { id: "a", name: "Версия", group: "source" },
+    { id: "b", name: "Альт", group: "genre" },
+    { id: "c", name: "Джаз", group: "genre" },
+    { id: "d", name: "Спокойная", group: "mood" },
+    { id: "e", name: "Кавер", group: "extra" },
+    { id: "f", name: "Автор", group: "artist" },
+    { id: "g", name: "Архив", archived: true },
+  ].map((t) => ({ color: "#aaa", ...t }) as TagDto);
+  it("prefers a selected genre, counts only hidden assignments and keeps full groups and voices available", () => {
+    const html = renderToStaticMarkup(
+      createElement(ItemTagList, {
+        tags,
+        selected: ["c"],
+        catalog: new TagCatalog(tags),
+        performance: "vocal",
+        voices: ["female", "male"],
+        onTag: () => {},
+      }),
+    );
+    const [row, detail] = html.split('popover="auto"');
+    expect(row).toContain("Джаз");
+    expect(row).not.toContain("Альт");
+    expect(row).toContain("+3");
+    expect(row).toContain("Мужской и женский вокал");
+    expect(detail).toContain("Альт");
+    expect(detail).toContain("Дополнительно");
+    expect(detail).toContain("Автор");
+    expect(html).not.toContain("Архив");
+  });
+  it("prefers the assigned work below a selected studio over an alphabetically earlier unrelated work", () => {
+    const studio: TagDto = { id: "s", name: "Студия", group: "source", color: "#acf" };
+    const earlier: TagDto = { id: "a", name: "Альфа", group: "source", color: "#acf" };
+    const matched: TagDto = { id: "b", name: "Бета", group: "source", color: "#acf", parentIds: ["s"] };
+    const html = renderToStaticMarkup(
+      createElement(ItemTagList, {
+        tags: [earlier, matched],
+        catalog: new TagCatalog([studio, earlier, matched]),
+        selected: ["s"],
+      }),
+    );
+    const [row] = html.split('popover="auto"');
+    expect(row).toContain("Бета");
+    expect(row).not.toContain("Альфа");
   });
 
-  it("needs no overflow control for five tags", () => {
-    const markup = renderToStaticMarkup(createElement(ItemTagList, { tags: tags.slice(0, 5) }));
-    expect(markup).not.toContain("Показать ещё");
-    expect(markup).toContain("Piano");
+  it("exposes empty groups for an unclassified entry", () => {
+    const html = renderToStaticMarkup(createElement(ItemTagList, { tags: [], catalog: new TagCatalog([]) }));
+    expect(html).toContain("Исполнитель");
+    expect(html).toContain("Не указано");
   });
 });

@@ -1,10 +1,11 @@
-import { useEffect, useId, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { ChevronDown, Heart, LayoutGrid, List, Play, Search, SlidersHorizontal, Tags, X } from "lucide-react";
+import { useEffect, useId, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { Heart, LayoutGrid, List, Play, Search, SlidersHorizontal, X } from "lucide-react";
 import type { TagDto } from "@hibiki/contracts";
 import {
   defaultLibrarySearch, libraryFilterConditions, libraryKinds, libraryProviders, libraryStatuses,
-  libraryTagChoices, popularTagLimit, resetLibraryFilters, type LibrarySearch, type LibraryView,
+  resetLibraryFilters, type LibrarySearch, type LibraryView,
 } from "./library-search";
+import { filterLabels, missingLabels, nextPerformanceFilter } from "./taxonomy";
 import "./library-search.css";
 
 const sorts = {
@@ -28,6 +29,10 @@ export function useLibrarySearch(userId: string) {
       if (stored.availability && Object.hasOwn(libraryStatuses, stored.availability)) initial.availability = stored.availability;
       if (stored.sort && Object.hasOwn(sorts, stored.sort)) initial.sort = stored.sort;
       if (Array.isArray(stored.tagIds)) initial.tagIds = stored.tagIds.filter((id) => typeof id === "string");
+      if (stored.tagMode === "or") initial.tagMode = "or";
+      if (stored.performanceFilter && Object.hasOwn(filterLabels, stored.performanceFilter)) initial.performanceFilter = stored.performanceFilter;
+      if (stored.missingGroup && Object.hasOwn(missingLabels, stored.missingGroup)) initial.missingGroup = stored.missingGroup;
+      initial.needsClassification = stored.needsClassification === true;
       initial.favoriteOnly = stored.favoriteOnly === true;
       return initial;
     } catch {
@@ -44,11 +49,10 @@ export function useLibrarySearch(userId: string) {
   return [value, setValue] as const;
 }
 
-export function LibrarySearchControls({ value, onChange, tags, tagCounts, count, selectAll, view, onViewChange, onPlay }: {
+export function LibrarySearchControls({ value, onChange, tags, count, selectAll, view, onViewChange, onPlay }: {
   value: LibrarySearch;
   onChange: Dispatch<SetStateAction<LibrarySearch>>;
   tags: TagDto[];
-  tagCounts?: ReadonlyMap<string, number>;
   count: number;
   selectAll?: ReactNode;
   view: LibraryView;
@@ -56,29 +60,13 @@ export function LibrarySearchControls({ value, onChange, tags, tagCounts, count,
   onPlay: () => void;
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [tagsOpen, setTagsOpen] = useState(false);
-  const [tagQuery, setTagQuery] = useState("");
-  const tagSearch = useRef<HTMLInputElement>(null);
-  const advancedId = useId(), tagPickerId = useId();
-
+  const advancedId = useId();
   function set<K extends keyof LibrarySearch>(field: K, next: LibrarySearch[K]) {
     onChange((current) => ({ ...current, [field]: next }));
   }
 
-  function toggleTag(id: string) {
-    onChange((current) => ({
-      ...current,
-      tagIds: current.tagIds.includes(id) ? current.tagIds.filter((tagId) => tagId !== id) : [...current.tagIds, id],
-    }));
-  }
-
   const conditions = libraryFilterConditions(value, tags);
   const advancedCount = conditions.filter(({ advanced }) => advanced).length;
-  const expandedTags = tagsOpen || !!tagQuery.trim();
-  const visibleTags = libraryTagChoices(tags, tagCounts, tagQuery, expandedTags);
-  const previewFilters = new Set(visibleTags.map(({ id }) => `tag:${id}`));
-  const summaryConditions = expandedTags ? conditions : conditions.filter(({ key }) => !previewFilters.has(key));
-
   return (
     <div className="library-search-controls">
       <div className="library-search-tools">
@@ -109,64 +97,21 @@ export function LibrarySearchControls({ value, onChange, tags, tagCounts, count,
           </button>
         </div>
       </div>
-      <div className="library-tag-picker" data-expanded={expandedTags || undefined}>
-        <div className="library-tag-tools">
-          <div className="search-input">
-            <Tags size={15} aria-hidden="true" />
-            <input
-              ref={tagSearch}
-              type="search"
-              aria-label="Поиск тегов"
-              placeholder="Найти тег"
-              value={tagQuery}
-              onChange={(event) => setTagQuery(event.target.value)}
-            />
-            {tagQuery && (
-              <button type="button" className="icon-button" aria-label="Очистить поиск тегов" onClick={() => {
-                setTagQuery("");
-                tagSearch.current?.focus();
-              }}>
-                <X size={14} />
-              </button>
-            )}
-          </div>
-          {tags.length > popularTagLimit && (
-            <button
-              className="library-filter-button library-tag-toggle"
-              type="button"
-              aria-expanded={expandedTags}
-              aria-controls={tagPickerId}
-              onClick={() => {
-                setTagQuery("");
-                setTagsOpen(!expandedTags);
-              }}
-            >
-              {expandedTags ? "Свернуть" : "Все теги"} <ChevronDown size={14} aria-hidden="true" />
-            </button>
-          )}
-        </div>
-        <div className="library-tag-options" id={tagPickerId} role="group" aria-label="Фильтр по всем выбранным тегам">
-          {visibleTags.map((tag) => {
-            const selected = value.tagIds.includes(tag.id);
-            return (
-              <button className="library-tag-choice" type="button" key={tag.id} aria-pressed={selected} onClick={() => toggleTag(tag.id)}>
-                <span aria-hidden="true" className="library-tag-color" style={{ background: tag.color }} />
-                <span>{tag.name}</span>
-                {tagCounts && <span className="library-tag-count">{tagCounts.get(tag.id) ?? 0}</span>}
-                {selected && <X size={12} aria-hidden="true" />}
-              </button>
-            );
-          })}
-          {!visibleTags.length && (
-            <span className="library-tag-empty" role="status">{tags.length ? "Теги не найдены" : "В медиатеке пока нет тегов"}</span>
-          )}
-        </div>
-      </div>
       <div className="library-filter-tools">
         <div className="library-segmented" role="group" aria-label="Тип записи">
           {Object.entries(libraryKinds).map(([id, label]) => (
             <button key={id} type="button" aria-pressed={value.kind === id} onClick={() => set("kind", id as LibrarySearch["kind"])}>{label}</button>
           ))}
+        </div>
+        <div className="performance-controls" role="group" aria-label="Исполнение">
+          <button className="library-filter-button" type="button" title="Без вокала (OST)"
+            aria-pressed={value.performanceFilter === "ost"} onClick={() => set("performanceFilter", nextPerformanceFilter(value.performanceFilter ?? "", "ost"))}>OST</button>
+          <div className="vocal-split" role="group" aria-label="Вокал">
+            <small aria-hidden="true">Вокал</small>
+            {(["male", "female"] as const).map(voice => <button key={voice} type="button"
+              title={filterLabels[voice]} aria-pressed={value.performanceFilter === voice || value.performanceFilter === "vocal"}
+              onClick={() => set("performanceFilter", nextPerformanceFilter(value.performanceFilter ?? "", voice))}>{voice === "male" ? "Мужской" : "Женский"}</button>)}
+          </div>
         </div>
         <button className="library-filter-button" type="button" aria-label="Избранное" title="Избранное" aria-pressed={value.favoriteOnly} onClick={() => set("favoriteOnly", !value.favoriteOnly)}>
           <Heart size={15} fill={value.favoriteOnly ? "currentColor" : "none"} /> <span>Избранное</span>
@@ -190,7 +135,7 @@ export function LibrarySearchControls({ value, onChange, tags, tagCounts, count,
       <div className="library-filter-fields" id={advancedId} hidden={!advancedOpen}>
         <div className="library-filter-selects">
           <label>
-            Источник
+            Где доступно
             <select value={value.provider} onChange={(event) => set("provider", event.target.value as LibrarySearch["provider"])}>
               {Object.entries(libraryProviders).map(([id, label]) => <option value={id} key={id}>{label}</option>)}
             </select>
@@ -202,6 +147,16 @@ export function LibrarySearchControls({ value, onChange, tags, tagCounts, count,
             </select>
           </label>
         </div>
+        <label>Разметка
+          <select value={value.missingGroup || (value.needsClassification ? "incomplete" : "")}
+            onChange={event => {
+              const v = event.target.value;
+              onChange(old => ({...old, needsClassification: !!v, missingGroup: v && v !== "incomplete" ? v as LibrarySearch["missingGroup"] : undefined}));
+            }}>
+            <option value="">Все записи</option><option value="incomplete">Требуют разметки</option>
+            {Object.entries(missingLabels).map(([id,label]) => <option key={id} value={id}>Не указано · {label}</option>)}
+          </select>
+        </label>
         <fieldset>
           <legend>Длительность, сек.</legend>
           <div className="library-filter-range">
@@ -222,7 +177,7 @@ export function LibrarySearchControls({ value, onChange, tags, tagCounts, count,
         <span role="status">Найдено: {count}</span>
         {conditions.length > 0 && (
           <div className="library-search-chips">
-            {summaryConditions.map(({ key, label, clear }) => (
+            {conditions.filter(c => !c.key.startsWith("tag:") && c.key !== "performanceFilter").map(({ key, label, clear }) => (
               <button key={key} type="button" aria-label={`Снять фильтр «${label}»`} onClick={() => onChange(clear)}>
                 {label} <X size={12} />
               </button>

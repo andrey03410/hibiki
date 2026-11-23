@@ -1,13 +1,14 @@
 import type { ItemDto, SourceDto, TagDto } from "@hibiki/contracts";
 import { noteFor, type NotesIndex } from "./note-model";
 
+import { filterLabels, missingLabels } from "./taxonomy";
 import type { LibrarySearch } from "@hibiki/contracts";
 export type { LibrarySearch } from "@hibiki/contracts";
 
 export const defaultLibrarySearch: LibrarySearch = {
   query: "", kind: "", tagIds: [], minDuration: "", maxDuration: "",
   addedFrom: "", addedThrough: "", provider: "", availability: "", favoriteOnly: false,
-  sort: "added-desc",
+  sort: "added-desc", tagMode: "and", performanceFilter: "", needsClassification: false,
 };
 
 export type LibraryView = "list" | "cards";
@@ -108,6 +109,13 @@ export function libraryFilterConditions(search: LibrarySearch, tags: TagDto[]): 
     });
   }
 
+  if (search.performanceFilter) add("performanceFilter", filterLabels[search.performanceFilter]);
+  if (search.missingGroup) {
+    conditions.push({
+      key: "missingGroup", label: "Не указано · " + missingLabels[search.missingGroup], advanced: true,
+      clear: current => ({...current, needsClassification: false, missingGroup: undefined}),
+    });
+  } else if (search.needsClassification) add("needsClassification", "Требуют разметки", true);
   if (search.kind) add("kind", libraryKinds[search.kind]);
   if (search.favoriteOnly) add("favoriteOnly", "Избранное");
   for (const id of search.tagIds) {
