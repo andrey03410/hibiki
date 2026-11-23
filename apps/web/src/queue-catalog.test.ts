@@ -38,6 +38,82 @@ function audioEntry(id: string) {
   return {id, kind: "audio", sources: [{provider:"local", streamUrl:"/files/" + id, status:"available"}]} as ItemDto;
 }
 
+it("scopes borrowed queue positions to the source link even for identical original items", async () => {
+  const catalog = new QueueCatalog(async ids => ids.map(audioEntry));
+  const original = audioEntry("song");
+  const [first] = catalog.sharedEntries("/shared/first", [original], async () => [original]);
+  const [second] = catalog.sharedEntries("/shared/second", [original], async () => [original]);
+  const [same] = catalog.sharedEntries("/shared/first", [original], async () => [original]);
+  expect(first!.id).not.toEqual(original.id);
+  expect(first!.id).toEqual(same!.id);
+  expect(first!.id).not.toEqual(second!.id);
+  expect(first!.id).not.toContain("first");
+});
+
+it("rechecks link membership before advancing through the original queue order", async () => {
+  const tracks = ["one", "two", "three", "four"].map(audioEntry);
+  let allowed = tracks;
+  const load = vi.fn(async () => allowed);
+  const fetch = vi.fn(async (ids: string[]) => ids.map(audioEntry));
+  const catalog = new QueueCatalog(fetch);
+  const rows = catalog.sharedEntries("/shared/a", tracks, load);
+  catalog.put(rows);
+  const state = restorePlayback({ queue: rows.map(row => row.id), queueIndex: 0 });
+  allowed = [tracks[3]!, tracks[2]!, tracks[0]!];
+  catalog.invalidate();
+  await catalog.ensure(state.queue);
+  expect(fetch).not.toHaveBeenCalled();
+  expect((await catalog.nextInQueue(() => state, 1, true, new Set(), () => true))?.index).toBe(2);
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(catalog.rows.get(rows[1]!.id)?.sources).toEqual([]);
+  allowed = [tracks[1]!, ...allowed];
+  expect((await catalog.nextInQueue(() => state, 1, true, new Set(), () => true))?.index).toBe(1);
+});
+
+it("rechecks repeat-one after access to the current track ends", async () => {
+  const track = audioEntry("one");
+  const catalog = new QueueCatalog(async ids => ids.map(audioEntry));
+  const rows = catalog.sharedEntries("/shared/a", [track], async () => []);
+  catalog.put(rows);
+  const state = restorePlayback({ queue: [rows[0]!.id], repeat: "one" });
+  expect((await catalog.nextInQueue(() => state, 1, true, new Set(), () => true))?.index).toBe(-1);
+});
+
+it("reads access before an asynchronous fallback without replacing the current entry", async () => {
+  const track = audioEntry("one");
+  const catalog = new QueueCatalog(async ids => ids.map(audioEntry));
+  const [entry] = catalog.sharedEntries("/shared/a", [track], async () => []);
+  catalog.put([entry!]);
+  expect(await catalog.readPlayback(entry!.id)).toMatchObject({ sources: [] });
+  expect(catalog.rows.get(entry!.id)).toBe(entry);
+});
+
+it("rechecks a borrowed library source and leaves the local copy playable", async () => {
+  const borrowed = { ...audioEntry("saved"), shared: { sharedBy: "Автор", available: true } };
+  borrowed.sources[0]!.shared = true;
+  const localCopy = { ...audioEntry("saved"), shared: { sharedBy: "Автор", available: false } };
+  const catalog = new QueueCatalog(async () => [localCopy]);
+  catalog.put([borrowed]);
+  expect(await catalog.refreshPlayback("saved")).toBe(localCopy);
+});
+
+it("verifies a borrowed source even when that queue row has just loaded", async () => {
+  const cached = { ...audioEntry("saved"), shared: { sharedBy: "Автор", available: true } };
+  const closed = { ...cached, sources: [], shared: { ...cached.shared, available: false } };
+  const verify = vi.fn(async () => [closed]);
+  const catalog = new QueueCatalog(async () => [cached], verify);
+  expect(await catalog.findPlayable([cached.id], -1, 1, false, "audio")).toBe(-1);
+  expect(verify).toHaveBeenCalledWith([cached.id]);
+});
+
+it("publishes only verified metadata when restoring the current playback row", async () => {
+  const cached = { ...audioEntry("saved"), shared: { sharedBy: "Автор", available: true } };
+  const closed = { ...cached, sources: [], shared: { ...cached.shared, available: false } };
+  const catalog = new QueueCatalog(async () => [cached], async () => [closed]);
+  await catalog.ensure([cached.id], undefined, true);
+  expect(catalog.rows.get(cached.id)).toBe(closed);
+});
+
 it("uses known positions immediately and waits for the tail before wrapping", async () => {
   const catalog = new QueueCatalog(async ids => ids.map(audioEntry));
   let state = restorePlayback({queue: ["a", "b"], queueIndex: 0, repeat: "all"});

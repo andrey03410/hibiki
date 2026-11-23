@@ -4,11 +4,13 @@ import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, realpath, rm, lstat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import type { Job } from "@prisma/client";
+import type { Job, Prisma } from "@prisma/client";
 import type { JobDto } from "@hibiki/contracts";
 import type { Db } from "./db.js";
 import { LibraryService, jobDto } from "./library.js";
 import { HttpError, invariant } from "./errors.js";
+import { storagePath } from "./media.js";
+import { ShareService } from "./sharing.js";
 import {
   discoverYoutube,
   downloadYoutube,
@@ -36,6 +38,10 @@ const schemas = {
   "youtube-refresh": z
     .object({ itemId: z.string().min(1).optional() })
     .strict(),
+  "shared-copy": z.object({
+    itemId: z.string().min(1).max(256),
+    mode: z.enum(["audio", "video"]).optional(),
+  }).strict(),
   export: z.object({
     includeFiles: z.boolean().default(false),
     includeNotes: z.boolean().optional(),
@@ -69,11 +75,14 @@ const asObject = (value: string | null): Record<string, any> =>
 export class JobsService {
   private active = new Map<string, AbortController>();
   private stopping = false;
+  private sharing: ShareService;
   constructor(
     public db: Db,
     public library: LibraryService,
     public storageRoot: string,
-  ) {}
+  ) {
+    this.sharing = new ShareService(db, library);
+  }
   private async owned(ownerId: string, id: string, browser = false): Promise<Job> {
     const row = await this.db.job.findFirst({
       where: { id, ownerId, ...(browser ? {} : { browserOnly: false }) },
@@ -86,6 +95,10 @@ export class JobsService {
     if (kind === "youtube-download") requireHeavy(access);
     invariant(Object.hasOwn(schemas, kind), 400, "job_kind", "Неизвестный тип задания");
     const parsed = schemas[kind as Kind].parse(input) as Record<string, any>;
+    if (kind === "shared-copy") {
+      const source = await this.sharing.copySource(ownerId, parsed.itemId);
+      if (source.provider === "youtube") requireHeavy(access);
+    }
     const privateExport = kind === "export" && Boolean(parsed.includeNotes || parsed.includeHistorySummary);
     invariant(!privateExport || browser, 403, "browser_only", "Личные данные экспортируются только из браузера");
     const browserOnly = privateExport || (browser && kind === "import");
@@ -96,7 +109,7 @@ export class JobsService {
     ) {
       const item = await this.library.getItem(ownerId, parsed.itemId);
       invariant(
-        item.sources.some((s) => s.provider === "youtube"),
+        item.sources.some((s) => s.provider === "youtube" && !s.shared),
         400,
         "youtube_source",
         "У медиа нет источника YouTube",
@@ -565,12 +578,42 @@ export class JobsService {
       }
       return result;
     }
-    if (job.kind === "youtube-download") {
-      const item = await this.library.getItem(job.ownerId, input.itemId);
-      const source = item.sources.find(
-        (s) => s.provider === "youtube" && s.externalId,
-      );
-      invariant(source, 400, "youtube_source", "У медиа нет источника YouTube");
+    const shared = job.kind === "shared-copy"
+      ? await this.sharing.copySource(job.ownerId, input.itemId)
+      : undefined;
+    const prepareValidateAccess = shared && (async () => {
+      const proof = await this.sharing.authorizeCopy(job.ownerId, input.itemId);
+      return async (tx: Prisma.TransactionClient) => {
+        signal.throwIfAborted();
+        const current = await this.sharing.copySource(job.ownerId, input.itemId, tx, proof);
+        invariant(current.sourceId === shared.sourceId && current.provider === shared.provider,
+          409, "source_changed", "Источник изменился. Запустите копирование снова");
+        invariant(await tx.job.findFirst({ where: {
+          id: job.id, state: "running", attempt: job.attempt, cancelRequested: false, leaseUntil: { gt: new Date() },
+        }, select: { id: true } }), 409, "job_state", "Задание отменено или уже выполняется повторно");
+      };
+    });
+    if (shared?.provider === "local") {
+      const sourcePath = storagePath(this.storageRoot, shared.path);
+      const info = await lstat(sourcePath).catch(() => undefined);
+      invariant(info?.isFile(), 404, "file_not_found", "Исходный файл недоступен");
+      const imported = await this.library.importLocal(job.ownerId, sourcePath, {
+        itemId: input.itemId, signal, prepareValidateAccess,
+      }).catch(error => {
+        if (error instanceof Error && error.message.includes(sourcePath))
+          throw new HttpError(422, "shared_file_unreadable", "Не удалось прочитать исходный файл");
+        throw error;
+      });
+      await save({ itemId: imported.item.id, reused: imported.reused }, 1, 1);
+      return { itemId: imported.item.id, reused: imported.reused };
+    }
+    if (job.kind === "youtube-download" || shared?.provider === "youtube") {
+      requireHeavy(access);
+      const itemId: string = input.itemId;
+      const externalId = shared?.externalId ?? (await this.library.getItem(job.ownerId, itemId)).sources.find(
+        (s) => s.provider === "youtube" && !s.shared && s.externalId,
+      )?.externalId;
+      invariant(externalId, 400, "youtube_source", "У медиа нет источника YouTube");
       const temporary = path.join(
         this.directory(job.id),
         `download-${job.attempt}`,
@@ -582,8 +625,8 @@ export class JobsService {
       let progressWrite = Promise.resolve();
       try {
         const file = await downloadYoutube(
-          source.externalId!,
-          input.mode,
+          externalId,
+          input.mode ?? "video",
           temporary,
           signal,
           (value) => {
@@ -592,7 +635,7 @@ export class JobsService {
               lastWrite = Date.now();
               writing = true;
               progressWrite = save(
-                { itemId: item.id, downloadProgress: value },
+                { itemId, downloadProgress: value },
                 0,
                 1,
                 value * 0.9,
@@ -609,10 +652,12 @@ export class JobsService {
         await progressWrite;
         if (progressError) throw progressError;
         signal.throwIfAborted();
-        await save({ itemId: item.id, downloadProgress: progress }, 0, 1, 0.9);
+        await save({ itemId, downloadProgress: progress }, 0, 1, 0.9);
+        requireHeavy(await ownerAccess(this.db, job.ownerId));
         const imported = await this.library.importLocal(job.ownerId, file, {
-          itemId: item.id,
+          itemId,
           signal,
+          prepareValidateAccess,
         });
         await save({ itemId: imported.item.id, reused: imported.reused }, 1, 1);
         return { itemId: imported.item.id, reused: imported.reused };
@@ -680,7 +725,7 @@ export class JobsService {
         invariant(job.browserOnly || !archiveRequiresBrowser(checked.manifest),
           403, "browser_only", "Архив с личными данными или правилами истории импортируется только из браузера");
         if (!input.apply) {
-          const existing = await this.library.snapshot(job.ownerId);
+          const existing = await this.library.snapshot(job.ownerId, false, undefined, false);
           const identities = new Map<string, (typeof existing.items)[number]>();
           for (const item of existing.items)
             for (const source of item.sources) {

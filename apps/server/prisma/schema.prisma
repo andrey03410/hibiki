@@ -34,6 +34,8 @@ model User {
   youtubeLinks YoutubeLink[]
   youtubeSyncPreference YoutubeSyncPreference?
   youtubeNotices YoutubeNotice[]
+  shareLinks ShareLink[]
+  savedSharedPlaylists SavedSharedPlaylist[]
 }
 
 model Session {
@@ -72,6 +74,7 @@ model Item {
   sources Source[]
   tags ItemTag[]
   sourceProposals SourceProposal[]
+  sharedTrack SharedTrack?
   @@index([ownerId, createdAt])
   @@index([ownerId, id])
 }
@@ -160,6 +163,7 @@ model Playlist {
 model PlaylistCountWork {
   ownerId String @id
   version Int @default(0)
+  changeToken String @default("")
   dueAt BigInt?
   watchHistory Boolean @default(true)
   publishedVersion Int?
@@ -328,4 +332,54 @@ model KanameStorage {
   expiresAt DateTime?
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   @@index([ownerId])
+}
+
+model ShareLink {
+  id String @id
+  token String @unique
+  ownerId String
+  kind String
+  targetId String
+  title String
+  expiresAt DateTime?
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  trackGrants SharedTrackGrant[]
+  savedPlaylists SavedSharedPlaylist[]
+  @@index([ownerId, createdAt])
+}
+
+model SharedTrack {
+  recipientItemId String @id
+  recipientId String
+  originItemId String
+  originOwnerId String
+  sharedBy String
+  item Item @relation(fields: [recipientItemId], references: [id], onDelete: Cascade)
+  grants SharedTrackGrant[]
+  @@unique([recipientId, originItemId])
+}
+
+model SharedTrackGrant {
+  recipientItemId String
+  shareLinkId String
+  track SharedTrack @relation(fields: [recipientItemId], references: [recipientItemId], onDelete: Cascade)
+  link ShareLink @relation(fields: [shareLinkId], references: [id], onDelete: Cascade)
+  @@id([recipientItemId, shareLinkId])
+  @@index([shareLinkId])
+}
+
+model SavedSharedPlaylist {
+  id String @id
+  recipientId String
+  shareLinkId String?
+  title String
+  sharedBy String
+  createdAt DateTime @default(now())
+  recipient User @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  link ShareLink? @relation(fields: [shareLinkId], references: [id], onDelete: SetNull)
+  @@unique([recipientId, shareLinkId])
+  @@index([recipientId, createdAt])
+  @@index([shareLinkId])
 }

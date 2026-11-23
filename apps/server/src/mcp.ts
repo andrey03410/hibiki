@@ -24,6 +24,15 @@ import { hydrateLibraryItems, requireHistoryAccess } from "./library";
 
 const id = z.string().min(1).max(256);
 const doc = z.record(z.string(), z.unknown());
+const sharedReaders = new Set(["media_list", "media_get", "playlist_get", "playlist_preview", "playlist_explain"]);
+const expiry = z.iso.datetime({ offset: true }).nullable();
+const shareUrl = z.url({ protocol: /^https?$/ }).max(2048);
+function tokenFromShareUrl(url: string) {
+  const path = new URL(url).pathname;
+  const token = /^\/share\/([A-Za-z0-9_-]{43})$/.exec(path)?.[1];
+  invariant(token, 400, "share_url", "Укажите ссылку «Поделиться» из Hibiki");
+  return token;
+}
 const json = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value) }],
 });
@@ -91,12 +100,13 @@ export function buildMcp(ownerId: string, s: Services) {
         inputSchema: schema,
         annotations: {
           readOnlyHint: readOnly,
-          destructiveHint: /delete/.test(name),
+          destructiveHint: /delete|revoke/.test(name),
           idempotentHint: readOnly,
         },
       },
       async (args) => {
         try {
+          if (kanameEnabled() && sharedReaders.has(name)) await s.sharing.prefetchForViewer(ownerId);
           return json(await fn(args));
         } catch (error) {
           const e = error as Error;
@@ -119,14 +129,14 @@ export function buildMcp(ownerId: string, s: Services) {
     "Схемы, примеры, семантика и доступные теги/плейлисты Hibiki",
     {},
     async () => {
-      const library = await s.library.snapshot(ownerId);
+      const [tags, playlists] = await Promise.all([s.library.listTags(ownerId), s.library.listPlaylists(ownerId)]);
       return {
         version: 1,
         playlistSchema: z.toJSONSchema(playlistDefinitionSchema, {
           io: "output",
           unrepresentable: "any",
         }),
-        tags: library.tags.filter((t) => !t.archived),
+        tags,
         classification: {
           groups: ["source", "artist", "genre", "mood", "extra"],
           filters:
@@ -134,7 +144,7 @@ export function buildMcp(ownerId: string, s: Services) {
           editing:
             "tag_save: group, aliases, parentIds; media_update_many: performance, voices, completeClassification. Для готовой записи нужны источник, исполнитель, жанр, настроение и исполнение.",
         },
-        playlists: library.playlists.map(({ id, title }) => ({ id, title })),
+        playlists: playlists.map(({ id, title }) => ({ id, title })),
         guide:
           "union объединяет, intersection оставляет общие, difference исключает. items/playlist/tag/filter — источники. Исключения побеждают добавления, дубли убираются, циклы запрещены. Все виды медиа совместимы в одном плейлисте. sort: source/title/newest/duration. Локальные файлы приоритетны.",
         examples: [
@@ -159,6 +169,8 @@ export function buildMcp(ownerId: string, s: Services) {
           "Условия и сортировку по личной истории задаёт владелец в браузере. MCP читает состав уже сохранённых плейлистов.",
         portability:
           "library_export → job_get → downloadUrl; library_import_begin → upload → job_get preview → library_import_apply",
+        sharing:
+          "share_create, share_list, share_set_expiry, share_revoke. Получатель использует share_open и share_save. Явное share_copy создаёт фоновое задание и собственный файл получателя.",
         constraints: {
           platform: "desktop",
           maxUploadBytes: MAX_MEDIA_UPLOAD_BYTES,
@@ -190,6 +202,7 @@ export function buildMcp(ownerId: string, s: Services) {
           tx,
           ownerId,
           filters,
+          s.library,
           filters.timeZone,
         );
         const index = cursor ? ids.indexOf(cursor) : -1;
@@ -199,6 +212,8 @@ export function buildMcp(ownerId: string, s: Services) {
           tx,
           ownerId,
           ids.slice(index + 1, end),
+          true,
+          s.library,
         );
         return {
           items: items.map((item) => ({
@@ -341,9 +356,12 @@ export function buildMcp(ownerId: string, s: Services) {
   );
   tool(
     "playlists_list",
-    "Свои ручные и составные плейлисты",
+    "Свои ручные и составные плейлисты и сохранённые общие подборки",
     {},
-    async () => ({ playlists: await s.library.listPlaylists(ownerId) }),
+    async () => ({
+      playlists: await s.library.listPlaylists(ownerId),
+      sharedPlaylists: await s.sharing.listSaved(ownerId),
+    }),
     true,
   );
   tool(
@@ -351,8 +369,7 @@ export function buildMcp(ownerId: string, s: Services) {
     "Определение своего плейлиста и вычисленный состав",
     { playlistId: id },
     async (args) => {
-      const library = await s.library.snapshot(ownerId);
-      const playlist = library.playlists.find((p) => p.id === args.playlistId);
+      const playlist = (await s.library.listPlaylists(ownerId)).find((p) => p.id === args.playlistId);
       invariant(playlist, 404, "playlist_not_found", "Плейлист не найден");
       return {
         playlist,
@@ -448,6 +465,26 @@ export function buildMcp(ownerId: string, s: Services) {
       return { ok: true };
     },
   );
+  tool("share_create", "Создать ссылку на свою запись или живой плейлист", {
+    kind: z.enum(["item", "playlist"]), targetId: id, expiresAt: expiry.optional(),
+  }, args => s.sharing.create(ownerId, args.kind, args.targetId, args.expiresAt));
+  tool("share_list", "Показать выданные мной ссылки и их статусы", {},
+    async () => ({ links: await s.sharing.list(ownerId) }), true);
+  tool("share_set_expiry", "Задать срок действующей ссылки или сделать её бессрочной", {
+    id, expiresAt: expiry,
+  }, args => s.sharing.setExpiry(ownerId, args.id, args.expiresAt));
+  tool("share_revoke", "Досрочно закрыть свою ссылку", { id }, async args => {
+    await s.sharing.revoke(ownerId, args.id);
+    return { ok: true };
+  });
+  tool("share_open", "Открыть запись или плейлист по выданной ссылке", { url: shareUrl },
+    args => s.sharing.open(ownerId, tokenFromShareUrl(args.url)), true);
+  tool("share_save", "Сохранить запись или плейлист по ссылке. itemId выбирает отдельный трек плейлиста", {
+    url: shareUrl, itemId: id.optional(),
+  }, args => s.sharing.save(ownerId, tokenFromShareUrl(args.url), args.itemId));
+  tool("share_copy", "По просьбе пользователя создать локальную копию общей записи. Возвращает задание", {
+    itemId: id, mode: z.enum(["audio", "video"]).optional(),
+  }, args => s.jobs.create(ownerId, "shared-copy", args));
   tool(
     "jobs_list",
     "Свои фоновые задания и прогресс",

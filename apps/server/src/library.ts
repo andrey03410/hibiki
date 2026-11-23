@@ -32,6 +32,7 @@ import { missingClassification, playbackModeSchema, playlistDefinitionSchema } f
 import { collectReferences, InvalidPlaylistError, resolvePlaylist, usesPrivateHistory } from "@hibiki/core";
 
 import { listTags, tagDto, saveTag } from "./taxonomy";
+import { decorateSharedItems } from "./sharing";
 
 export const itemInclude = {
   sources: { include: { file: true } },
@@ -88,13 +89,17 @@ export function itemDto(row: IncludedItem): ItemDto {
     })),
   };
 }
-export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[]) {
+export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: false): Promise<ItemDto[]>;
+export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: true, library: LibraryService): Promise<ItemDto[]>;
+export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: boolean, library?: LibraryService) {
+  if (!ids.length) return [];
   const rows = await tx.item.findMany({
     where: { ownerId, id: { in: ids } },
     include: ownedItemInclude(ownerId),
   });
   const byId = new Map(rows.map(row => [row.id, itemDto(row)]));
-  return ids.flatMap(id => byId.get(id) ?? []);
+  const items = ids.flatMap(id => byId.get(id) ?? []);
+  return includeShared && library ? decorateSharedItems(tx, ownerId, items, library) : items;
 }
 
 function* playlistCoverCandidates(items: ItemDto[]) {
@@ -166,6 +171,9 @@ export function jobDto(row: {
 }
 export class LibraryService {
   private readonly artwork: ArtworkService;
+  private readonly liveQueues = new Map<string, {
+    version: number; changeToken: string; calculatedAt: number; validUntil: number; ids: string[];
+  }>();
 
   constructor(
     public db: Db,
@@ -232,8 +240,12 @@ export class LibraryService {
       after = files.at(-1)?.id;
     }
   }
-  async snapshot(ownerId: string, browserJobs = false, onInvalidPlaylist?: (id: string) => void): Promise<LibraryDto> {
-    return this.snapshotWith(ownerId, this.db, browserJobs, onInvalidPlaylist);
+  async snapshot(ownerId: string, browserJobs = false, onInvalidPlaylist?: (id: string) => void, includeShared = true): Promise<LibraryDto> {
+    if (!includeShared) return this.snapshotWith(ownerId, this.db, browserJobs, onInvalidPlaylist);
+    return this.db.$transaction(async tx => {
+      const snapshot = await this.snapshotWith(ownerId, tx, browserJobs, onInvalidPlaylist);
+      return { ...snapshot, items: await decorateSharedItems(tx, ownerId, snapshot.items, this) };
+    });
   }
   private async snapshotWith(
     ownerId: string,
@@ -276,12 +288,12 @@ export class LibraryService {
     };
   }
   async getItem(ownerId: string, id: string) {
-    const row = await this.db.item.findFirst({
-      where: { id, ownerId },
-      include: ownedItemInclude(ownerId),
-    });
-    invariant(row, 404, "item_not_found", "Медиа не найдено");
-    return itemDto(row);
+    return this.db.$transaction(tx => this.ownedItem(tx, ownerId, id));
+  }
+  private async ownedItem(tx: Prisma.TransactionClient, ownerId: string, id: string) {
+    const [item] = await hydrateLibraryItems(tx, ownerId, [id], true, this);
+    invariant(item, 404, "item_not_found", "Медиа не найдено");
+    return item;
   }
   async importLocal(
     ownerId: string,
@@ -291,11 +303,15 @@ export class LibraryService {
       creditId?: string;
       itemId?: string;
       signal?: AbortSignal;
+      validateAccess?: (tx: Prisma.TransactionClient) => Promise<void>;
+      prepareValidateAccess?: () => Promise<(tx: Prisma.TransactionClient) => Promise<void>>;
       applyReplacement?: (tx: Prisma.TransactionClient, sourceId: string) => Promise<void>;
     } = {},
   ): Promise<{ item: ItemDto; reused: boolean }> {
     let access = await ownerAccess(this.db, ownerId);
-    if (options.itemId) await this.getItem(ownerId, options.itemId);
+    if (options.itemId) invariant(await this.db.item.findFirst({
+      where: { id: options.itemId, ownerId }, select: { id: true },
+    }), 404, "item_not_found", "Медиа не найдено");
     const media = await inspectFile(filePath, { signal: options.signal });
     const canonicalKey = `local:${media.hash}`;
     const canonical = await this.db.source.findUnique({
@@ -331,44 +347,38 @@ export class LibraryService {
     };
     if (prior) {
       const original = prior.fileId
-        ? await this.db.mediaFile.findUnique({ where: { id: prior.fileId } })
+        ? await this.db.mediaFile.findFirst({ where: { id: prior.fileId, ownerId } })
         : null;
       if (original && await fileIntact(original)) {
-        if (original.hasAudio !== media.hasAudio)
-          await this.db.mediaFile.update({
-            where: { id: original.id },
-            data: { hasAudio: media.hasAudio },
+        let reusable = media.browserCompatible && prior.status === "available";
+        if (!options.applyReplacement && !media.browserCompatible && prior.reason === "unsupported_codec") {
+          const playbackSources = await this.db.source.findMany({
+            where: { itemId: prior.itemId, ownerId, provider: "local", status: "available", file: { ownerId } },
+            include: { file: true },
           });
-        const item = await this.getItem(ownerId, prior.itemId);
-        if (media.browserCompatible && prior.status === "available") {
-          if (options.applyReplacement) {
-            const applyReplacement = options.applyReplacement;
-            await this.db.$transaction(async (tx) => {
+          for (const { file } of playbackSources) {
+            if (await fileIntact(file)) {
+              reusable = true;
+              break;
+            }
+          }
+        }
+        if (reusable) {
+          const validateAccess = await options.prepareValidateAccess?.() ?? options.validateAccess;
+          return this.db.$transaction(async tx => {
+            options.signal?.throwIfAborted();
+            await validateAccess?.(tx);
+            options.signal?.throwIfAborted();
+            if (original.hasAudio !== media.hasAudio)
+              await tx.mediaFile.update({ where: { id: original.id }, data: { hasAudio: media.hasAudio } });
+            if (options.applyReplacement) {
               invariant(await tx.source.findFirst({
                 where: { id: prior.id, ownerId, itemId: options.itemId, status: "available" },
               }), 409, "source_changed", "Источник изменился, проверьте файл снова");
-              await applyReplacement(tx, prior.id);
-            });
-          }
-          return { item: options.applyReplacement ? await this.getItem(ownerId, item.id) : item, reused: true };
-        }
-        if (!options.applyReplacement && !media.browserCompatible && prior.reason === "unsupported_codec") {
-          for (const source of item.sources) {
-            if (
-              source.provider !== "local" ||
-              source.status !== "available" ||
-              !source.fileId
-            )
-              continue;
-            if (
-              await fileIntact(
-                await this.db.mediaFile.findUnique({
-                  where: { id: source.fileId },
-                }),
-              )
-            )
-              return { item, reused: true };
-          }
+              await options.applyReplacement(tx, prior.id);
+            }
+            return { item: await this.ownedItem(tx, ownerId, prior.itemId), reused: true };
+          });
         }
       }
     }
@@ -402,6 +412,7 @@ export class LibraryService {
       invariant(!options.applyReplacement || prepared || media.browserCompatible,
         422, "no_playable_source", "Не удалось подготовить файл к воспроизведению");
       const title = (options.title?.trim() || media.title).slice(0, 500);
+      const validateAccess = await options.prepareValidateAccess?.() ?? options.validateAccess;
       const result = await this.db.$transaction(async (tx) => {
         // Re-check under the write transaction: parallel imports may finish probing together.
         const currentCanonical = await tx.source.findUnique({
@@ -457,6 +468,8 @@ export class LibraryService {
           invariant(file, 409, "file_changed", "Состав хранилища изменился, повторите импорт");
           return file;
         };
+        options.signal?.throwIfAborted();
+        await validateAccess?.(tx);
         options.signal?.throwIfAborted();
         const file = await store(media);
         const playback = prepared
@@ -682,7 +695,7 @@ export class LibraryService {
         });
         results.push(itemDto(row));
       }
-      return results;
+      return decorateSharedItems(tx, ownerId, results, this);
     }, { timeout: 120_000 });
   }
   async deleteItem(ownerId: string, id: string) {
@@ -811,13 +824,6 @@ export class LibraryService {
     });
     return rows.map(playlistDto);
   }
-  private async playlistInputs(ownerId: string, onInvalidPlaylist?: (id: string) => void) {
-    const [snapshot, history] = await Promise.all([
-      this.snapshot(ownerId, false, onInvalidPlaylist),
-      playlistHistory(this.db, ownerId),
-    ]);
-    return { ...snapshot, history };
-  }
   async refreshDuePlaylistCounts(now = new Date(), signal?: AbortSignal) {
     const work = await this.db.playlistCountWork.findFirst({
       where: { OR: [
@@ -838,10 +844,13 @@ export class LibraryService {
       type Card = { count: number; covers: string[]; ids: string[] };
       const cards = new Map<string, Card | null>();
       const localCoverChecks = new Map<string, boolean>();
-      const snapshot = await this.playlistInputs(ownerId, id => cards.set(id, null));
+      const [snapshot, history] = await Promise.all([
+        this.snapshot(ownerId, false, id => cards.set(id, null), false),
+        playlistHistory(this.db, ownerId),
+      ]);
       let nextCutoff = Infinity;
       const inputs = {
-        ...snapshot, now,
+        ...snapshot, history, now,
         onFutureHistoryCutoff: (at: number) => { nextCutoff = Math.min(nextCutoff, at); },
       };
       for (const playlist of snapshot.playlists) {
@@ -888,17 +897,31 @@ export class LibraryService {
   }
   async playlistPlayback(ownerId: string, id: string): Promise<PlaylistPlaybackDto> {
     return this.db.$transaction(async tx => {
-      const row = await tx.playlist.findFirst({ where: { ownerId, id }, select: { queueIdsJson: true } });
-      invariant(row, 404, "playlist_not_found", "Плейлист не найден");
-      const work = await tx.playlistCountWork.findUnique({ where: { ownerId } });
-      const now = new Date();
-      const fresh = work && work.publishedVersion === work.version &&
-        (work.validUntil === null || work.validUntil > BigInt(+now));
-      const ids = fresh && row.queueIdsJson !== null
-        ? JSON.parse(row.queueIdsJson) as string[]
-        : await this.livePlaylistIds(tx, ownerId, id, now);
-      return { ids, items: ids.length ? await hydrateLibraryItems(tx, ownerId, ids.slice(0, 8)) : [] };
+      const ids = await this.playlistIds(tx, ownerId, id);
+      return { ids, items: await hydrateLibraryItems(tx, ownerId, ids.slice(0, 8), true, this) };
     });
+  }
+  async playlistIds(tx: Prisma.TransactionClient, ownerId: string, id: string, now = new Date()): Promise<string[]> {
+    const row = await tx.playlist.findFirst({ where: { ownerId, id }, select: { queueIdsJson: true } });
+    invariant(row, 404, "playlist_not_found", "Плейлист не найден");
+    const work = await tx.playlistCountWork.findUnique({ where: { ownerId } });
+    const nowMs = now.getTime();
+    const fresh = work && work.publishedVersion === work.version &&
+      (work.validUntil === null || work.validUntil > BigInt(nowMs));
+    if (fresh && row.queueIdsJson !== null) return JSON.parse(row.queueIdsJson) as string[];
+
+    const key = JSON.stringify([ownerId, id]);
+    const cached = this.liveQueues.get(key);
+    if (cached && work && cached.version === work.version && cached.changeToken === work.changeToken &&
+        cached.calculatedAt <= nowMs && nowMs < cached.validUntil) return [...cached.ids];
+
+    const { ids, validUntil } = await this.livePlaylistIds(tx, ownerId, id, now);
+    if (work?.changeToken && ids.length <= 100_000) {
+      this.liveQueues.delete(key);
+      if (this.liveQueues.size >= 8) this.liveQueues.delete(this.liveQueues.keys().next().value!);
+      this.liveQueues.set(key, { version: work.version, changeToken: work.changeToken, calculatedAt: nowMs, validUntil, ids: [...ids] });
+    }
+    return ids;
   }
   private async livePlaylistIds(tx: Prisma.TransactionClient, ownerId: string, id: string, now: Date) {
     const rows = await tx.playlist.findMany({
@@ -935,7 +958,12 @@ export class LibraryService {
       sources: local ? [{ provider: "local", status: "available" } as const] : [],
     }));
     try {
-      return resolvePlaylist(definition, { items, tags, playlists, history, now }, id).items.map(item => item.id);
+      let validUntil = Infinity;
+      const result = resolvePlaylist(definition, {
+        items, tags, playlists, history, now,
+        onFutureHistoryCutoff: at => { validUntil = Math.min(validUntil, at); },
+      }, id);
+      return { ids: result.items.map(item => item.id), validUntil };
     } catch (error) {
       if (!(error instanceof InvalidPlaylistError)) throw error;
       throw new HttpError(422, "invalid_playlist", error.message);
@@ -944,24 +972,31 @@ export class LibraryService {
   async preview(ownerId: string, definition: PlaylistDefinition, id?: string, browser = true) {
     const checked = playlistDefinitionSchema.parse(definition);
     requireHistoryAccess(checked, browser);
-    if (id)
-      invariant(
-        await this.db.playlist.findFirst({ where: { id, ownerId } }),
-        404,
-        "playlist_not_found",
-        "Плейлист не найден",
-      );
-    return this.evaluatePlaylist(ownerId, checked, id, browser);
+    return this.db.$transaction(async tx => {
+      if (id)
+        invariant(
+          await tx.playlist.findFirst({ where: { id, ownerId } }),
+          404,
+          "playlist_not_found",
+          "Плейлист не найден",
+        );
+      return this.evaluatePlaylist(tx, ownerId, checked, id, browser);
+    });
   }
   private async evaluatePlaylist(
+    tx: Prisma.TransactionClient,
     ownerId: string,
     definition: PlaylistDefinition,
     id: string | undefined,
     browser: boolean,
   ) {
     try {
-      const snapshot = await this.playlistInputs(ownerId);
-      const result = resolvePlaylist(definition, snapshot, id);
+      const [snapshot, history] = await Promise.all([
+        this.snapshotWith(ownerId, tx),
+        playlistHistory(tx, ownerId),
+      ]);
+      const result = resolvePlaylist(definition, { ...snapshot, history }, id);
+      result.items = await decorateSharedItems(tx, ownerId, result.items, this);
       if (!browser && usesPrivateHistory(
         definition, new Map(snapshot.playlists.map((playlist) => [playlist.id, playlist])),
       )) return { ...result, reasons: {}, excluded: [] };
@@ -971,19 +1006,21 @@ export class LibraryService {
     }
   }
   async resolve(ownerId: string, id: string, browser = true) {
-    const row = await this.db.playlist.findFirst({ where: { id, ownerId } });
-    invariant(row, 404, "playlist_not_found", "Плейлист не найден");
-    return this.evaluatePlaylist(ownerId, playlistDto(row).definition, id, browser);
+    return this.db.$transaction(async tx => {
+      const row = await tx.playlist.findFirst({ where: { id, ownerId } });
+      invariant(row, 404, "playlist_not_found", "Плейлист не найден");
+      return this.evaluatePlaylist(tx, ownerId, playlistDto(row).definition, id, browser);
+    });
   }
   async deletePlaylist(ownerId: string, id: string) {
-    const snapshot = await this.snapshot(ownerId);
+    const playlists = await this.listPlaylists(ownerId);
     invariant(
-      snapshot.playlists.some((p) => p.id === id),
+      playlists.some((p) => p.id === id),
       404,
       "playlist_not_found",
       "Плейлист не найден",
     );
-    const uses = snapshot.playlists.filter(
+    const uses = playlists.filter(
       (p) =>
         p.id !== id &&
         collectReferences(p.definition.rule).playlistIds.includes(id),

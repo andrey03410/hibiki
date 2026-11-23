@@ -57,4 +57,28 @@ describe("library pages", () => {
     await pending;
     expect(pages.snapshot().items).toEqual(rows(900, 1));
   });
+
+  it("updates displayed borrowed rows without fetching or replacing the rest of the page", async () => {
+    const [local, next] = rows(1, 2);
+    const shared: ItemDto = { ...next!, shared: { available: true, sharedBy: "Автор" } };
+    const closed: ItemDto = { ...shared, shared: { available: false, sharedBy: "Автор" } };
+    const load = vi.fn(async () => ({ items: [local!, shared], total: 2, nextCursor: null }));
+    const check = vi.fn(async () => [closed]);
+    const pages = new LibraryPages(load);
+    await pages.refresh();
+    await pages.revalidateShared(check);
+    expect(check).toHaveBeenCalledWith([shared.id]);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(pages.snapshot().items).toEqual([local, closed]);
+    expect(pages.snapshot().items[0]).toBe(local);
+    expect(pages.snapshot().loading).toBe(false);
+  });
+
+  it("refreshes loaded filter pages without interrupting the view when a poll fails", async () => {
+    const pages = new LibraryPages(vi.fn().mockResolvedValueOnce(first).mockRejectedValueOnce(new Error("offline")));
+    await pages.refresh();
+    const before = pages.snapshot();
+    await pages.refresh(true);
+    expect(pages.snapshot()).toBe(before);
+  });
 });

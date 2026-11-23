@@ -21,6 +21,7 @@ SDK. Транспорт без серверной MCP-сессии, с JSON-от
 | Медиатека | `media_list`, `media_get`, `media_import_youtube`, `media_download`, `media_refresh`, `media_propose_replacement`, `media_import_local`, `media_upload_begin`, `media_update_many`, `media_delete` |
 | Теги | `tags_list`, `tag_save`, `tag_delete` |
 | Плейлисты | `playlists_list`, `playlist_get`, `playlist_validate`, `playlist_preview`, `playlist_explain`, `playlist_save`, `playlist_delete` |
+| Доступ по ссылке | `share_create`, `share_list`, `share_set_expiry`, `share_revoke`, `share_open`, `share_save`, `share_copy` |
 | Задания | `jobs_list`, `job_get`, `job_cancel`, `job_retry` |
 | Перенос | `library_export`, `library_import_begin`, `library_import_apply` |
 
@@ -39,6 +40,14 @@ SDK. Транспорт без серверной MCP-сессии, с JSON-от
 Долгая работа возвращает JobDto. Прогресс проверяется через `job_get`, повторный
 импорт не используется как опрос. Готовый export возвращает downloadUrl;
 скачивание требует Bearer-токен или сессию браузера.
+
+`share_create` принимает `kind`, `targetId` и необязательный `expiresAt` в ISO. `null`
+задаёт бессрочный доступ. `share_set_expiry` меняет срок той же активной ссылки,
+`share_revoke` досрочно закрывает ссылку владельца. `share_open` и `share_save`
+принимают выданный URL и используют права аккаунта токена Hibiki. `share_save`
+принимает `itemId` для сохранения отдельного трека из текущего состава. В ответе
+`playlists_list` сохранённые общие подборки доступны в `sharedPlaylists`.
+Явный `share_copy` принимает ID сохранённой записи и возвращает задание `shared-copy`.
 
 `media_propose_replacement` сохраняет URL одного ролика и объяснение к своей
 записи. Предпросмотр, отклонение и подтверждение доступны в браузерной карточке.
@@ -64,5 +73,9 @@ MCP handler и проверяет отзыв токена; сервисные т
 transport с вызовами инструментов, реальным импортом,
 предпросмотром/объяснением, upload, job status и экспортом/применением архива.
 Изменения должны быть видны в сайте; чужие IDs и отозванный токен — отвергнуты.
+
+`share-mcp.test.ts` подключает два клиента SDK по Streamable HTTP. Он проверяет
+выдачу и срок ссылки, сохранение чужой записи без файла, явное копирование,
+отзыв и прекращение доступа до выполнения задания.
 
 В режиме Kaname каждый запрос MCP проверяет текущее назначение по subject, а разовые ссылки загрузки повторяют проверку при использовании. Новый токен выдаёт Hibiki после входа через Keycloak. Отзыв назначения закрывает MCP и файлы.

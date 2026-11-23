@@ -7,6 +7,7 @@ export class ApiError extends Error {
   constructor(
     public code: string,
     message: string,
+    public status?: number,
   ) {
     super(message);
   }
@@ -43,6 +44,7 @@ export async function api<T = any>(
       data?.error?.code ?? "REQUEST_FAILED",
       data?.error?.message ??
         `Не удалось выполнить запрос (${response.status})`,
+      response.status,
     );
   return data as T;
 }

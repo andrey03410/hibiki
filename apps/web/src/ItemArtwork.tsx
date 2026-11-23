@@ -3,12 +3,14 @@ import { Music2, Video } from "lucide-react";
 import type { ItemDto, SourceDto } from "@hibiki/contracts";
 
 interface Props {
-  source?: Pick<SourceDto, "provider" | "thumbnail" | "externalId">;
+  source?: Pick<SourceDto, "provider" | "thumbnail" | "externalId" | "shared">;
   kind: ItemDto["kind"];
 }
 
 function libraryThumbnail(source: Props["source"]) {
   if (!source?.thumbnail) return;
+  if (source.shared && /^\/api\/(?:(?:shared|shared-playlists)\/[\w-]+\/items|shared-items)\/[\w-]+\/artwork$/.test(source.thumbnail))
+    return `${source.thumbnail}?size=thumb`;
   if (source.provider === "youtube" && /^[\w-]{11}$/.test(source.externalId ?? ""))
     return `https://i.ytimg.com/vi/${source.externalId}/default.jpg`;
   if (source.provider === "local" && /^\/api\/items\/[\w-]+\/artwork$/.test(source.thumbnail))

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readFile, writeFile, rm } from "node:fs/promises";
+import { readFile, readdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -31,6 +31,74 @@ describe("personal library", () => {
     expect((await ctx.library.snapshot(ctx.otherUserId)).items).toEqual([]);
     const other = await ctx.library.importLocal(ctx.otherUserId, input);
     expect(other.item.id).not.toBe(a.item.id);
+  });
+  it("checks access before publishing a local copy on a retained item", async () => {
+    const { db, library, root, userId: ownerId } = ctx;
+    const path = join(root, "tone.wav");
+    await writeFile(path, wav());
+    await db.item.create({ data: { id: "retained", ownerId, kind: "audio", title: "Saved", originalTitle: "Saved" } });
+
+    await expect(library.importLocal(ownerId, path, {
+      itemId: "retained",
+      validateAccess: async (tx) => {
+        expect(await tx.mediaFile.count({ where: { ownerId } })).toBe(0);
+        throw new Error("Access expired");
+      },
+    })).rejects.toThrow("Access expired");
+    expect(await db.source.count({ where: { ownerId } })).toBe(0);
+    expect(await db.mediaFile.count({ where: { ownerId } })).toBe(0);
+    expect(await readdir(join(root, "media", ownerId))).toEqual([]);
+  });
+  it("validates access before returning a reused local import", async () => {
+    const { db, library, root, userId: ownerId } = ctx;
+    const path = join(root, "tone.wav");
+    await writeFile(path, wav());
+    const { item } = await library.importLocal(ownerId, path);
+    const fileId = item.sources[0]!.fileId;
+    await db.mediaFile.update({ where: { id: fileId }, data: { hasAudio: null } });
+
+    await expect(library.importLocal(ownerId, path, {
+      itemId: item.id,
+      validateAccess: async () => { throw new Error("Access expired"); },
+    })).rejects.toThrow("Access expired");
+    expect((await db.mediaFile.findUniqueOrThrow({ where: { id: fileId } })).hasAudio).toBeNull();
+  });
+  it("keeps playlist IDs from a rollback out of the cache at a reused owner version", async () => {
+    const { db, library, userId: ownerId } = ctx;
+    await db.item.createMany({ data: ["a", "b"].map(id => ({ id, ownerId, kind: "audio", title: id, originalTitle: id })) });
+    const { id, definition } = await library.savePlaylist(ownerId, {
+      title: "Manual", definition: { version: 1, sort: "source", rule: { type: "items", ids: [] } },
+    });
+    const definitionFor = (itemId: string) => JSON.stringify({ ...definition, rule: { type: "items", ids: [itemId] } });
+    const now = new Date();
+    let rolledBackVersion: number | undefined;
+    await expect(db.$transaction(async tx => {
+      await tx.playlist.update({ where: { id }, data: { definitionJson: definitionFor("a") } });
+      rolledBackVersion = (await tx.playlistCountWork.findUniqueOrThrow({ where: { ownerId } })).version;
+      expect(await library.playlistIds(tx, ownerId, id, now)).toEqual(["a"]);
+      throw new Error("rollback");
+    })).rejects.toThrow("rollback");
+
+    await db.playlist.update({ where: { id }, data: { definitionJson: definitionFor("b") } });
+    expect((await db.playlistCountWork.findUniqueOrThrow({ where: { ownerId } })).version).toBe(rolledBackVersion);
+    const read = () => db.$transaction(tx => library.playlistIds(tx, ownerId, id, now));
+    const result = await read();
+    expect(result).toEqual(["b"]);
+    result.pop();
+    expect(await read()).toEqual(["b"]);
+  });
+  it("invalidates the live playlist memo at the exact history cutoff", async () => {
+    const { db, library, userId: ownerId } = ctx;
+    const lastStartedAt = new Date("2026-11-22T12:00:00Z");
+    await db.item.create({ data: { id: "a", ownerId, kind: "audio", title: "A", originalTitle: "A" } });
+    await db.listeningSummary.create({ data: { itemId: "a", ownerId, launches: 1, lastStartedAt } });
+    const { id } = await library.savePlaylist(ownerId, { title: "Idle", definition: {
+      version: 1, sort: "last-started", rule: { type: "history", condition: "last-started-before", days: 1 },
+    } });
+    const read = (offset: number) => db.$transaction(tx => library.playlistIds(tx, ownerId, id, new Date(+lastStartedAt + 86_400_000 + offset)));
+    expect(await read(0)).toEqual([]);
+    expect(await read(1)).toEqual(["a"]);
+    expect(await read(0)).toEqual([]);
   });
   it("keeps a renamed item and its tags when YouTube becomes unavailable", async () => {
     const { item } = await ctx.library.upsertYoutube(ctx.userId, {

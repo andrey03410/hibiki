@@ -8,10 +8,13 @@ export function searchBody(filters: LibrarySearch) {
   return {filters, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone};
 }
 
-export async function fetchItems(ids: string[]): Promise<ItemDto[]> {
+export async function fetchItems(ids: string[], verifyShared = false): Promise<ItemDto[]> {
   const items: ItemDto[] = [];
   for (let start = 0; start < ids.length; start += 100) {
-    const page = await api<{items: ItemDto[]}>("/library/items", "POST", {ids: ids.slice(start, start + 100)});
+    const page = await api<{items: ItemDto[]}>("/library/items", "POST", {
+      ids: ids.slice(start, start + 100),
+      ...(verifyShared && { verifyShared }),
+    });
     items.push(...page.items);
   }
   return items;
@@ -37,10 +40,13 @@ export class LibraryPages {
     this.listeners.forEach(listener => listener());
   }
 
-  async refresh() {
+  async refresh(background = false) {
+    if (background && (this.state.loading || this.state.error)) return;
     const request = ++this.generation;
-    this.update({loading: true, error: ""});
-    this.failedAppend = false;
+    if (!background) {
+      this.update({loading: true, error: ""});
+      this.failedAppend = false;
+    }
     try {
       let page = await this.fetch();
       const tagCounts = page.tagCounts;
@@ -56,8 +62,22 @@ export class LibraryPages {
       this.pageCount = count;
       this.update({...page, items, tagCounts, loading: false});
     } catch (error) {
-      if (request === this.generation) this.update({loading: false, error: (error as Error).message});
+      if (!background && request === this.generation) this.update({loading: false, error: (error as Error).message});
     }
+  }
+
+  async revalidateShared(load = fetchItems) {
+    if (this.state.loading || this.state.error) return;
+    const ids = this.state.items.filter(item => item.shared).map(item => item.id);
+    if (!ids.length) return;
+    const generation = this.generation;
+    const fresh = new Map((await load(ids)).map(item => [item.id, item]));
+    if (generation !== this.generation) return;
+    const items = this.state.items.map(item => {
+      const updated = fresh.get(item.id);
+      return updated && JSON.stringify(item) !== JSON.stringify(updated) ? updated : item;
+    });
+    if (items.some((item, index) => item !== this.state.items[index])) this.update({ items });
   }
 
   async more() {
