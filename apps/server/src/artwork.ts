@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import ffmpeg from "ffmpeg-static";
+import { z } from "zod";
 import { parseFromTokenizer } from "music-metadata";
 import { fromFile } from "strtok3";
 import type { Db } from "./db";
@@ -12,7 +13,12 @@ import { storagePath } from "./media";
 const maxArtworkBytes = 5 * 1024 ** 2;
 const maxMetadataBytes = 8 * 1024 ** 2;
 const maxMetadataReads = 4096;
-const maxThumbBytes = 32 * 1024;
+export const artworkQuery = z.object({ size: z.enum(["thumb", "cover"]).optional() });
+type ArtworkSize = NonNullable<z.infer<typeof artworkQuery>["size"]>;
+const renditions = {
+  thumb: { pixels: 96, quality: 72, maxBytes: 32 * 1024 },
+  cover: { pixels: 640, quality: 80, maxBytes: 768 * 1024 },
+};
 // Two 100-item pages can arrive together over HTTP/2 during a fast scroll.
 const maxQueuedFiles = 256;
 const runFfmpeg = promisify(execFile);
@@ -97,15 +103,16 @@ async function readArtwork(path: string): Promise<Artwork | undefined> {
   }
 }
 
-async function makeThumbnail(original: Artwork): Promise<Artwork | undefined> {
+async function makeRendition(original: Artwork, size: ArtworkSize): Promise<Artwork | undefined> {
+  const { pixels, quality, maxBytes } = renditions[size];
   const codec = { "image/jpeg": "mjpeg", "image/png": "png", "image/webp": "webp" }[original.mime];
   const encoding = runFfmpeg(String(ffmpeg), [
     "-hide_banner", "-loglevel", "error", "-max_alloc", String(64 * 1024 ** 2),
     "-filter_threads", "1", "-threads", "1", "-max_pixels", String(16 * 1024 ** 2),
     "-protocol_whitelist", "pipe", "-f", "image2pipe", "-c:v", codec, "-i", "pipe:0",
-    "-frames:v", "1", "-vf", "scale='min(96,iw)':'min(96,ih)':force_original_aspect_ratio=decrease",
-    "-threads", "1", "-c:v", "libwebp", "-quality", "72", "-f", "image2pipe", "pipe:1",
-  ], { encoding: "buffer", timeout: 5_000, killSignal: "SIGKILL", maxBuffer: maxThumbBytes });
+    "-frames:v", "1", "-vf", `scale='min(${pixels},iw)':'min(${pixels},ih)':force_original_aspect_ratio=decrease`,
+    "-threads", "1", "-c:v", "libwebp", "-quality", String(quality), "-f", "image2pipe", "pipe:1",
+  ], { encoding: "buffer", timeout: 5_000, killSignal: "SIGKILL", maxBuffer: maxBytes });
   // A malformed image or an early decoder exit can close stdin during the write.
   encoding.child.stdin?.on("error", () => {});
   encoding.child.stdin?.end(original.bytes);
@@ -168,13 +175,16 @@ export class ArtworkCache {
 
 export class ArtworkService {
   private originals = new ArtworkCache(8, 2);
-  private thumbnails = new ArtworkCache(512, 2);
+  private renditions = {
+    thumb: new ArtworkCache(512, 2),
+    cover: new ArtworkCache(32, 1),
+  };
   constructor(
     private db: Db,
     private storageRoot: string,
   ) {}
 
-  async get(ownerId: string, itemId: string, size?: "thumb"): Promise<Artwork> {
+  async get(ownerId: string, itemId: string, size?: ArtworkSize): Promise<Artwork> {
     // Never authorize through the cache: ownership is checked on every request.
     const item = await this.db.item.findFirst({
       where: { id: itemId, ownerId },
@@ -201,10 +211,10 @@ export class ArtworkService {
       if (!info?.isFile()) continue;
       const key = `${path}:${file.hash}:${info.size}:${info.mtimeMs}`;
       const original = () => this.originals.get(key, () => readArtwork(path));
-      const result = size === "thumb"
-        ? await this.thumbnails.get(key, async () => {
+      const result = size
+        ? await this.renditions[size].get(key, async () => {
           const cover = await original();
-          return cover && makeThumbnail(cover);
+          return cover && makeRendition(cover, size);
         })
         : await original();
       if (result) return result;

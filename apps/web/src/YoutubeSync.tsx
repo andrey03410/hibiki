@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { Bell, ExternalLink, Youtube } from "lucide-react";
 import { Link } from "react-router";
 import type { ItemDto, PlaylistDto, TagDto } from "@hibiki/contracts";
@@ -10,6 +10,7 @@ import type {
   YoutubeSyncReport,
 } from "../../server/src/youtube-sync";
 import { api } from "./api";
+import { fetchItems } from "./library-pages";
 import "./youtube-sync.css";
 
 const labels: Record<YoutubeSyncMode, string> = {
@@ -199,14 +200,38 @@ export function YoutubeLinkImport({
   );
 }
 
+const emptyItems: ItemDto[] = [];
+
+export function YoutubeSyncDetails({ summary, children }: { summary: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return <details onToggle={event => {
+    if (event.target === event.currentTarget) setOpen(event.currentTarget.open);
+  }}>
+    <summary>{summary}</summary>
+    {open && children}
+  </details>;
+}
+
+type LocalControls = {
+  link: YoutubeLinkDto;
+  busy: boolean;
+  selection: string;
+  setSelection: (id: string) => void;
+  edit: (change: YoutubeLocalEdit) => void;
+};
+
 export function YoutubeLinkedPlaylist({
   playlist,
-  items,
+  items = emptyItems,
+  libraryRevision,
   tags,
   reload,
+  LocalAdditions = YoutubeLocalAdditions,
 }: {
   playlist: PlaylistDto;
-  items: ItemDto[];
+  items?: ItemDto[];
+  libraryRevision: string;
+  LocalAdditions?: ComponentType<LocalControls & { items: ItemDto[] }>;
   tags?: TagDto[];
   reload: Reload;
 }) {
@@ -298,19 +323,11 @@ export function YoutubeLinkedPlaylist({
         {error}
       </p>
     ) : null;
-  const byId = new Map(items.map((item) => [item.id, item]));
   const knownTags = tags ?? [
     ...new Map(
       items.flatMap((item) => item.tags).map((tag) => [tag.id, tag]),
     ).values(),
   ];
-  const hidden = new Set(link.hidden);
-  const remote = new Set(link.snapshot.map((entry) => entry.itemId));
-  const associated = new Set(link.snapshot.map((entry) => entry.externalId));
-  const additions = new Set(link.additions);
-  const candidates = items.filter(
-    (item) => !remote.has(item.id) && !additions.has(item.id),
-  );
   const edit = (data: YoutubeLocalEdit) => void update("edit", data);
 
   return (
@@ -370,111 +387,16 @@ export function YoutubeLinkedPlaylist({
           </button>
         </div>
       )}
-      {link.report && (
-        <details>
-          <summary>Последние применённые изменения</summary>
-          <Report report={link.report} />
-        </details>
-      )}
-      <details>
-        <summary>
-          Позиции YouTube ({link.snapshot.length})
-          {hidden.size > 0 ? ` · скрыто ${hidden.size}` : ""}
-        </summary>
-        <ul className="youtube-sync-list">
-          {link.snapshot.map((entry) => {
-            const isHidden = hidden.has(entry.externalId);
-            return (
-              <li key={entry.externalId}>
-                <span>{byId.get(entry.itemId)?.title ?? entry.title}</span>
-                <button
-                  type="button"
-                  className="text-button"
-                  disabled={busy}
-                  onClick={() =>
-                    edit({
-                      type: isHidden ? "show" : "hide",
-                      externalId: entry.externalId,
-                    })
-                  }
-                >
-                  {isHidden ? "Показать" : "Скрыть"}
-                </button>
-              </li>
-            );
-          })}
-          {link.hidden
-            .filter((externalId) => !associated.has(externalId))
-            .map((externalId) => (
-              <li key={externalId}>
-                <span>{externalId} · позиция ушла с YouTube</span>
-                <button
-                  type="button"
-                  className="text-button"
-                  disabled={busy}
-                  onClick={() => edit({ type: "show", externalId })}
-                >
-                  Снять скрытие
-                </button>
-              </li>
-            ))}
-        </ul>
-      </details>
-      <details>
-        <summary>
-          Локальные дополнения (
-          {link.additions.filter((itemId) => byId.has(itemId)).length})
-        </summary>
-        <ul className="youtube-sync-list">
-          {link.additions.flatMap((itemId) => {
-            const item = byId.get(itemId);
-            return item
-              ? [
-                  <li key={itemId}>
-                    <span>{item.title}</span>
-                    <button
-                      type="button"
-                      className="text-button"
-                      disabled={busy}
-                      onClick={() => edit({ type: "remove", itemId })}
-                    >
-                      Убрать из подборки
-                    </button>
-                  </li>,
-                ]
-              : [];
-          })}
-        </ul>
-        <div className="youtube-sync-add">
-          <label>
-            Запись из медиатеки
-            <select
-              value={selection}
-              disabled={busy || !candidates.length}
-              onChange={(event) => setSelection(event.target.value)}
-            >
-              <option value="">
-                {candidates.length
-                  ? "Выберите запись"
-                  : "Нет записей для добавления"}
-              </option>
-              {candidates.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.title}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
-            className="button subtle"
-            disabled={busy || !selection}
-            onClick={() => edit({ type: "add", itemId: selection })}
-          >
-            Добавить в конец
-          </button>
-        </div>
-      </details>
+      {link.report && <YoutubeSyncDetails summary="Последние применённые изменения">
+        <Report report={link.report} />
+      </YoutubeSyncDetails>}
+      <YoutubeSyncDetails summary={`Позиции YouTube (${link.snapshot.length})${link.hidden.length ? ` · скрыто ${link.hidden.length}` : ""}`}>
+        <YoutubeRemotePositions link={link} items={items} libraryRevision={libraryRevision} busy={busy} edit={edit} />
+      </YoutubeSyncDetails>
+      <YoutubeSyncDetails summary={`Локальные дополнения (${link.additions.length})`}>
+        <LocalAdditions items={items} link={link} busy={busy} edit={edit}
+          selection={selection} setSelection={setSelection} />
+      </YoutubeSyncDetails>
       <label>
         Тег для новых позиций YouTube
         <select value={pendingTag?.after ?? link.tagId ?? ""} disabled={busy}
@@ -492,6 +414,135 @@ export function YoutubeLinkedPlaylist({
       </div>}
     </section>
   );
+}
+
+function YoutubeRemotePositions({ link, items, libraryRevision, busy, edit }: Pick<LocalControls, "link" | "busy" | "edit"> & {
+  items: ItemDto[];
+  libraryRevision: string;
+}) {
+  const [limit, setLimit] = useState(100);
+  const rows = useMemo(() => link.snapshot.slice(0, limit), [link.snapshot, limit]);
+  const titles = useMemo(() => new Map(items.map(item => [item.id, item.title])), [items]);
+  const [cache, setCache] = useState<{ revision: string; titles: Map<string, string | undefined> }>();
+  const loadedTitles = cache?.revision === libraryRevision ? cache.titles : undefined;
+  const missing = useMemo(() => rows.map(row => row.itemId)
+    .filter(id => !titles.has(id) && !loadedTitles?.has(id)), [rows, titles, loadedTitles]);
+  useEffect(() => {
+    if (!missing.length) return;
+    let active = true;
+    void fetchItems(missing).then(result => {
+      if (!active) return;
+      const found = new Map(result.map(item => [item.id, item.title]));
+      setCache(previous => {
+        const next = new Map(previous?.revision === libraryRevision ? previous.titles : undefined);
+        for (const id of missing) next.set(id, found.get(id));
+        return { revision: libraryRevision, titles: next };
+      });
+    }).catch(() => {}); // Snapshot titles stay available while member metadata is unavailable.
+    return () => { active = false; };
+  }, [missing, libraryRevision]);
+  const hidden = new Set(link.hidden);
+  const associated = new Set(link.snapshot.map(entry => entry.externalId));
+  return <>
+    <ul className="youtube-sync-list">
+      {rows.map((entry) => {
+        const isHidden = hidden.has(entry.externalId);
+        return (
+          <li key={entry.externalId}>
+            <span>{titles.get(entry.itemId) ?? loadedTitles?.get(entry.itemId) ?? entry.title}</span>
+            <button
+              type="button"
+              className="text-button"
+              disabled={busy}
+              onClick={() =>
+                edit({
+                  type: isHidden ? "show" : "hide",
+                  externalId: entry.externalId,
+                })
+              }
+            >
+              {isHidden ? "Показать" : "Скрыть"}
+            </button>
+          </li>
+        );
+      })}
+      {link.hidden
+        .filter((externalId) => !associated.has(externalId))
+        .map((externalId) => (
+          <li key={externalId}>
+            <span>{externalId} · позиция ушла с YouTube</span>
+            <button
+              type="button"
+              className="text-button"
+              disabled={busy}
+              onClick={() => edit({ type: "show", externalId })}
+            >
+              Снять скрытие
+            </button>
+          </li>
+        ))}
+    </ul>
+    {limit < link.snapshot.length && <button type="button" className="button subtle compact"
+      onClick={() => setLimit(current => current + 100)}>Показать ещё позиции</button>}
+  </>;
+}
+
+export function YoutubeLocalAdditions({ items, link, busy, edit, selection, setSelection }: LocalControls & { items: ItemDto[] }) {
+  const byId = new Map(items.map(item => [item.id, item]));
+  const remote = new Set(link.snapshot.map(entry => entry.itemId));
+  const additions = new Set(link.additions);
+  const candidates = items.filter(item => !remote.has(item.id) && !additions.has(item.id));
+  return <>
+    <ul className="youtube-sync-list">
+      {link.additions.flatMap((itemId) => {
+        const item = byId.get(itemId);
+        return item
+          ? [
+              <li key={itemId}>
+                <span>{item.title}</span>
+                <button
+                  type="button"
+                  className="text-button"
+                  disabled={busy}
+                  onClick={() => edit({ type: "remove", itemId })}
+                >
+                  Убрать из подборки
+                </button>
+              </li>,
+            ]
+          : [];
+      })}
+    </ul>
+    <div className="youtube-sync-add">
+      <label>
+        Запись из медиатеки
+        <select
+          value={selection}
+          disabled={busy || !candidates.length}
+          onChange={(event) => setSelection(event.target.value)}
+        >
+          <option value="">
+            {candidates.length
+              ? "Выберите запись"
+              : "Нет записей для добавления"}
+          </option>
+          {candidates.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.title}
+            </option>
+          ))}
+        </select>
+      </label>
+      <button
+        type="button"
+        className="button subtle"
+        disabled={busy || !selection}
+        onClick={() => edit({ type: "add", itemId: selection })}
+      >
+        Добавить в конец
+      </button>
+    </div>
+  </>;
 }
 
 export function YoutubeSyncNotifications({ reload }: { reload: Reload }) {

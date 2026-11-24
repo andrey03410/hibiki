@@ -34,6 +34,43 @@ function track(id: string, ownerId = ctx.userId) {
   return { id, ownerId, kind: "audio", title: id, originalTitle: id, createdAt: new Date("2025-01-01T12:00:00Z") };
 }
 
+it("returns one owner's playlist and ordered, freshly explained members together", async () => {
+  await ctx.db.item.createMany({ data: [track("a"), track("b"), track("other", ctx.otherUserId)] });
+  const child = await ctx.library.savePlaylist(ctx.userId, { title: "Manual", definition: {
+    version: 1, sort: "source", rule: { type: "items", ids: ["a", "b", "a"] }, manualOrder: ["b"],
+  } });
+  const detail = (id: string, headers = { cookie }) => app.inject({ url: `/api/playlists/${id}/detail`, headers });
+  const first = await detail(child.id);
+  expect(first.statusCode).toBe(200);
+  expect(first.headers["cache-control"]).toBe("private, no-store");
+  expect(first.json()).toMatchObject({
+    playlist: { id: child.id, title: "Manual", definition: child.definition }, usesHistory: false,
+    resolved: { total: 2, items: [{ id: "b" }, { id: "a" }], reasons: { b: ["Добавлено вручную"] }, excluded: [] },
+  });
+  const firstRow = await app.inject({ url: `/api/playlists/${child.id}/detail?limit=1`, headers: { cookie } });
+  expect(firstRow.json()).toMatchObject({ ids: ["b", "a"], resolved: { total: 2, items: [{ id: "b" }] } });
+  expect((await ctx.library.resolve(ctx.userId, child.id)).items.map(i => i.id)).toEqual(["b", "a"]);
+  await expect(ctx.library.preview(ctx.userId, {
+    version: 1, sort: "source", rule: { type: "favorite" }, manualOrder: ["other"],
+  })).rejects.toMatchObject({ code: "invalid_playlist" });
+  const rows = () => app.inject({ method: "POST", url: `/api/playlists/${child.id}/rows`, headers: { cookie },
+    payload: { offset: 1, changeToken: firstRow.json().changeToken, validUntil: firstRow.json().validUntil } });
+  expect((await rows()).json()).toMatchObject({ items: [{ id: "a" }] });
+  const parent = await ctx.library.savePlaylist(ctx.userId, { title: "Nested", definition: {
+    version: 1, sort: "source", rule: { type: "playlist", id: child.id },
+  } });
+  await ctx.library.savePlaylist(ctx.userId, { title: "History", definition: {
+    version: 1, sort: "source", rule: { type: "history", condition: "never-started" },
+  } }, child.id);
+  expect((await rows()).statusCode).toBe(409);
+  await ctx.db.listeningSummary.create({ data: { itemId: "b", ownerId: ctx.userId, launches: 1 } });
+  expect((await detail(parent.id)).json()).toMatchObject({ usesHistory: true,
+    resolved: { total: 1, items: [{ id: "a" }], reasons: { a: ["Ещё не слушал", "Плейлист «History»"] } },
+  });
+  expect((await detail(parent.id, { cookie: foreignCookie })).statusCode).toBe(404);
+  expect((await app.inject({ url: `/api/playlists/${parent.id}/detail`, headers: { authorization: bearer } })).statusCode).toBe(403);
+});
+
 it("returns an owner's archived display names separately from the active tag directory", async () => {
   const ownerId = ctx.userId;
   await ctx.db.tag.createMany({data:[
@@ -425,6 +462,19 @@ it.each(["{", "{}"])("isolates an unreadable stored definition and its parents u
   expect(await counts()).toEqual({ [good.id]: 1, [bad.id]: 1, [parent.id]: 1 });
 });
 
+it("serves card-sized URLs for cover candidates published before the artwork upgrade", async () => {
+  const { db, library, userId } = ctx;
+  const playlist = await library.savePlaylist(userId, { title: "Старые обложки", definition: {
+    version: 1, sort: "source", rule: { type: "items", ids: [] },
+  } });
+  await db.playlist.update({ where: { id: playlist.id }, data: { coverUrlsJson: JSON.stringify([
+    "/api/items/old-file/artwork?size=thumb", "https://i.ytimg.com/vi/abcdefghijk/mqdefault.jpg",
+  ]) } });
+  expect((await overview()).json().playlists).toMatchObject([{ id: playlist.id, coverUrls: [
+    "/api/items/old-file/artwork?size=cover", "https://i.ytimg.com/vi/abcdefghijk/sddefault.jpg",
+  ] }]);
+});
+
 it("publishes bounded cover candidates with card counts and refreshes them after source changes", async () => {
   const { db, library, userId: ownerId } = ctx;
   await db.item.createMany({ data: ["a", "b", "c", "d"].map(id => track(id)) });
@@ -437,7 +487,7 @@ it("publishes bounded cover candidates with card counts and refreshes them after
   } });
   const summary = async () => (await overview()).json().playlists.find((card: PlaylistSummaryDto) => card.id === playlist.id);
   await library.refreshDuePlaylistCounts();
-  const urls = (order: string) => [...order].map(id => "https://i.ytimg.com/vi/" + id.repeat(11) + "/mqdefault.jpg");
+  const urls = (order: string) => [...order].map(id => "https://i.ytimg.com/vi/" + id.repeat(11) + "/sddefault.jpg");
   expect(await summary()).toMatchObject({ trackCount: 4, coverUrls: urls("dcb") });
   await db.source.delete({ where: { id: "source-d" } });
   await library.refreshDuePlaylistCounts();

@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { YoutubeLinkImport, YoutubeSyncSettings } from "./YoutubeSync";
+import { YoutubeLinkImport, YoutubeSyncDetails, YoutubeSyncSettings } from "./YoutubeSync";
 
 describe("YouTube sync controls", () => {
   it("offers linked import without submitting the ordinary import form", () => {
@@ -21,6 +21,14 @@ describe("YouTube sync controls", () => {
       createElement(YoutubeLinkImport, { url: " " }),
     );
     expect(html).toMatch(/<button[^>]*disabled/);
+  });
+
+  it("leaves the catalog picker unmounted while its disclosure is closed", () => {
+    function CatalogPicker(): never { throw new Error("closed section mounted"); }
+    const html = renderToStaticMarkup(createElement(YoutubeSyncDetails, {
+      summary: "Локальные дополнения (2)", children: createElement(CatalogPicker),
+    }));
+    expect(html).toBe("<details><summary>Локальные дополнения (2)</summary></details>");
   });
 
   it("offers all sync modes in account settings", () => {

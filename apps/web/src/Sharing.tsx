@@ -356,7 +356,7 @@ function SharedMedia({ path, saved, refreshLibrary }: { path: string; saved?: bo
         <button className="text-button" onClick={() => void refresh()}><RefreshCw size={14} />Повторить</button>
       </div>}
       {(data || closed) && <div className="playlist-detail-hero shared-media-hero">
-        <div className="shared-media-art"><ItemArtwork source={cover ? cover.sources.find(source => source.thumbnail) : undefined} kind={cover ? cover.kind : "audio"} /></div>
+        <div className="shared-media-art"><ItemArtwork size="cover" source={cover ? cover.sources.find(source => source.thumbnail) : undefined} kind={cover ? cover.kind : "audio"} /></div>
         <div>
           <h1>{data?.title ?? (closed ? "Доступ закрыт" : "Плейлист")}</h1>
           {data && <p className="muted">Поделился {data.sharedBy}{saved && !closed && " · Состав обновляется автоматически"}</p>}
@@ -391,15 +391,14 @@ function SharedMedia({ path, saved, refreshLibrary }: { path: string; saved?: bo
             const active = player.current?.id === player.sharedId(path, item.id) && !!player.current;
             const playing = active && player.playing;
             return <li key={item.id} className="shared-track" aria-current={active || undefined}>
-              <span className="row-number">{index + 1}</span>
-              <button type="button" className={`item-art entry-cover art-${index % 6}`} onClick={() => void play(item.id)}
+              <button type="button" className="icon-button" onClick={() => void play(item.id)}
                 aria-label={`${playing ? "Приостановить" : "Воспроизвести"} ${item.title}`}
                 disabled={!playbackSources(item).length || playingRequest === item.id}>
-                <ItemArtwork source={item.sources.find(source => source.thumbnail)} kind={item.kind} />
-                <span className="entry-cover-control" aria-hidden="true">
-                  {playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
-                </span>
+                {playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}
               </button>
+              <span className={`item-art art-${index % 6}`} aria-hidden="true">
+                <ItemArtwork source={item.sources.find(source => source.thumbnail)} kind={item.kind} />
+              </span>
               <div className="share-link-target"><strong>{item.title}</strong><span className="small muted">{item.kind === "video" ? "Видео" : "Аудио"} · {formatDuration(item.duration)}</span></div>
               {savedItems.has(item.id) ? <span className="share-saved-marker" role="status"><Check size={16} />Добавлено</span> :
                 <button type="button" className="button subtle" disabled={saving !== undefined} onClick={() => void save(item.id)}

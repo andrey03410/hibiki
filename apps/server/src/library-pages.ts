@@ -28,6 +28,13 @@ async function revision(tx: Tx, ownerId: string) {
   return String(row.libraryRevision);
 }
 
+// Existing published cards can remain fresh indefinitely without a library edit.
+function publishedCoverUrls(json: string): string[] {
+  return (JSON.parse(json) as string[]).map(url => url
+    .replace(/^(\/api\/items\/[^/]+\/artwork)\?size=thumb$/, "$1?size=cover")
+    .replace(/^(https:\/\/i\.ytimg\.com\/vi\/[\w-]{11}\/)(?:mqdefault|default)\.jpg$/, "$1sddefault.jpg"));
+}
+
 async function overview(tx: Tx, ownerId: string, cardsOnly: boolean): Promise<LibraryCardOverviewDto> {
   const where = { ownerId };
   const [total, tags, counts, playlists, jobs, current] = await Promise.all([
@@ -48,7 +55,7 @@ async function overview(tx: Tx, ownerId: string, cardsOnly: boolean): Promise<Li
     playlists: playlists.map(({ createdAt, updatedAt, youtubeLink, definitionJson, coverUrlsJson, ...card }) => ({
       ...card, createdAt: createdAt.toISOString(), updatedAt: updatedAt.toISOString(),
       ...(youtubeLink ? { youtubeLinked: true } : {}),
-      ...(coverUrlsJson ? { coverUrls: JSON.parse(coverUrlsJson) as string[] } : {}),
+      ...(coverUrlsJson ? { coverUrls: publishedCoverUrls(coverUrlsJson) } : {}),
       ...(cardsOnly ? {} : { definition: playlistDefinitionSchema.parse(JSON.parse(definitionJson)) }),
     })), jobs: jobs.map(jobDto), total,
     tagCounts: counts,

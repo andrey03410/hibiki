@@ -21,7 +21,7 @@ import { HttpError, invariant } from "./errors";
 import { allowedLocalPath, storagePath } from "./media";
 import { registerMcp } from "./mcp";
 import { uploadPolicy } from "./upload-policy";
-import { ArtworkService } from "./artwork";
+import { artworkQuery, ArtworkService } from "./artwork";
 import { browserOwner, registerNotes } from "./notes";
 import { registerClassification } from "./classification";
 import { registerLibraryPages, searchLibraryIds } from "./library-pages";
@@ -155,7 +155,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       request.access = await ownerAccess(db, request.user.id);
       const path = request.url.split("?")[0];
       const sharedStream = /^\/api\/shared(?:-items|-playlists)?\/.*\/sources\//.test(path);
-      const libraryReading = /^\/api\/(library(?:\/(?:page|ids))?|items(?:\/[^/]+)?|playlists\/(?:preview|[^/]+\/(?:playback|resolve)))$/.test(path);
+      const libraryReading = /^\/api\/(library(?:\/(?:page|ids))?|items(?:\/[^/]+)?|playlists\/(?:preview|[^/]+\/(?:playback|resolve|detail|rows)))$/.test(path);
       if (libraryReading) await sharing.prefetchForViewer(request.user.id);
       if (path.startsWith("/files/") || sharedStream || path === "/api/settings" || !["GET", "HEAD", "OPTIONS"].includes(request.method))
         await markActivity(db, request.user.id);
@@ -245,7 +245,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       .header("cache-control", "private, no-cache")
       .header("vary", "Cookie, Authorization")
       .header("x-content-type-options", "nosniff");
-    const { size } = z.object({ size: z.literal("thumb").optional() }).parse(request.query);
+    const { size } = artworkQuery.parse(request.query);
     const thumbnail = canRunHeavy(request.access) ? size : undefined;
     const cover = await artwork.get(request.user!.id, idOf(request), thumbnail);
     if (cover.etag) {
@@ -418,6 +418,26 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
   app.get("/api/playlists/:id/playback", (request, reply) =>
     library.playlistPlayback(browserOwner(request, reply), idOf(request)),
   );
+  app.get("/api/playlists/:id", (request, reply) =>
+    library.getPlaylist(browserOwner(request, reply), idOf(request)),
+  );
+  app.get("/api/playlists/:id/detail", (request, reply) => {
+    const ownerId = browserOwner(request, reply);
+    const { limit } = z.object({ limit: z.coerce.number().int().positive().default(24) }).parse(request.query);
+    return library.playlistDetail(ownerId, idOf(request), true, limit);
+  });
+  app.post("/api/playlists/:id/rows", (request, reply) => {
+    const ownerId = browserOwner(request, reply);
+    const { offset, changeToken, validUntil } = z.object({
+      offset: z.number().int().nonnegative(), changeToken: z.string().min(1), validUntil: z.number().int().nullable(),
+    }).parse(request.body);
+    return library.playlistRows(ownerId, idOf(request), offset, changeToken, validUntil);
+  });
+  app.get("/api/playlists/:id/exclusions", (request, reply) => {
+    const ownerId = browserOwner(request, reply);
+    const { offset } = z.object({ offset: z.coerce.number().int().nonnegative().default(0) }).parse(request.query);
+    return library.playlistExclusions(ownerId, idOf(request), offset);
+  });
   app.get("/api/playlists/:id/resolve", (request) =>
     library.resolve(request.user!.id, idOf(request), browserAccess(request)),
   );

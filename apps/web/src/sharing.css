@@ -136,7 +136,7 @@
   margin-top: 18px;
 }
 .shared-track {
-  grid-template-columns: 26px 42px minmax(0, 1fr) auto;
+  grid-template-columns: 34px 42px minmax(0, 1fr) auto;
 }
 .shared-track[aria-current="true"] {
   background: #c0a9f412;
@@ -167,13 +167,5 @@
   }
   .shared-track {
     gap: 8px;
-  }
-}
-@media (max-width: 500px) {
-  .shared-track .row-number {
-    display: none;
-  }
-  .shared-track {
-    grid-template-columns: 42px minmax(0, 1fr) auto;
   }
 }

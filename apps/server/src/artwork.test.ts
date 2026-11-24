@@ -100,7 +100,7 @@ describe("embedded audio artwork", () => {
   const get = (url: string) =>
     app.inject({ url, cookies: { hibiki_session: cookie } });
 
-  it("delivers a small decodable library cover and retains the full image for the player", async () => {
+  it("serves distinct decodable sizes for track rows, playlist cards and the player", async () => {
     const { stdout: original } = await promisify(execFile)(String(ffmpeg), [
       "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
       "testsrc2=size=1536x1024,noise=alls=16:all_seed=1",
@@ -112,13 +112,20 @@ describe("embedded audio artwork", () => {
     expect(small.statusCode).toBe(200);
     expect(small.rawPayload.length).toBeLessThan(32 * 1024);
     expect(small.headers["content-type"]).toBe("image/webp");
-    const path = join(ctx.root, "thumb.webp");
-    await writeFile(path, small.rawPayload);
-    const { stdout: decoded } = await promisify(execFile)(String(ffmpeg), [
-      "-hide_banner", "-loglevel", "error", "-i", path,
-      "-frames:v", "1", "-threads", "1", "-c:v", "png", "-f", "image2pipe", "pipe:1",
-    ], { encoding: "buffer", timeout: 10_000 });
-    expect([decoded.readUInt32BE(16), decoded.readUInt32BE(20)]).toEqual([96, 64]);
+    const card = await get(url + "?size=cover");
+    expect(card.statusCode).toBe(200);
+    expect(card.headers["content-type"]).toBe("image/webp");
+    expect(card.rawPayload.length).toBeLessThan(original.length);
+    expect(card.headers.etag).not.toBe(small.headers.etag);
+    const path = join(ctx.root, "rendition.webp");
+    for (const [response, dimensions] of [[small, [96, 64]], [card, [640, 427]]] as const) {
+      await writeFile(path, response.rawPayload);
+      const { stdout: decoded } = await promisify(execFile)(String(ffmpeg), [
+        "-hide_banner", "-loglevel", "error", "-i", path,
+        "-frames:v", "1", "-threads", "1", "-c:v", "png", "-f", "image2pipe", "pipe:1",
+      ], { encoding: "buffer", timeout: 10_000, maxBuffer: 4 * 1024 ** 2 });
+      expect([decoded.readUInt32BE(16), decoded.readUInt32BE(20)]).toEqual(dimensions);
+    }
     expect((await get(url)).rawPayload.equals(original)).toBe(true);
 
     const etag = small.headers.etag;
@@ -152,7 +159,7 @@ describe("embedded audio artwork", () => {
     await ctx.library.refreshDuePlaylistCounts();
     const overview = await get("/api/library/overview?playlists=summary");
     expect(overview.json().playlists).toMatchObject([{
-      id: playlist.id, coverUrls: [artworkUrl(tagged.id) + "?size=thumb"],
+      id: playlist.id, coverUrls: [artworkUrl(tagged.id) + "?size=cover"],
     }]);
   });
   it("uses the library fallback when a raster signature has no decodable image", async () => {

@@ -89,6 +89,24 @@ it("hydrates a retained borrowed track from the catalog, favorites and personal 
   }
 });
 
+it("finds a permitted playlist cover beyond the first page and drops it after revocation", async () => {
+  const { db, library, userId: author, otherUserId: viewer } = ctx;
+  const { item: origin } = await library.upsertYoutube(author, { externalId: "abcdefghijk" });
+  const ids = Array.from({ length: 25 }, (_, i) => "video-" + i);
+  const retained = ids[24]!;
+  await db.item.createMany({ data: ids.map(id => ({ ownerId: viewer, id, kind: "video", title: id, originalTitle: id })) });
+  await db.shareLink.create({ data: { id: "grant", token: "cover-test", ownerId: author, kind: "item", targetId: origin.id, title: "Cover" } });
+  await db.sharedTrack.create({ data: { recipientId: viewer, recipientItemId: retained, originOwnerId: author, originItemId: origin.id,
+    sharedBy: "alice", grants: { create: { shareLinkId: "grant" } } } });
+  const list = await library.savePlaylist(viewer, { title: "Playlist", definition: { version: 1, rule: { type: "items", ids }, sort: "source" } });
+  const first = () => library.playlistDetail(viewer, list.id, true, 24);
+  const result = await first();
+  expect(result.resolved.items).toHaveLength(24);
+  expect(result.cover).toEqual({ url: expect.stringContaining("/abcdefghijk/"), shared: true });
+  await db.shareLink.update({ where: { id: "grant" }, data: { revokedAt: new Date() } });
+  expect((await first()).cover?.url).toBeUndefined();
+});
+
 it("exports retained library metadata without borrowed files and grants", async () => {
   const { db, library, root } = ctx;
   const { recipientId, recipientItemId } = await retainSharedTrack();

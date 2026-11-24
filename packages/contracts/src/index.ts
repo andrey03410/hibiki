@@ -199,6 +199,17 @@ export interface ResolvedPlaylist {
   total: number;
   duration: number;
 }
+export interface PlaylistDetailDto {
+  cover?: { url?: string; shared: boolean };
+  serverNow: number;
+  changeToken: string;
+  validUntil: number | null;
+  excludedCount: number;
+  ids: string[];
+  playlist: PlaylistDto;
+  resolved: ResolvedPlaylist;
+  usesHistory: boolean;
+}
 export type RepeatMode = "off" | "all" | "one";
 export type PlaybackMode = z.infer<typeof playbackModeSchema>;
 export interface Settings {
