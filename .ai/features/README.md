@@ -11,7 +11,7 @@
 | [09. Навигация по тегам медиатеки](09-library-tag-navigation/README.md) | `merged` | [PR #9](https://github.com/andrey03410/hibiki/pull/9), каталог, правая панель, разметка, предпросмотр и отмена |
 | [11. Запуск и управление воспроизведением](11-player-feedback/README.md) | `merged` | [PR #12](https://github.com/andrey03410/hibiki/pull/12), шесть решений по воспроизведению и плейлистам |
 | [13. Записи и плейлисты по ссылке](13-media-sharing/README.md) | `merged` | [PR #15](https://github.com/andrey03410/hibiki/pull/15), живые подборки, отзыв ссылок и копирование по явному действию |
-| [14. Личная выдача медиатеки и загрузка треков](14-library-listening-feedback/README.md) | `product` | Семь предложений для обсуждения |
+| [14. Личная выдача медиатеки и загрузка треков](14-library-listening-feedback/README.md) | `review` | Проверены личные режимы, поиск и воспроизведение |
 
 Процесс — [feature](../../.claude/skills/feature/SKILL.md).
 

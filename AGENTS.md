@@ -35,6 +35,8 @@ watch layout с очередью справа, audio artwork, fullscreen overlay
 
 [13. Записи и плейлисты по ссылке](.ai/features/13-media-sharing/README.md) — живые общие плейлисты, срок и отзыв ссылок, сохранение без файлов и явное копирование через сайт и MCP.
 
+[14. Личная выдача медиатеки и загрузка треков](.ai/features/14-library-listening-feedback/README.md) — личные сортировки и случайная выдача, оптимизация поиска, непрерывный буфер и предзагрузка следующего трека.
+
 ## Стек и проверки
 
 TypeScript · Node.js >=22.16 · npm workspaces · Fastify 5 · SQLite + Prisma 7 ·
