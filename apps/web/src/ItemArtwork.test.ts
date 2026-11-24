@@ -32,6 +32,26 @@ it("requests shared artwork through its protected URL", () => {
   expect(markup).toContain('src="/api/shared/access-key/items/music/artwork?size=thumb"');
 });
 
+it("requests a card rendition for local and shared heroes using the original access path", () => {
+  for (const thumbnail of [
+    "/api/items/music/artwork", "/api/shared/access-key/items/music/artwork",
+    "/api/shared-playlists/saved/items/music/artwork", "/api/shared-items/saved-music/artwork",
+  ]) {
+    const markup = renderToStaticMarkup(createElement(ItemArtwork, {
+      size: "cover", kind: "audio", source: { provider: "local", shared: true, thumbnail },
+    }));
+    expect(markup).toContain(`src="${thumbnail}?size=cover"`);
+  }
+});
+
+it("uses a large YouTube image for shared media heroes", () => {
+  const markup = renderToStaticMarkup(createElement(ItemArtwork, {
+    size: "cover", kind: "video", source: { provider: "youtube", shared: true, externalId: "abcdefghijk",
+      thumbnail: "https://i.ytimg.com/vi/abcdefghijk/mqdefault.jpg" },
+  }));
+  expect(markup).toContain('src="https://i.ytimg.com/vi/abcdefghijk/sddefault.jpg"');
+});
+
 it("keeps a fallback for missing artwork or an unrecognized external image", () => {
   for (const source of [
     undefined,

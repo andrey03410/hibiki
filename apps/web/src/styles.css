@@ -1094,26 +1094,21 @@ input[type="checkbox"]:checked:after {
 .playlist-card {
   position: relative;
 }
-.playlist-card-action {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 1;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  border-radius: 8px;
+.playlist-card:has(.playlist-card-footer) {
+  display: flex;
+  flex-direction: column;
 }
 .playlist-cover-wrap {
   position: relative;
+  display: block;
+  border-radius: 8px;
 }
 .playlist-card .cover {
   width: 100%;
   border-radius: 8px;
   transition: filter 0.2s;
 }
-.playlist-card-action:is(:hover, :focus-visible) ~ .playlist-cover-wrap .cover {
+.playlist-cover-wrap:is(:hover, :focus-visible) .cover {
   filter: brightness(1.15);
 }
 .cover-type {
@@ -1133,38 +1128,39 @@ input[type="checkbox"]:checked:after {
   padding: 5px 7px;
   pointer-events: none;
 }
-.card-play {
+.playlist-cover-edit {
   position: absolute;
-  right: 10px;
-  bottom: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 38px;
-  height: 38px;
-  border-radius: 100%;
-  border: 1px solid #fff1;
-  background: #c3a9ed;
-  color: #26192f;
-  box-shadow: 0 4px 20px #0003;
-  transition: transform 0.2s;
-  opacity: 0;
-}
-.playlist-card-action:is(:hover, :focus-visible, [aria-busy="true"]) ~ .playlist-cover-wrap .card-play {
-  opacity: 1;
+  inset-inline-end: 8px;
+  inset-block-end: 8px;
+  display: grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  border: 1px solid #ffffff38;
+  border-radius: 50%;
+  background: #211c28db;
+  color: #f4effb;
+  pointer-events: none;
 }
 .playlist-card-title {
+  overflow-wrap: anywhere;
   position: relative;
   z-index: 2;
   width: fit-content;
   max-width: 100%;
-  display: block;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
   font-family: "Manrope", sans-serif;
   font-size: 13px;
   line-height: 1.5;
   font-weight: 700;
   color: #d9cfe2;
-  margin: 13px 0 5px;
+  margin: 10px 0 6px;
+  text-decoration: underline;
+  text-decoration-color: #776b86;
+  text-underline-offset: 3px;
 }
 .playlist-card p {
   font-size: 10px;
@@ -1176,10 +1172,27 @@ input[type="checkbox"]:checked:after {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
-.playlist-card > .small {
-  font-size: 9px;
-  color: #665d72;
+.playlist-card-footer {
+  margin-top: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 8px;
 }
+.playlist-card-footer .small, .playlist-card > .small {
+  font-size: 10px;
+  color: var(--muted);
+}
+.playlist-card-share.button {
+  min-height: 34px;
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+.playlist-card-title:hover {
+  text-decoration-color: currentColor;
+}
+
 .playlist-detail-hero {
   display: flex;
   align-items: center;
@@ -2790,20 +2803,11 @@ body {
     width: 11px;
     height: 11px;
   }
-  .card-play {
-    width: 31px;
-    height: 31px;
-    right: 7px;
-    bottom: 7px;
-  }
   .playlist-card-title {
     font-size: 12px;
   }
   .playlist-card p {
     font-size: 9px;
-  }
-  .playlist-card > .small {
-    font-size: 8px;
   }
   .playlist-detail-hero {
     gap: 20px;

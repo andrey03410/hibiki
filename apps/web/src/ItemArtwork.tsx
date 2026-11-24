@@ -1,20 +1,21 @@
-import { useCallback, useState } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 import { Music2, Video } from "lucide-react";
 import type { ItemDto, SourceDto } from "@hibiki/contracts";
 
 interface Props {
   source?: Pick<SourceDto, "provider" | "thumbnail" | "externalId" | "shared">;
   kind: ItemDto["kind"];
+  size?: "thumb" | "cover";
 }
 
-function libraryThumbnail(source: Props["source"]) {
+function artworkUrl(source: Props["source"], size: NonNullable<Props["size"]>) {
   if (!source?.thumbnail) return;
   if (source.shared && /^\/api\/(?:(?:shared|shared-playlists)\/[\w-]+\/items|shared-items)\/[\w-]+\/artwork$/.test(source.thumbnail))
-    return `${source.thumbnail}?size=thumb`;
+    return `${source.thumbnail}?size=${size}`;
   if (source.provider === "youtube" && /^[\w-]{11}$/.test(source.externalId ?? ""))
-    return `https://i.ytimg.com/vi/${source.externalId}/default.jpg`;
+    return `https://i.ytimg.com/vi/${source.externalId}/${size === "cover" ? "sddefault" : "default"}.jpg`;
   if (source.provider === "local" && /^\/api\/items\/[\w-]+\/artwork$/.test(source.thumbnail))
-    return `${source.thumbnail}?size=thumb`;
+    return `${source.thumbnail}?size=${size}`;
 }
 
 const nearbyArtwork = new WeakMap<Element, () => void>();
@@ -38,7 +39,7 @@ function watchArtwork(element: Element, load: () => void) {
   };
 }
 
-export function useNearbyArtwork() {
+function useNearbyArtwork() {
   const [nearby, setNearby] = useState(() => typeof IntersectionObserver === "undefined");
   const attach = useCallback((element: Element | null) => {
     if (element && !nearby) return watchArtwork(element, () => setNearby(true));
@@ -46,12 +47,25 @@ export function useNearbyArtwork() {
   return { nearby, attach };
 }
 
-export function ItemArtwork({ source, kind }: Props) {
-  const url = libraryThumbnail(source);
-  const [failed, setFailed] = useState<string>();
+const youtubeSdCover = /^https:\/\/i\.ytimg\.com\/vi\/[\w-]{11}\/sddefault\.jpg$/;
+
+export function ArtworkImage({ urls, fallback = null }: { urls: (string | undefined)[]; fallback?: ReactNode }) {
+  const [failed, setFailed] = useState<string[]>([]);
   const { nearby, attach } = useNearbyArtwork();
-  if (url && url !== failed)
-    return <img ref={attach} src={nearby ? url : undefined} alt="" loading="lazy" decoding="async" fetchPriority="low"
-      onError={() => setFailed(url)} />;
-  return kind === "video" ? <Video size={19} /> : <Music2 size={19} />;
+  const url = urls.flatMap(candidate => {
+    if (!candidate) return [];
+    return youtubeSdCover.test(candidate) ? [candidate, candidate.replace("sddefault.jpg", "hqdefault.jpg")] : [candidate];
+  }).find(candidate => !failed.includes(candidate));
+  if (!url) return fallback;
+  const tryNext = () => setFailed(previous => [...previous, url]);
+  return <img key={url} ref={attach} src={nearby ? url : undefined} alt="" loading="lazy" decoding="async" fetchPriority="low"
+    onError={tryNext} onLoad={youtubeSdCover.test(url) ? event => {
+      // Some unavailable YouTube sizes return a 120px placeholder with HTTP 200.
+      if (event.currentTarget.naturalWidth <= 120) tryNext();
+    } : undefined} />;
+}
+
+export function ItemArtwork({ source, kind, size = "thumb" }: Props) {
+  const url = artworkUrl(source, size);
+  return <ArtworkImage key={url} urls={[url]} fallback={kind === "video" ? <Video size={19} /> : <Music2 size={19} />} />;
 }

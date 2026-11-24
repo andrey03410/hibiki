@@ -138,11 +138,18 @@ describe("media sharing", () => {
     expect(cover.headers["cache-control"]).toBe("private, no-store");
     expect(cover.rawPayload).toEqual(png);
 
+    const cardUrl = thumbnail + "?size=cover";
+    expect((await app.inject(cardUrl)).statusCode).toBe(401);
+    const card = await asBob({ url: cardUrl });
+    expect(card.statusCode).toBe(200);
+    expect(card.headers["content-type"]).toBe("image/webp");
+    expect(card.headers["cache-control"]).toBe("private, no-store");
+
     await ctx.db.user.update({ where: { id: ctx.userId }, data: { suspended: true } });
-    expect((await asBob({ url: thumbnail! })).statusCode).toBe(404);
+    expect((await asBob({ url: cardUrl })).statusCode).toBe(404);
     await ctx.db.user.update({ where: { id: ctx.userId }, data: { suspended: false } });
     expect((await app.inject({ method: "DELETE", url: "/api/share-links/" + link.id, cookies: alice })).statusCode).toBe(200);
-    expect((await asBob({ url: thumbnail! })).statusCode).toBe(404);
+    expect((await asBob({ url: cardUrl })).statusCode).toBe(404);
   });
 
   it("hides storage paths when an authorized local file is missing", async () => {

@@ -109,6 +109,10 @@
   min-height: 28px;
 }
 
+.entry-select .playlist-track-play {
+  width: 26px;
+  height: 30px;
+}
 .entry-identity {
   grid-area: identity;
   display: flex;

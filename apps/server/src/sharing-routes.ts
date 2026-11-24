@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { ArtworkService } from "./artwork";
+import { artworkQuery, ArtworkService } from "./artwork";
 import { invariant } from "./errors";
 import { canRunHeavy } from "./kaname";
 import { storagePath } from "./media";
@@ -104,7 +104,7 @@ export function registerSharing(app: FastifyInstance, sharing: ShareService, sto
     });
     app.get(prefix + "/artwork", async (request, reply) => {
       sharedResponse(reply);
-      const { size } = z.object({ size: z.literal("thumb").optional() }).parse(request.query);
+      const { size } = artworkQuery.parse(request.query);
       const origin = await sharing.artworkOrigin(request.user!.id, ref(request.params));
       const cover = await artwork.get(origin.ownerId, origin.itemId, canRunHeavy(request.access) ? size : undefined);
       return reply.type(cover.mime).send(cover.bytes);

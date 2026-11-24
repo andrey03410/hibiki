@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Db } from "./db";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
 import { HttpError, invariant } from "./errors";
 import { ArtworkService } from "./artwork";
@@ -106,16 +106,16 @@ function* playlistCoverCandidates(items: ItemDto[]) {
   for (const item of items) {
     for (const { provider, thumbnail, externalId } of item.sources) {
       if (provider === "youtube" && thumbnail && externalId && /^[\w-]{11}$/.test(externalId))
-        yield { url: `https://i.ytimg.com/vi/${externalId}/mqdefault.jpg` };
+        yield { url: `https://i.ytimg.com/vi/${externalId}/sddefault.jpg` };
       else if (provider === "local" && thumbnail === `/api/items/${encodeURIComponent(item.id)}/artwork`)
-        yield { url: `${thumbnail}?size=thumb`, itemId: item.id };
+        yield { url: `${thumbnail}?size=cover`, itemId: item.id };
     }
   }
 }
 
-async function playlistHistory(db: Prisma.TransactionClient, ownerId: string) {
+async function playlistHistory(db: Prisma.TransactionClient, ownerId: string, itemIds?: string[]) {
   const rows = await db.listeningSummary.findMany({
-    where: { ownerId },
+    where: { ownerId, ...(itemIds && { itemId: { in: itemIds } }) },
     select: { itemId: true, launches: true, completed: true, skipped: true, lastStartedAt: true },
   });
   return new Map(rows.map(entry => [entry.itemId, entry]));
@@ -797,12 +797,7 @@ export class LibraryService {
             "Состав связанного плейлиста меняется на вкладке YouTube",
           );
       }
-      const snapshot = await this.snapshotWith(ownerId, tx);
-      try {
-        resolvePlaylist(definition, snapshot, id);
-      } catch (error) {
-        throw new HttpError(422, "invalid_playlist", (error as Error).message);
-      }
+      await this.evaluateRuleRows(tx, ownerId, definition, id);
       const data = {
         title: input.title.trim(),
         description: input.description?.slice(0, 2000) ?? "",
@@ -924,20 +919,48 @@ export class LibraryService {
     return ids;
   }
   private async livePlaylistIds(tx: Prisma.TransactionClient, ownerId: string, id: string, now: Date) {
-    const rows = await tx.playlist.findMany({
-      where: { ownerId },
-      select: { id: true, title: true, definitionJson: true },
-    });
+    const row = await tx.playlist.findFirstOrThrow({ where: { id, ownerId }, select: { definitionJson: true } });
+    let definition: PlaylistDefinition;
+    try {
+      definition = playlistDefinitionSchema.parse(JSON.parse(row.definitionJson));
+    } catch (error) {
+      throw new HttpError(422, "invalid_playlist", (error as Error).message);
+    }
+    const { result, validUntil } = await this.evaluateRuleRows(tx, ownerId, definition, id, now);
+    return { ids: result.items.map(item => item.id), validUntil };
+  }
+  private async evaluateRuleRows(
+    tx: Prisma.TransactionClient, ownerId: string, definition: PlaylistDefinition, id?: string, now = new Date(),
+  ) {
+    const { rule, manualOrder } = definition;
+    const references = collectReferences(rule);
+    const nested = references.playlistIds.length > 0;
+    const rows = nested ? await tx.playlist.findMany({
+      where: { ownerId }, select: { id: true, title: true, definitionJson: true },
+    }) : [];
     const playlists = rows.flatMap(row => {
       try {
         return [{ id: row.id, title: row.title, definition: playlistDefinitionSchema.parse(JSON.parse(row.definitionJson)) }];
       } catch (error) {
         if (!(error instanceof SyntaxError || error instanceof ZodError)) throw error;
-        if (row.id === id) throw new HttpError(422, "invalid_playlist", error.message);
         return [];
       }
     });
-    const definition = playlists.find(playlist => playlist.id === id)!.definition;
+    const manualIds = rule.type === "items" ? [...new Set([...rule.ids, ...(manualOrder ?? [])])] : undefined;
+    let candidates: Prisma.Sql | undefined;
+    if (manualIds) {
+      candidates = Prisma.sql`i.id IN (SELECT value FROM json_each(${JSON.stringify(manualIds)}))`;
+    } else if (rule.type === "favorite") {
+      candidates = Prisma.sql`i.favorite = 1`;
+    } else if (rule.type === "tag" && !rule.descendants) {
+      candidates = Prisma.sql`i.id IN (SELECT itemId FROM ItemTag WHERE tagId = ${rule.id})`;
+    } else if (rule.type === "filter" && rule.kind) {
+      candidates = Prisma.sql`i.kind = ${rule.kind}`;
+    }
+    // manualOrder can name valid items outside a dynamic rule's current result.
+    if (candidates && !manualIds && manualOrder?.length) {
+      candidates = Prisma.sql`(${candidates} OR i.id IN (SELECT value FROM json_each(${JSON.stringify(manualOrder)})))`;
+    }
     const [rowsForRules, tags, history] = await Promise.all([
       tx.$queryRaw<(Pick<ItemDto, "id" | "title" | "kind" | "duration" | "favorite"> & {
         createdAt: Date; tagIds: string; local: bigint;
@@ -948,9 +971,10 @@ export class LibraryService {
           EXISTS (SELECT 1 FROM Source AS s WHERE s.itemId = i.id AND s.ownerId = i.ownerId
             AND s.provider = 'local' AND s.status = 'available'
             AND (s.fileId IS NULL OR EXISTS (SELECT 1 FROM MediaFile AS f WHERE f.id = s.fileId AND f.ownerId = i.ownerId))) AS local
-        FROM Item AS i WHERE i.ownerId = ${ownerId} ORDER BY i.createdAt DESC`,
-      listTags(tx, ownerId, true),
-      playlistHistory(tx, ownerId),
+        FROM Item AS i WHERE i.ownerId = ${ownerId} ${candidates ? Prisma.sql`AND ${candidates}` : Prisma.empty}
+        ${manualIds ? Prisma.empty : Prisma.sql`ORDER BY i.createdAt DESC`}`,
+      nested || references.tagIds.length ? listTags(tx, ownerId, true) : [],
+      nested || usesPrivateHistory(definition) ? playlistHistory(tx, ownerId, manualIds) : undefined,
     ]);
     const items = rowsForRules.map(({ tagIds, local, createdAt, ...item }) => ({
       ...item, createdAt: new Date(createdAt).toISOString(),
@@ -963,7 +987,8 @@ export class LibraryService {
         items, tags, playlists, history, now,
         onFutureHistoryCutoff: at => { validUntil = Math.min(validUntil, at); },
       }, id);
-      return { ids: result.items.map(item => item.id), validUntil };
+      const usesHistory = usesPrivateHistory(definition, new Map(playlists.map(p => [p.id, p])));
+      return { result, usesHistory, validUntil };
     } catch (error) {
       if (!(error instanceof InvalidPlaylistError)) throw error;
       throw new HttpError(422, "invalid_playlist", error.message);
@@ -980,8 +1005,35 @@ export class LibraryService {
           "playlist_not_found",
           "Плейлист не найден",
         );
-      return this.evaluatePlaylist(tx, ownerId, checked, id, browser);
+      return (await this.evaluatePlaylist(tx, ownerId, checked, id, browser)).resolved;
     });
+  }
+  private async coverBeyondWindow(tx: Prisma.TransactionClient, ownerId: string, tail: string[]) {
+    const candidates = await tx.$queryRaw<{ id: string }[]>`
+      SELECT member.value AS id FROM json_each(${JSON.stringify(tail)}) AS member
+      WHERE EXISTS (SELECT 1 FROM Source AS s LEFT JOIN MediaFile AS f ON f.id = s.fileId AND f.ownerId = s.ownerId
+        WHERE s.itemId = member.value AND s.ownerId = ${ownerId} AND (s.fileId IS NULL OR f.id IS NOT NULL)
+        AND (s.thumbnail <> '' OR (s.provider = 'local' AND f.kind = 'audio')))
+      OR EXISTS (SELECT 1 FROM SharedTrack AS t
+        JOIN SharedTrackGrant AS g ON g.recipientItemId = t.recipientItemId
+        JOIN ShareLink AS l ON l.id = g.shareLinkId AND l.ownerId = t.originOwnerId
+        WHERE t.recipientItemId = member.value AND t.recipientId = ${ownerId}
+        AND l.revokedAt IS NULL AND (l.expiresAt IS NULL OR l.expiresAt > ${new Date().toISOString()})
+        AND EXISTS (SELECT 1 FROM Source AS origin WHERE origin.itemId = t.originItemId AND origin.ownerId = t.originOwnerId
+          AND ((origin.provider = 'youtube' AND origin.fileId IS NULL AND origin.externalId IS NOT NULL)
+            OR (origin.provider = 'local' AND EXISTS (
+              SELECT 1 FROM MediaFile AS f WHERE f.id = origin.fileId AND f.ownerId = origin.ownerId AND f.kind = 'audio')))))
+      ORDER BY member.key`;
+    let shared = false;
+    for (let start = 0; start < candidates.length; start += 8) {
+      const batch = candidates.slice(start, start + 8).map(row => row.id);
+      for (const item of await hydrateLibraryItems(tx, ownerId, batch, true, this)) {
+        shared ||= !!item.shared;
+        const source = item.sources.find(s => s.thumbnail);
+        if (source) return { url: source.thumbnail, shared };
+      }
+    }
+    return { shared, url: undefined };
   }
   private async evaluatePlaylist(
     tx: Prisma.TransactionClient,
@@ -989,28 +1041,54 @@ export class LibraryService {
     definition: PlaylistDefinition,
     id: string | undefined,
     browser: boolean,
+    limit?: number,
   ) {
-    try {
-      const [snapshot, history] = await Promise.all([
-        this.snapshotWith(ownerId, tx),
-        playlistHistory(tx, ownerId),
-      ]);
-      const result = resolvePlaylist(definition, { ...snapshot, history }, id);
-      result.items = await decorateSharedItems(tx, ownerId, result.items, this);
-      if (!browser && usesPrivateHistory(
-        definition, new Map(snapshot.playlists.map((playlist) => [playlist.id, playlist])),
-      )) return { ...result, reasons: {}, excluded: [] };
-      return result;
-    } catch (error) {
-      throw new HttpError(422, "invalid_playlist", (error as Error).message);
-    }
+    const { result, usesHistory, validUntil } = await this.evaluateRuleRows(tx, ownerId, definition, id);
+    const ids = result.items.map(item => item.id);
+    const items = await hydrateLibraryItems(tx, ownerId, limit === undefined ? ids : ids.slice(0, limit), true, this);
+    const cover = limit !== undefined && ids.length > limit && !items.some(i => i.sources.some(s => s.thumbnail))
+      ? await this.coverBeyondWindow(tx, ownerId, ids.slice(limit)) : undefined;
+    const resolved = { ...result, items, ...(limit !== undefined && { excluded: [] }),
+      ...(!browser && usesHistory && { reasons: {}, excluded: [] }) };
+    return { ids, cover, resolved, usesHistory, serverNow: Date.now(), validUntil: Number.isFinite(validUntil) ? validUntil : null,
+      excludedCount: result.excluded.length };
+  }
+  async getPlaylist(ownerId: string, id: string, tx: Prisma.TransactionClient = this.db) {
+    const row = await tx.playlist.findFirst({ where: { id, ownerId }, select: {
+      id: true, title: true, description: true, definitionJson: true, revision: true,
+      createdAt: true, updatedAt: true, youtubeLink: { select: { playlistId: true } },
+    } });
+    invariant(row, 404, "playlist_not_found", "Плейлист не найден");
+    return playlistDto(row);
+  }
+  async playlistDetail(ownerId: string, id: string, browser = true, limit?: number) {
+    return this.db.$transaction(async tx => {
+      const playlist = await this.getPlaylist(ownerId, id, tx);
+      const work = limit === undefined ? null : await tx.playlistCountWork.findUniqueOrThrow({
+        where: { ownerId }, select: { changeToken: true },
+      });
+      return { playlist, changeToken: work?.changeToken, ...await this.evaluatePlaylist(tx, ownerId, playlist.definition, id, browser, limit) };
+    });
+  }
+  async playlistRows(ownerId: string, id: string, offset: number, changeToken: string, validUntil: number | null) {
+    return this.db.$transaction(async tx => {
+      const work = await tx.playlistCountWork.findUnique({ where: { ownerId }, select: { changeToken: true } });
+      const now = new Date();
+      invariant(work?.changeToken === changeToken && (validUntil === null || +now < validUntil),
+        409, "playlist_changed", "Состав плейлиста изменился");
+      const ids = await this.playlistIds(tx, ownerId, id, now);
+      return { items: await hydrateLibraryItems(tx, ownerId, ids.slice(offset, offset + 100), true, this) };
+    });
+  }
+  async playlistExclusions(ownerId: string, id: string, offset: number) {
+    return this.db.$transaction(async tx => {
+      const playlist = await this.getPlaylist(ownerId, id, tx);
+      const { result } = await this.evaluateRuleRows(tx, ownerId, playlist.definition, id);
+      return { total: result.excluded.length, entries: result.excluded.slice(offset, offset + 100) };
+    });
   }
   async resolve(ownerId: string, id: string, browser = true) {
-    return this.db.$transaction(async tx => {
-      const row = await tx.playlist.findFirst({ where: { id, ownerId } });
-      invariant(row, 404, "playlist_not_found", "Плейлист не найден");
-      return this.evaluatePlaylist(tx, ownerId, playlistDto(row).definition, id, browser);
-    });
+    return (await this.playlistDetail(ownerId, id, browser)).resolved;
   }
   async deletePlaylist(ownerId: string, id: string) {
     const playlists = await this.listPlaylists(ownerId);
