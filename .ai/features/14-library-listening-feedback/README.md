@@ -2,11 +2,11 @@
 id: 14
 title: Личная выдача медиатеки и загрузка треков
 track: product
-stage: review
+stage: merged
 branch: codex/14-library-listening-feedback
-pr:
+pr: https://github.com/andrey03410/hibiki/pull/16
 started: 2026-11-24
-merged:
+merged: 2026-11-24
 ---
 
 # 14. Личная выдача медиатеки и загрузка треков
@@ -23,4 +23,4 @@ merged:
 - [x] [План](plan.md)
 - [x] Реализация
 - [x] [Локальная проверка и независимое ревью](verify.md)
-- [ ] Выпуск
+- [x] [Приёмка и выпуск через PR №16](https://github.com/andrey03410/hibiki/pull/16)
