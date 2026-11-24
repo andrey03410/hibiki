@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import type { ItemDto, SourceDto } from "@hibiki/contracts";
 import { LibrarySearchControls } from "./LibrarySearchControls";
 import {
+  changeLibrarySort,
+  restoreLibrarySearch,
   countLibraryTags,
   defaultLibrarySearch,
   libraryFilterConditions,
@@ -222,4 +224,33 @@ describe("library search", () => {
     expect(html).toContain("Требуют разметки");
     expect(html).toContain("Где доступно");
   });
+});
+
+it("restores the previous random order and current filters after leaving recent mode", () => {
+  const random = changeLibrarySort({ ...defaultLibrarySearch, query: "ночь" }, "random");
+  expect(random.randomSeed).toEqual(expect.any(String));
+  const recent = changeLibrarySort(random, "recent");
+  const restored = restoreLibrarySearch(JSON.stringify({ ...recent, tagIds: ["rock"] }));
+  const previous = changeLibrarySort(restored, restored.previousSort!);
+  expect(previous).toMatchObject({ query: "ночь", tagIds: ["rock"], sort: "random", randomSeed: random.randomSeed });
+  expect(resetLibraryFilters(previous).randomSeed).toBe(random.randomSeed);
+});
+
+it("offers personal sorts and shows the reshuffle action only for random results", () => {
+  const controls = (sort: typeof defaultLibrarySearch.sort) => renderToStaticMarkup(createElement(LibrarySearchControls, {
+    value: { ...defaultLibrarySearch, sort }, tags: [], count: 3, view: "list",
+    onViewChange: () => {}, onChange: () => {}, onPlay: () => {},
+  }));
+  const random = controls("random");
+  for (const label of ["Чаще слушаю", "Недавно слушал", "В случайном порядке"]) expect(random).toContain(label);
+  expect(random).toContain('aria-label="Перемешать ещё раз"');
+  expect(controls("recent")).not.toContain('aria-label="Перемешать ещё раз"');
+  expect(controls("recent")).toContain('aria-label="Выключить режим «Недавно слушал»"');
+});
+
+it("keeps valid saved criteria when a field from a previous version is unsupported", () => {
+  const result = restoreLibrarySearch(JSON.stringify({
+    query: "утро", sort: "title-asc", provider: "retired-provider", tagIds: [42, "tag"],
+  }));
+  expect(result).toMatchObject({ query: "утро", sort: "title-asc", provider: "", tagIds: ["tag"] });
 });

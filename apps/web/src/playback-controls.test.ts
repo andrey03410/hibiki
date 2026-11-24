@@ -57,13 +57,14 @@ it("keeps link playback selectable while showing that its access needs recheckin
   expect(html).toMatch(/aria-describedby="([^"]+)"[\s\S]*<small id="\1">Доступ закрыт/);
 });
 
-it("shows separated local buffered ranges beneath the shared progress fill", () => {
+it.each([
+  [12, 20], [25, 0], [73, 85], [85, 0],
+])("shows only the contiguous buffer at %s seconds", (position, end) => {
   const html = renderToStaticMarkup(createElement(PlaybackSeekBar, {
-    position: 12, duration: 100, buffered: [[0, 20], [70, 85]],
+    position, duration: 100, buffered: [[0, 20], [70, 85]],
     onSeek() {}, onScrubStart() {}, onScrubEnd() {},
   }));
-  expect(html).toContain("--buffered:");
-  expect(html).toMatch(/0% 20%, transparent 20% 70%, var\(--buffer-color\) 70% 85%/);
+  expect(html).toContain(`--buffer-end:${end}%`);
 });
 
 it("shows a volume trigger in the mini-player and a slider with the same level in the watch player", () => {

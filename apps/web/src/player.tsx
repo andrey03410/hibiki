@@ -41,6 +41,8 @@ import { ItemArtwork } from "./ItemArtwork.tsx";
 import { fetchItems } from "./library-pages";
 import { completeLibraryOrder, LibraryQueueLoad, QueueCatalog, QueueIntents } from "./queue-catalog";
 import { CompactPlaybackQueue, PlaybackSeekBar, PlaybackVolume, type BufferedRanges } from "./PlaybackControls";
+import { AudioDelivery, ownedAudioFile } from "./audio-delivery";
+import { audioRelayReady, listenForAudioRanges, subscribeAudioRelay } from "./audio-relay";
 import { PlaybackFeedback } from "./playback-feedback";
 import { useListeningAttempt } from "./listening-client";
 import "./queue.css";
@@ -402,11 +404,60 @@ export function PlayerProvider({
   const waitingForVideo = !onPlayerScreen && (!!source && presentationKind === "video" || needsVideoForPlayback);
   const identity = { itemId: current?.id, sourceId: source?.id };
   const sourceKey = JSON.stringify([identity, presentationKind, waitingForVideo]);
+  const delivery = useMemo(() => new AudioDelivery(), [userId]);
+  const [audioReplay, setAudioReplay] = useState(0);
+  const [directAudioKey, setDirectAudioKey] = useState("");
+  const completedAudio = useRef(false);
+  const file = useMemo(() => presentationKind === "audio" ? ownedAudioFile(source, current?.duration) : undefined,
+    [presentationKind, source?.id, source?.streamUrl, source?.shared, source?.bytes, source?.mime, current?.duration]);
+  const relayReady = useSyncExternalStore(subscribeAudioRelay, audioRelayReady);
+  const relayKey = useMemo(() => file ? crypto.randomUUID?.() : undefined,
+    [delivery, sourceKey, file?.url, file?.size, audioReplay]);
+  const audioToken = relayReady && relayKey !== directAudioKey ? relayKey : undefined;
+  useLayoutEffect(() => {
+    if (playing && relayKey && !relayReady) setDirectAudioKey(relayKey);
+  }, [playing, relayKey, relayReady]);
+  const audioUrl = file && audioToken ? `${file.url}?hibiki-audio=${audioToken}` : source?.streamUrl;
+  useLayoutEffect(() => () => delivery.clear(), [delivery]);
+  useLayoutEffect(() => listenForAudioRanges(delivery), [delivery, audioToken]);
+  useLayoutEffect(() => {
+    delivery.select(audioToken ? file : undefined, audioToken ?? "");
+    completedAudio.current = false;
+  }, [delivery, audioToken, sourceKey]);
+  useLayoutEffect(() => {
+    if (playing && audioToken) void delivery.start().catch(() => {});
+  }, [delivery, playing, audioToken]);
   const mediaKey = useRef(sourceKey);
   const feedback = useMemo(() => new PlaybackFeedback(), [sourceKey]);
   const phase = useSyncExternalStore(feedback.subscribe, feedback.snapshot);
   const loadingLabel = feedback.label;
   const [buffer, setBuffer] = useState<{source: PlaybackFeedback; ranges: BufferedRanges}>();
+  const reserve = buffer?.source === feedback && buffer.ranges.some(([start, end]) =>
+    start <= settings.position && end >= settings.position &&
+    (end - settings.position >= 5 || duration > 0 && end >= duration - 0.05));
+  const canPrepareNext = !!source && presentationKind === "audio" && playing && phase === "playing" && reserve;
+  useEffect(() => {
+    if (canPrepareNext) delivery.suspendPreparation();
+    else void delivery.prepare();
+  }, [delivery, settings.queue, settings.mode, settings.repeat, revision]);
+  useEffect(() => {
+    let active = true;
+    // Keep the prepared prefix across the brief ended → next selection.
+    if (native.current?.ended && playingRef.current) return;
+    if (!audioRelayReady() || settings.repeat === "one") { void delivery.prepare(); return; }
+    if (!canPrepareNext) { delivery.suspendPreparation(); return; }
+    void catalog.nextInQueue(() => live.current, 1, true, failed.current, () => active, () => libraryOrder.tail)
+      .then(target => {
+        if (!active || !target) return;
+        const id = target.state.queue[target.index];
+        const item = id && id !== current?.id ? itemsById.get(id) : undefined;
+        const preferred = item && playbackSources(item, target.state.mode)[0];
+        const next = item && preferred && playbackKind(item, preferred, target.state.mode) === "audio"
+          ? ownedAudioFile(preferred, item.duration) : undefined;
+        return delivery.prepare(next);
+      }).catch(() => { if (active) void delivery.prepare(); });
+    return () => { active = false; };
+  }, [delivery, canPrepareNext, sourceKey, settings.queue, settings.queueIndex, settings.mode, settings.repeat, revision]);
   const cancelledYoutubeStart = useRef(false);
   const clock = useMemo(() => ({
     read: () => native.current?.currentTime ?? feedback.position(),
@@ -519,6 +570,13 @@ export function PlayerProvider({
     setError("");
     setOfferAudioSkip(false);
     playIntent(shouldPlay);
+    if (sameSource && file && relayReady) {
+      // A fresh attempt must revalidate even when it reuses this file's bytes.
+      feedback.reset();
+      if (shouldPlay) feedback.wait();
+      setAudioReplay(value => value + 1);
+      return;
+    }
     if (sameSource) {
       feedback.reset();
       if (shouldPlay) feedback.wait();
@@ -712,7 +770,10 @@ export function PlayerProvider({
     const {state, index} = target;
     if (index < 0) {
       playIntent(false);
-      if (ended) seek(0, false);
+      if (ended) {
+        seek(0, false);
+        completedAudio.current = !!file;
+      }
       selectAttempt(live.current, "manual");
       if (direction === 1) showSkipped(state, state.queueIndex + 1, -1);
       return;
@@ -724,6 +785,11 @@ export function PlayerProvider({
   }
   async function sourceError() {
     if (!currentMedia()) return;
+    if (audioToken && native.current?.error) {
+      seekOnLoad.current = readPosition() ?? live.current.position;
+      setDirectAudioKey(audioToken);
+      return;
+    }
     feedback.pause();
     let entry = current;
     if (current && catalog.rechecksPlayback(current.id)) {
@@ -817,8 +883,7 @@ export function PlayerProvider({
     else if (!youtubeRestart.current && youtube.current?.getPlayerState?.() === 1)
       attempt.playing(...youtubePlaybackReading(youtube.current));
   }
-  function updateNativeRanges(event: SyntheticEvent<HTMLMediaElement>) {
-    const element = event.currentTarget;
+  function readNativeRanges(element: HTMLMediaElement) {
     if (!currentNative(element)) return;
     const {buffered} = element;
     const ranges: BufferedRanges = Array.from({length: buffered.length}, (_, index) => [buffered.start(index), buffered.end(index)]);
@@ -826,6 +891,16 @@ export function PlayerProvider({
       ranges.every(([start, end], index) => old.ranges[index][0] === start && old.ranges[index][1] === end)
       ? old : {source: feedback, ranges});
   }
+  function updateNativeRanges(event: SyntheticEvent<HTMLMediaElement>) {
+    readNativeRanges(event.currentTarget);
+  }
+  useEffect(() => {
+    const refreshBuffer = () => {
+      if (!document.hidden && native.current) readNativeRanges(native.current);
+    };
+    document.addEventListener("visibilitychange", refreshBuffer);
+    return () => document.removeEventListener("visibilitychange", refreshBuffer);
+  }, [feedback]);
   function nativeWaiting(event: SyntheticEvent<HTMLMediaElement>) {
     if (!currentNative(event.currentTarget) || !playingRef.current) return;
     feedback.wait();
@@ -882,7 +957,8 @@ export function PlayerProvider({
     onSeeking: nativeWaiting,
     onSeeked(event: SyntheticEvent<HTMLMediaElement>) {
       const element = event.currentTarget;
-      if (!currentNative(event.currentTarget)) return;
+      if (!currentNative(element)) return;
+      readNativeRanges(element);
       if (nativeRestart.current?.element === element) {
         nativeRestart.current.position = element.currentTime;
         return;
@@ -961,7 +1037,8 @@ export function PlayerProvider({
       setError("");
       cancelledYoutubeStart.current = false;
       playIntent(true);
-      if (native.current) playNative(native.current);
+      if (completedAudio.current && file && relayReady) setAudioReplay(value => value + 1);
+      else if (native.current) playNative(native.current);
       youtube.current?.playVideo?.();
     }
   }
@@ -1179,7 +1256,7 @@ export function PlayerProvider({
       if (playingRef.current) playNative(native.current);
       else native.current.pause();
     }
-  }, [playing, sourceKey]);
+  }, [playing, sourceKey, audioUrl]);
   useEffect(() => {
     if (native.current) native.current.volume = settings.volume;
   }, [settings.volume]);
@@ -1823,7 +1900,7 @@ export function PlayerProvider({
     <PlayerContext.Provider value={controller}>
       {children(player, miniPlayer)}
       {source && presentationKind === "audio" && (
-        <audio key={sourceKey} ref={attachNative} src={source.streamUrl!} {...nativeEvents} />
+        <audio key={audioToken ?? sourceKey} ref={attachNative} src={audioUrl} preload={playing ? "auto" : "none"} {...nativeEvents} />
       )}
     </PlayerContext.Provider>
   );

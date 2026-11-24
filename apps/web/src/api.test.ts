@@ -27,3 +27,12 @@ it("lets the full library order yield network priority to the selected media fil
   await api("/library/ids", "POST", {}, "low");
   expect(fetch.mock.calls[0]?.[1]?.priority).toBe("low");
 });
+
+it("passes library cancellation to the network request", async () => {
+  const controller = new AbortController();
+  const read = vi.fn<typeof globalThis.fetch>().mockResolvedValue(Response.json({ items: [] }));
+  vi.stubGlobal("fetch", read);
+  await api("/library/page", "POST", {}, undefined, controller.signal);
+  controller.abort();
+  expect(read.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+});

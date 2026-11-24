@@ -1,3 +1,9 @@
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { PrismaClient } from "@prisma/client";
+import { sqliteAdapter } from "./sqlite";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ItemDto, PlaylistDefinition, PlaylistSummaryDto, Rule } from "@hibiki/contracts";
 import { createApp } from "./app";
@@ -490,5 +496,163 @@ it("uses the current history cutoff even if the worker has not refreshed its pla
     expect((await start()).json().ids).toEqual(["a"]);
   } finally {
     vi.useRealTimers();
+  }
+});
+
+it("ranks by owned completions and last actual start, including private text and independent tag facets", async () => {
+  const ownerId = ctx.userId;
+  await ctx.db.item.createMany({ data: ["a", "b", "c", "d", "e"].map(id => ({ ...track(id), note: "Личное" })) });
+  await ctx.db.tag.createMany({ data: ["one", "two"].map(id => ({ id, name: id, ownerId })) });
+  await ctx.db.itemTag.createMany({ data: ["a", "b", "c", "e"].map(itemId => ({ itemId, tagId: "one" })).concat({itemId: "d", tagId: "two"}) });
+  const started = new Date("2025-01-02");
+  await ctx.db.listeningSummary.createMany({ data: [
+    { ownerId, itemId: "b", completed: 2, lastStartedAt: started },
+    { ownerId, itemId: "a", completed: 2, lastStartedAt: started },
+    { ownerId, itemId: "d", completed: 0, launches: 15, lastStartedAt: new Date("2025-01-03") },
+    { ownerId, itemId: "e", completed: 0, lastStartedAt: started },
+    { ownerId: ctx.otherUserId, itemId: "c", completed: 10, lastStartedAt: started },
+  ] });
+  const ranked = await post("page", { filters: { sort: "popular" } });
+  expect(ranked.statusCode, ranked.body).toBe(200);
+  expect(ranked.json().items.map((i: ItemDto) => i.id)).toEqual(["a", "b", "d", "e", "c"]);
+  const filters = { sort: "recent", query: "ЛИЧН", tagIds: ["one"] };
+  const first = await post("page", { filters });
+  expect(first.json()).toMatchObject({ total: 3, tagCounts: { one: 3, two: 1 }, selectionId: expect.any(String) });
+  expect(first.json().items.map((i: ItemDto) => i.id)).toEqual(["a", "b", "e"]);
+  const selectionId = first.json().selectionId;
+  expect((await post("ids", {filters, selectionId})).json()).toEqual({ ids: ["a", "b", "e"] });
+  for (const response of [
+    await post("ids", {filters, selectionId}, foreignCookie),
+    await post("ids", {filters: { ...filters, query: "" }, selectionId}),
+    await post("ids", {filters, selectionId: "unknown"}),
+  ]) {
+    expect(response.statusCode, response.body).toBe(409);
+    expect(response.json().error.code).toBe("library_changed");
+  }
+  const plain = await post("page", { filters: { sort: "recent" } });
+  expect(plain.json().items.map((i: ItemDto) => i.id)).toEqual(["d", "a", "b", "e"]);
+});
+
+it.each(["popular", "recent", "random"])("keeps one %s order across three pages and the queue until invalidated", async sort => {
+  const ids = Array.from({ length: 203 }, (_, n) => "song-" + String(n).padStart(3, "0"));
+  const ownerId = ctx.userId;
+  await ctx.db.item.createMany({ data: ids.toReversed().map(id => track(id)) });
+  await ctx.db.listeningSummary.createMany({data: ids.map(itemId => ({ownerId, itemId, lastStartedAt: new Date("2025-01-01")}))});
+  const filters = {sort, randomSeed: "fixture"};
+  const first = await post("page", {filters});
+  expect(first.statusCode, first.body).toBe(200);
+  const selectionId = first.json().selectionId;
+  expect(selectionId).toEqual(expect.any(String));
+  await ctx.db.listeningSummary.update({where: {itemId: ids[202]!}, data: {completed: 99, lastStartedAt: new Date("2025-02-01")}});
+  const second = await post("page", {filters, cursor: first.json().nextCursor});
+  const third = await post("page", {filters, cursor: second.json().nextCursor});
+  expect(second.json().selectionId).toBe(selectionId);
+  expect(third.json()).toMatchObject({selectionId, nextCursor: null, total: 203});
+  const displayed = [first, second, third].flatMap(page => page.json().items.map((i: ItemDto) => i.id));
+  expect(displayed.toSorted()).toEqual(ids);
+  expect((await post("ids", {filters, selectionId})).json().ids).toEqual(displayed);
+  expect((await post("page", {filters, selectionId})).json().items).toEqual(first.json().items);
+  const fresh = (await post("page", {filters})).json().items.map((i: ItemDto) => i.id);
+  if (sort === "random") {
+    expect(displayed).not.toEqual(ids);
+    expect(fresh).toEqual(displayed.slice(0, 100));
+    const again = (await post("page", {filters: {...filters, randomSeed: "new"}})).json();
+    expect(again.items.map((i: ItemDto) => i.id)).not.toEqual(fresh);
+  } else {
+    expect(displayed).toEqual(ids);
+    expect(fresh[0]).toBe(ids[202]);
+    const beforeReset = (await overview()).json().revision;
+    const reset = await app.inject({method: "POST", url: "/api/history/reset", headers: {cookie}, payload: {confirm: true}});
+    expect(reset.statusCode, reset.body).toBe(200);
+    expect((await overview()).json().revision).not.toBe(beforeReset);
+    expect((await post("page", {filters, cursor: first.json().nextCursor})).statusCode).toBe(409);
+    expect((await post("ids", {filters, selectionId})).json().error.code).toBe("library_changed");
+    expect((await post("page", { filters: { sort: "recent" } })).json().total).toBe(0);
+  }
+  const beforeDelete = (await post("page", { filters: {sort: "popular"} })).json();
+  await ctx.db.item.delete({where: {id: ids[0]!}});
+  expect((await post("ids", {filters: {sort: "popular"}, selectionId: beforeDelete.selectionId})).statusCode).toBe(409);
+});
+
+it("expires a snapshot without reinterpreting its offset against the latest listening history", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    const filters = {sort: "recent"};
+    const first = await post("page", {filters});
+    expect(first.statusCode, first.body).toBe(200);
+    vi.setSystemTime(Date.now() + 24 * 60 * 60_000);
+    const stale = await post("ids", {filters, selectionId: first.json().selectionId});
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().error.code).toBe("library_changed");
+  } finally { vi.useRealTimers(); }
+});
+
+it("keeps personal orders out of the MCP tool schema and rejects them at invocation", async () => {
+  const base = await app.listen({ host: "127.0.0.1", port: 0 });
+  const client = new Client({ name: "library-search-test", version: "1" });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL("/mcp", base), {
+      requestInit: { headers: { authorization: bearer } },
+    }));
+    const schema = (await client.listTools()).tools.find(tool => tool.name === "media_list")!.inputSchema;
+    expect(schema.properties).not.toHaveProperty("randomSeed");
+    for (const sort of ["recent", "popular", "random"]) {
+      expect(schema.properties?.sort).toHaveProperty("enum", expect.not.arrayContaining([sort]));
+      expect((await client.callTool({ name: "media_list", arguments: { sort } })).isError).toBe(true);
+    }
+  } finally {
+    await client.close();
+  }
+});
+
+it("preserves recent results through journal cleanup and recording opt-out", async () => {
+  const at = Date.now() - 3600_000;
+  await ctx.db.item.createMany({ data: ["a", "b"].map(id => ({ ...track(id), duration: 30 })) });
+  const history = (url: string, payload: Record<string, unknown>, method: "POST" | "PUT" = "POST") =>
+    app.inject({ method, url: "/api/history/" + url, headers: { cookie }, payload });
+  const record = (itemId: string, start: number) => history("attempts", {
+    id: start + "." + randomUUID(), ownerId: ctx.userId, itemId, trigger: "manual", reason: "ended",
+    endedAt: new Date(start + 30_000).toISOString(), listened: 30, covered: 30, seeks: 0,
+  });
+  expect((await record("a", at)).json().recorded).toBe(true);
+  const filters = { sort: "recent" };
+  const open = (await post("page", { filters })).json();
+  const preview = (await history("cleanup/preview", { to: new Date().toISOString() })).json();
+  expect((await history("cleanup/confirm", { token: preview.token })).json()).toEqual({ deleted: 1 });
+  expect((await history("preference", { enabled: false }, "PUT")).json().enabled).toBe(false);
+  expect((await record("b", at + 60_000)).json().recorded).toBe(false);
+  expect((await post("ids", { filters, selectionId: open.selectionId })).json()).toEqual({ ids: ["a"] });
+  expect((await post("page", { filters })).json().items.map((i: ItemDto) => i.id)).toEqual(["a"]);
+});
+
+it("stops the current text search between batches when its HTTP client disconnects", async () => {
+  await ctx.db.item.createMany({ data: Array.from({length: 4096}, (_, n) => track("song-" + n)) });
+  const db = new PrismaClient({
+    adapter: sqliteAdapter("file:" + join(ctx.root, "hibiki.db")), log: [{emit: "event", level: "query"}],
+  });
+  const server = await createApp({db, storageRoot: ctx.root});
+  const controller = new AbortController();
+  let finish!: (sql: string) => void;
+  const transaction = new Promise<string>(resolve => { finish = resolve; });
+  let batches = 0;
+  db.$on("query", event => {
+    if (event.query.includes(" AS text FROM Item i")) {
+      batches++;
+      if (batches === 1) controller.abort();
+    }
+    if (batches && /ROLLBACK|COMMIT/.test(event.query)) finish(event.query);
+  });
+  try {
+    const base = await server.listen({host: "127.0.0.1", port: 0});
+    const response = fetch(base + "/api/library/page", {
+      method: "POST", headers: {cookie, "content-type": "application/json"},
+      body: JSON.stringify({filters: {query: "song"}}), signal: controller.signal,
+    });
+    await expect(response).rejects.toHaveProperty("name", "AbortError");
+    expect(await transaction).toBe("ROLLBACK");
+    expect(batches).toBeLessThan(16);
+  } finally {
+    await server.close();
+    await db.$disconnect();
   }
 });

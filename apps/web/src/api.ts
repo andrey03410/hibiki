@@ -17,6 +17,7 @@ export async function api<T = any>(
   method = "GET",
   body?: unknown,
   priority?: RequestPriority,
+  signal?: AbortSignal,
 ): Promise<T> {
   const owner = workspaceOwner;
   const headers = new Headers();
@@ -25,6 +26,7 @@ export async function api<T = any>(
   const response = await fetch(`/api${path}`, {
     method,
     priority,
+    signal,
     credentials: "same-origin",
     headers,
     body:
@@ -38,6 +40,7 @@ export async function api<T = any>(
     response.status === 204
       ? undefined
       : await response.json().catch(() => undefined);
+  signal?.throwIfAborted();
   if (!response.ok && data?.error?.code === "workspace_changed" && owner === workspaceOwner) window.location.reload();
   if (!response.ok)
     throw new ApiError(

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ItemDto } from "@hibiki/contracts";
-import { LibraryPages } from "./library-pages";
+import { ApiError } from "./api";
+import { defaultLibrarySearch } from "./library-search";
+import { LibraryPages, searchBody } from "./library-pages";
 
 const rows = (start: number, count: number) => Array.from({length: count}, (_, i) => ({id: String(i + start)} as ItemDto));
 const first = {items: rows(1, 100), total: 201, nextCursor: "100"};
@@ -81,4 +83,70 @@ describe("library pages", () => {
     await pages.refresh(true);
     expect(pages.snapshot()).toBe(before);
   });
+});
+
+it("aborts an obsolete network read while debouncing the next text request", async () => {
+  vi.useFakeTimers();
+  try {
+    const read = vi.fn().mockResolvedValue(first);
+    const pages = new LibraryPages(read);
+    pages.open(defaultLibrarySearch);
+    const signal: AbortSignal = read.mock.calls[0]![1];
+    const query = { ...defaultLibrarySearch, query: "a" };
+    pages.open(query, defaultLibrarySearch);
+    expect(signal.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(100);
+    pages.open({ ...query, query: "ab" }, query);
+    await vi.advanceTimersByTimeAsync(149);
+    expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(read).toHaveBeenCalledTimes(2);
+    pages.open({ ...query, tagIds: ["tag"] }, query);
+    expect(read).toHaveBeenCalledTimes(3);
+    pages.open(defaultLibrarySearch, query);
+    expect(read).toHaveBeenCalledTimes(4);
+  } finally { vi.useRealTimers(); }
+});
+
+it("keeps the page selection for subsequent pages, revalidation and the full-order request", async () => {
+  const firstPage = { ...first, selectionId: "snapshot1", tagCounts: { mood: 2 } };
+  const second = { items: rows(101, 1), total: 101, nextCursor: null };
+  const read = vi.fn().mockResolvedValueOnce(firstPage).mockResolvedValueOnce(second)
+    .mockResolvedValueOnce(firstPage).mockResolvedValueOnce(second);
+  const pages = new LibraryPages(read);
+  await pages.refresh();
+  await pages.more();
+  await pages.refresh(true);
+  expect(read.mock.calls[2]![2]).toBe("snapshot1");
+  expect(pages.snapshot()).toMatchObject({ selectionId: "snapshot1", tagCounts: { mood: 2 } });
+  const body = searchBody({ ...defaultLibrarySearch, sort: "recent", previousSort: "popular" }, pages.snapshot().selectionId);
+  expect(body.selectionId).toBe("snapshot1");
+  expect(body.filters).not.toHaveProperty("previousSort");
+});
+
+it("discards all stale pages and starts again at page one when a snapshot expires", async () => {
+  const read = vi.fn().mockResolvedValueOnce({ ...first, selectionId: "old" })
+    .mockResolvedValueOnce({ ...first, nextCursor: "200" })
+    .mockRejectedValueOnce(new ApiError("library_changed", "expired", 409))
+    .mockResolvedValueOnce({ ...first, items: rows(500, 100), selectionId: "new" });
+  const pages = new LibraryPages(read);
+  await pages.refresh();
+  await pages.more();
+  await pages.more();
+  expect(read).toHaveBeenCalledTimes(4);
+  expect(pages.snapshot()).toMatchObject({ selectionId: "new", items: rows(500, 100), nextCursor: "100", error: "" });
+});
+
+it("recovers the full queue from a new first page when its original snapshot expired", async () => {
+  const read = vi.fn()
+    .mockResolvedValueOnce({...first, selectionId: "expired"})
+    .mockResolvedValueOnce({...first, items: rows(400, 100), selectionId: "fresh"});
+  const pages = new LibraryPages(read);
+  await pages.refresh();
+  const ids = vi.fn()
+    .mockRejectedValueOnce(new ApiError("library_changed", "expired", 409))
+    .mockResolvedValueOnce(["new-order"]);
+  expect(await pages.fullOrder("expired", ids)).toEqual(["new-order"]);
+  expect(ids.mock.calls).toEqual([["expired"], ["fresh"]]);
+  expect(pages.snapshot()).toMatchObject({ selectionId: "fresh", items: rows(400, 100) });
 });

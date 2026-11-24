@@ -1,40 +1,18 @@
 import { useEffect, useId, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
-import { Heart, LayoutGrid, List, Play, Search, SlidersHorizontal, X } from "lucide-react";
+import { Heart, LayoutGrid, List, Play, Search, Shuffle, SlidersHorizontal, X } from "lucide-react";
 import type { TagDto } from "@hibiki/contracts";
 import {
-  defaultLibrarySearch, libraryFilterConditions, libraryKinds, libraryProviders, libraryStatuses,
-  resetLibraryFilters, type LibrarySearch, type LibraryView,
+  changeLibrarySort, defaultLibrarySearch, libraryFilterConditions, libraryKinds, libraryProviders,
+  librarySorts, libraryStatuses, newRandomSeed, resetLibraryFilters, restoreLibrarySearch, type LibrarySearch, type LibraryView,
 } from "./library-search";
 import { filterLabels, missingLabels, nextPerformanceFilter } from "./taxonomy";
 import "./library-search.css";
-
-const sorts = {
-  "added-desc": "Сначала новые", "added-asc": "Сначала старые",
-  "title-asc": "Название ↑", "title-desc": "Название ↓",
-  "duration-asc": "Сначала короткие", "duration-desc": "Сначала длинные",
-} satisfies Record<LibrarySearch["sort"], string>;
 
 export function useLibrarySearch(userId: string) {
   const key = `hibiki:library-search:${userId}`;
   const [value, setValue] = useState<LibrarySearch>(() => {
     try {
-      const stored: Partial<LibrarySearch> = JSON.parse(sessionStorage.getItem(key) ?? "{}");
-      const initial = { ...defaultLibrarySearch };
-      for (const field of ["query", "minDuration", "maxDuration", "addedFrom", "addedThrough"] as const) {
-        const value = stored[field];
-        if (typeof value === "string") initial[field] = value;
-      }
-      if (stored.kind && Object.hasOwn(libraryKinds, stored.kind)) initial.kind = stored.kind;
-      if (stored.provider && Object.hasOwn(libraryProviders, stored.provider)) initial.provider = stored.provider;
-      if (stored.availability && Object.hasOwn(libraryStatuses, stored.availability)) initial.availability = stored.availability;
-      if (stored.sort && Object.hasOwn(sorts, stored.sort)) initial.sort = stored.sort;
-      if (Array.isArray(stored.tagIds)) initial.tagIds = stored.tagIds.filter((id) => typeof id === "string");
-      if (stored.tagMode === "or") initial.tagMode = "or";
-      if (stored.performanceFilter && Object.hasOwn(filterLabels, stored.performanceFilter)) initial.performanceFilter = stored.performanceFilter;
-      if (stored.missingGroup && Object.hasOwn(missingLabels, stored.missingGroup)) initial.missingGroup = stored.missingGroup;
-      initial.needsClassification = stored.needsClassification === true;
-      initial.favoriteOnly = stored.favoriteOnly === true;
-      return initial;
+      return restoreLibrarySearch(sessionStorage.getItem(key));
     } catch {
       return defaultLibrarySearch;
     }
@@ -85,9 +63,25 @@ export function LibrarySearchControls({ value, onChange, tags, count, selectAll,
             </button>
           )}
         </div>
-        <select aria-label="Сортировка медиатеки" value={value.sort} onChange={(event) => set("sort", event.target.value as LibrarySearch["sort"])}>
-          {Object.entries(sorts).map(([id, label]) => <option value={id} key={id}>{label}</option>)}
-        </select>
+        <div className="library-sort-tools">
+          <select aria-label="Сортировка медиатеки" value={value.sort} onChange={event => {
+            const sort = event.target.value as LibrarySearch["sort"];
+            onChange(current => changeLibrarySort(current, sort));
+          }}>
+            {Object.entries(librarySorts).map(([id, label]) => <option value={id} key={id}>{label}</option>)}
+          </select>
+          {value.sort === "random" && (
+            <button type="button" className="library-filter-button" aria-label="Перемешать ещё раз" title="Перемешать ещё раз"
+              onClick={() => set("randomSeed", newRandomSeed())}><Shuffle size={16} /></button>
+          )}
+          {value.sort === "recent" && (
+            <button type="button" className="library-filter-button" aria-label="Выключить режим «Недавно слушал»"
+              title={`Вернуть сортировку «${librarySorts[value.previousSort ?? "added-desc"]}»`}
+              onClick={() => onChange(current => changeLibrarySort(current, current.previousSort ?? "added-desc"))}>
+              <X size={16} />
+            </button>
+          )}
+        </div>
         <div className="library-segmented library-view-switch" role="group" aria-label="Вид медиатеки">
           <button type="button" title="Список" aria-label="Список" aria-pressed={view === "list"} onClick={() => onViewChange("list")}>
             <List size={16} /> <span>Список</span>
