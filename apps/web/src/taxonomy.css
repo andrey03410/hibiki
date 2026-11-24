@@ -575,7 +575,7 @@
 @media (max-width: 580px) {
   .library-layout {
     display: flex;
-    flex-direction: column-reverse;
+    flex-direction: column;
     align-items: stretch;
     gap: 8px;
   }
@@ -584,13 +584,31 @@
     top: auto;
     height: auto;
     max-height: 45dvh;
+    margin-top: 0;
+  }
+  .tag-navigation[hidden] {
+    display: none;
+  }
+  .tag-nav-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
     margin-top: 8px;
+    padding: 0 10px;
+    border: 1px solid #38313e;
+    border-radius: 7px;
+    background: #1c191f;
+    color: #dcd3e4;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .tag-nav-toggle span {
+    color: #b5a5c1;
+    font-size: 12px;
   }
   .nav-resize {
     display: none;
-  }
-  .tag-nav-header h2 {
-    margin-bottom: 5px;
   }
   .nav-catalog {
     min-height: 50px;

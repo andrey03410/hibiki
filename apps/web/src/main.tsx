@@ -85,7 +85,7 @@ import { batchTagChanges, compositionDelta, groupKeys, groups, groupOf, itemPerf
   type BatchMode, type Performance, type PerformanceFilter, type TagGroup, type Voice } from "./taxonomy";
 import { ItemTagList } from "./LibraryItemControls.tsx";
 import { playbackSources } from "./player-model.ts";
-import { defaultLibrarySearch, librarySourceBadges, matchesSearch, sourceAvailability, type LibraryView } from "./library-search.ts";
+import { resetLibraryFilters, librarySourceBadges, matchesSearch, sourceAvailability, type LibraryView } from "./library-search.ts";
 import { LibrarySearchControls, useLibrarySearch } from "./LibrarySearchControls.tsx";
 import { NoteEditor, NoteIndicator, NotesContext, NotesLoadError, useNotes, useNotesController } from "./NoteEditor.tsx";
 import { noteFor } from "./note-model.ts";
@@ -94,7 +94,6 @@ import { SharedItemStatus, useSavedSharedPlaylists } from "./LibrarySharing";
 import { issueShare, kanameLoginHref } from "./sharing-model";
 import { pollWhileVisible } from "./use-sharing-request";
 import { YoutubeLinkedPlaylist, YoutubeLinkImport, YoutubeSyncNotifications, YoutubeSyncSettings } from "./YoutubeSync.tsx";
-import { HistorySettings } from "./HistorySettings.tsx";
 import { useHistoryRevision } from "./history-events.ts";
 import type { HistoryPreference } from "./listening-client.ts";
 import "./styles.css";
@@ -102,6 +101,7 @@ import "./library-view.css";
 import "./taxonomy.css";
 
 const loadSharing = () => import("./Sharing");
+const HistorySettings = React.lazy(() => import("./HistorySettings").then(module => ({ default: module.HistorySettings })));
 const IssueShare = React.lazy(() => loadSharing().then(module => ({ default: module.IssueShare })));
 const ShareManager = React.lazy(() => loadSharing().then(module => ({ default: module.ShareManager })));
 const SharedMediaPage = React.lazy(() => loadSharing().then(module => ({ default: module.SharedMediaPage })));
@@ -459,7 +459,7 @@ function Workspace({
   const seenImports = useRef<Set<string> | null>(null);
   const navigate = useNavigate();
   function browseTag(id: string) {
-    librarySearch[1]((old) => ({ ...defaultLibrarySearch, sort: old.sort, tagIds: [id] }));
+    librarySearch[1]((old) => ({ ...resetLibraryFilters(old), query: "", tagIds: [id] }));
     navigate("/");
     window.scrollTo(0, 0);
   }
@@ -791,13 +791,16 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
       return "list";
     }
   });
-  const pages = useMemo(() => new LibraryPages(cursor => api("/library/page", "POST", {...searchBody(filters), cursor})), [filters]);
-  const {items, loading, error, nextCursor, total, tagCounts} = useSyncExternalStore(pages.subscribe, pages.snapshot);
+  const pages = useMemo(() => new LibraryPages((cursor, signal, selectionId) =>
+    api("/library/page", "POST", { ...searchBody(filters, selectionId), cursor }, undefined, signal)), [filters]);
+  const previousFilters = useRef<typeof filters>(undefined);
+  const {items, loading, error, nextCursor, total, tagCounts, selectionId} = useSyncExternalStore(pages.subscribe, pages.snapshot);
   const sentinel = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    void pages.refresh();
+    pages.open(filters, previousFilters.current);
+    previousFilters.current = filters;
     return pages.cancel;
-  }, [pages, overview.revision]);
+  }, [pages, filters, overview.revision]);
   const watchesAvailability = !!(filters.availability || filters.provider);
   const showsShared = items.some(item => item.shared);
   useEffect(() => {
@@ -816,12 +819,14 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   useEffect(() => () => {actions.current++;}, [pages, overview.revision]);
   const idQuery = useMemo(() => {
     let pending: Promise<string[]> | undefined;
-    return () => pending ??= api<{ids: string[]}>("/library/ids", "POST", searchBody(filters), "low")
-      .then(result => {
+    const read = (id?: string) => api<{ids: string[]}>("/library/ids", "POST", searchBody(filters, id), "low")
+      .then(result => result.ids);
+    return () => pending ??= pages.fullOrder(selectionId, read)
+      .then(ids => {
         if (watchesAvailability) pending = undefined;
-        return result.ids;
-      }).catch(e => {pending = undefined; throw e;});
-  }, [filters, overview.revision, watchesAvailability]);
+        return ids;
+      }).catch(e => { pending = undefined; throw e; });
+  }, [pages, filters, selectionId, overview.revision, watchesAvailability]);
   const pageComplete = !loading && !nextCursor && !error && items.length === total;
   const pageIds = useMemo(() => items.map(item => item.id), [items]);
   const allIds = () => pageComplete ? Promise.resolve(pageIds) : idQuery();
@@ -832,18 +837,18 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
     else player.start(items, 0, undefined, options);
   }
   const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
-  const restrictsFacets = filters.query.trim() || filters.kind || filters.provider || filters.availability || filters.favoriteOnly
+  const restrictsFacets = filters.sort === "recent" || filters.query.trim() || filters.kind || filters.provider || filters.availability || filters.favoriteOnly
     || filters.minDuration || filters.maxDuration || filters.addedFrom || filters.addedThrough || filters.performanceFilter
     || filters.needsClassification || filters.missingGroup;
   const selectedIds = new Set(selected);
   const hasSelection = selected.length > 0;
   const [selectionScope, setSelectionScope] = useState<{query: typeof idQuery; ids: string[]}>();
   useEffect(() => {
-    if (!hasSelection || pageComplete) return;
+    if (!hasSelection || pageComplete || !total) return;
     let active = true;
     void idQuery().then(ids => {if (active) setSelectionScope({query: idQuery, ids});}).catch(() => {});
     return () => {active = false;};
-  }, [hasSelection, pageComplete, idQuery]);
+  }, [hasSelection, pageComplete, idQuery, total]);
   const scope = pageComplete ? pageIds : selectionScope?.query === idQuery ? selectionScope.ids : undefined;
   const allSelected = !!scope?.length && hasSelection && scope.every(id => selectedIds.has(id));
   const selectAll = (
@@ -936,8 +941,8 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
         {!loading && !error && !items.length && (
           <EmptyState
             title={
-              overview.total
-                ? "Ничего не найдено"
+              filters.sort === "recent" ? "Среди найденных треков пока нет прослушанных"
+                : overview.total ? "Ничего не найдено"
                 : "Начнём вашу коллекцию"
             }
             text={

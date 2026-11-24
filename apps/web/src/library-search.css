@@ -35,7 +35,7 @@
   appearance: none;
 }
 
-.library-search-tools > select,
+.library-sort-tools select,
 .library-filter-fields :is(select, input) {
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -46,7 +46,16 @@
   font-size: 12px;
 }
 
-.library-search-tools > select {
+.library-sort-tools {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.library-sort-tools select {
+  min-width: 0;
   height: 40px;
   max-width: 100%;
 }
@@ -208,7 +217,11 @@
 }
 
 @container (width < 330px) {
-  .library-search-tools > select {
+  .library-sort-tools {
+    flex: 1;
+  }
+
+  .library-sort-tools select {
     flex: 1;
     min-width: 0;
   }

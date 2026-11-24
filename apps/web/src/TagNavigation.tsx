@@ -8,7 +8,8 @@ import {
   type SetStateAction,
 } from "react";
 import { Check, ChevronRight, Disc3, FolderTree, Heart, Layers, Mic2, Search, Tags, X } from "lucide-react";
-import type { LibrarySearch, TagDto } from "@hibiki/contracts";
+import type { LibrarySearch } from "./library-search";
+import type { TagDto } from "@hibiki/contracts";
 import { groupKeys, groupOf, groups, normalize, TagCatalog, type TagGroup } from "./taxonomy";
 
 const icons = { source: FolderTree, artist: Mic2, genre: Disc3, mood: Heart, extra: Tags };
@@ -32,6 +33,8 @@ export function TagNavigation({
   children: ReactNode;
   hasPlayer: boolean;
 }) {
+  const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.matchMedia("(max-width: 580px)").matches);
+  const [panelOpen, setPanelOpen] = useState(false);
   const [flat, setFlat] = useState(false);
   const [openGroups, setOpenGroups] = useState(new Set<TagGroup>(["source"]));
   const [branches, setBranches] = useState(new Set<string>());
@@ -52,6 +55,12 @@ export function TagNavigation({
       return null;
     }
   });
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 580px)");
+    const changed = () => setNarrow(media.matches);
+    media.addEventListener("change", changed);
+    return () => media.removeEventListener("change", changed);
+  }, []);
   const [space, setSpace] = useState(900);
   const [playerHeight, setPlayerHeight] = useState(0);
   useEffect(() => {
@@ -213,14 +222,23 @@ export function TagNavigation({
     );
   }
 
+  const results = <div key="results" className="library-results-column">{children}</div>;
   return (
     <div
       className="library-layout"
       ref={layout}
       style={{ "--nav-width": width + "px", "--player-space": playerHeight + "px" } as React.CSSProperties}
     >
-      <div className="library-results-column">{children}</div>
-      <aside id={panelId} className="tag-navigation" ref={panel} aria-label="Навигация по тегам">
+      {!narrow && results}
+      {narrow && (
+        <button className="tag-nav-toggle" type="button" aria-expanded={panelOpen} aria-controls={panelId}
+          onClick={() => setPanelOpen(open => !open)}>
+          <Layers size={17} aria-hidden="true" />Теги
+          {!panelOpen && chosen.length > 0 && <span>Выбрано: {chosen.length}</span>}
+          <ChevronRight size={16} className="group-arrow" aria-hidden="true" />
+        </button>
+      )}
+      <aside id={panelId} hidden={narrow && !panelOpen} className="tag-navigation" ref={panel} aria-label="Навигация по тегам">
         <div
           className="nav-resize"
           role="separator"
@@ -255,10 +273,7 @@ export function TagNavigation({
           }}
         />
         <header className="tag-nav-header">
-          <h2>
-            <Layers size={19} />
-            Навигация
-          </h2>
+          {!narrow && <h2><Layers size={19} />Навигация</h2>}
           <div className="library-segmented nav-modes" role="group" aria-label="Режим навигации">
             <button type="button" ref={modeButton} aria-pressed={!flat} onClick={() => changeMode(false)}>
               По разделам
@@ -353,6 +368,7 @@ export function TagNavigation({
           <div className="nav-chips">{chosen.map((id) => chip(id, true))}</div>
         </dialog>
       </aside>
+      {narrow && results}
     </div>
   );
 }

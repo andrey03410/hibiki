@@ -1,9 +1,53 @@
-import type { ItemDto, SourceDto, TagDto } from "@hibiki/contracts";
+import type { BrowserLibrarySearch, ItemDto, SourceDto, TagDto } from "@hibiki/contracts";
 import { noteFor, type NotesIndex } from "./note-model";
 
 import { filterLabels, missingLabels } from "./taxonomy";
-import type { LibrarySearch } from "@hibiki/contracts";
-export type { LibrarySearch } from "@hibiki/contracts";
+
+type PreviousSort = Exclude<BrowserLibrarySearch["sort"], "recent">;
+export type LibrarySearch = BrowserLibrarySearch & { previousSort?: PreviousSort };
+
+export const librarySorts = {
+  "added-desc": "Сначала новые", "added-asc": "Сначала старые",
+  "title-asc": "Название ↑", "title-desc": "Название ↓",
+  "duration-asc": "Сначала короткие", "duration-desc": "Сначала длинные",
+  popular: "Чаще слушаю", recent: "Недавно слушал", random: "В случайном порядке",
+} satisfies Record<LibrarySearch["sort"], string>;
+
+export function newRandomSeed() {
+  return crypto.getRandomValues(new Uint32Array(2)).join("-");
+}
+
+export function changeLibrarySort(current: LibrarySearch, sort: LibrarySearch["sort"]): LibrarySearch {
+  const previousSort = sort === "recent" && current.sort !== "recent" ? current.sort : current.previousSort;
+  const randomSeed = sort === "random" ? current.randomSeed ?? newRandomSeed() : current.randomSeed;
+  return { ...current, sort, randomSeed, previousSort };
+}
+
+export function restoreLibrarySearch(raw: string | null): LibrarySearch {
+  const stored: Partial<BrowserLibrarySearch> & { previousSort?: BrowserLibrarySearch["sort"] } = JSON.parse(raw ?? "{}") ?? {};
+  const initial = { ...defaultLibrarySearch };
+  for (const field of ["query", "minDuration", "maxDuration", "addedFrom", "addedThrough"] as const) {
+    const value = stored[field];
+    if (typeof value === "string") initial[field] = value;
+  }
+  if (stored.kind && Object.hasOwn(libraryKinds, stored.kind)) initial.kind = stored.kind;
+  if (stored.provider && Object.hasOwn(libraryProviders, stored.provider)) initial.provider = stored.provider;
+  if (stored.availability && Object.hasOwn(libraryStatuses, stored.availability)) initial.availability = stored.availability;
+  if (stored.sort && Object.hasOwn(librarySorts, stored.sort)) initial.sort = stored.sort;
+  if (Array.isArray(stored.tagIds)) initial.tagIds = stored.tagIds.filter(id => typeof id === "string" && id.length > 0 && id.length <= 256);
+  if (stored.tagMode === "or") initial.tagMode = "or";
+  if (stored.performanceFilter && Object.hasOwn(filterLabels, stored.performanceFilter)) initial.performanceFilter = stored.performanceFilter;
+  if (stored.missingGroup && Object.hasOwn(missingLabels, stored.missingGroup)) initial.missingGroup = stored.missingGroup;
+  initial.needsClassification = stored.needsClassification === true;
+  initial.favoriteOnly = stored.favoriteOnly === true;
+  if (stored.previousSort && stored.previousSort !== "recent" && Object.hasOwn(librarySorts, stored.previousSort)) {
+    initial.previousSort = stored.previousSort;
+  }
+  if (typeof stored.randomSeed === "string" && stored.randomSeed.length > 0 && stored.randomSeed.length <= 128) {
+    initial.randomSeed = stored.randomSeed;
+  }
+  return changeLibrarySort(initial, initial.sort);
+}
 
 export const defaultLibrarySearch: LibrarySearch = {
   query: "", kind: "", tagIds: [], minDuration: "", maxDuration: "",
@@ -138,8 +182,8 @@ export function libraryFilterConditions(search: LibrarySearch, tags: TagDto[]): 
   return conditions;
 }
 
-export function resetLibraryFilters({ query, sort }: LibrarySearch): LibrarySearch {
-  return { ...defaultLibrarySearch, query, sort };
+export function resetLibraryFilters({ query, sort, previousSort, randomSeed }: LibrarySearch): LibrarySearch {
+  return { ...defaultLibrarySearch, query, sort, previousSort, randomSeed };
 }
 
 export function selectLibraryResults(selected: string[], items: ItemDto[], checked: boolean) {
