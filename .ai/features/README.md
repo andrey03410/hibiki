@@ -12,7 +12,7 @@
 | [11. Запуск и управление воспроизведением](11-player-feedback/README.md) | `merged` | [PR #12](https://github.com/andrey03410/hibiki/pull/12), шесть решений по воспроизведению и плейлистам |
 | [13. Записи и плейлисты по ссылке](13-media-sharing/README.md) | `merged` | [PR #15](https://github.com/andrey03410/hibiki/pull/15), живые подборки, отзыв ссылок и копирование по явному действию |
 | [14. Личная выдача медиатеки и загрузка треков](14-library-listening-feedback/README.md) | `merged` | [PR №16](https://github.com/andrey03410/hibiki/pull/16), личные режимы, поиск и воспроизведение |
-| [15. Карточки плейлистов и быстрые действия](15-playlist-experience/README.md) | `review` | Явная ссылка, редактор с обложки, быстрый просмотр состава и создание |
+| [15. Карточки плейлистов и быстрые действия](15-playlist-experience/README.md) | `merged` | [PR №17](https://github.com/andrey03410/hibiki/pull/17), явная ссылка, редактор с обложки, быстрый просмотр состава и создание |
 
 Процесс — [feature](../../.claude/skills/feature/SKILL.md).
 
