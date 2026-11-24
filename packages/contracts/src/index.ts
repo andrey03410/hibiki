@@ -158,7 +158,10 @@ export interface LibraryPageDto {
   total: number;
   nextCursor: string | null;
   tagCounts?: Record<string, number>;
+  selectionId?: string;
 }
+
+const librarySort = z.enum(["title-asc", "title-desc", "duration-asc", "duration-desc", "added-asc", "added-desc"]);
 
 export const librarySearchSchema = z.object({
   query: z.string().default(""),
@@ -175,10 +178,15 @@ export const librarySearchSchema = z.object({
   provider: z.enum(["", "youtube", "local", "working-local"]).default(""),
   availability: z.enum(["", "available", "unknown", "unavailable"]).default(""),
   favoriteOnly: z.boolean().default(false),
-  sort: z.enum(["title-asc", "title-desc", "duration-asc", "duration-desc", "added-asc", "added-desc"]).default("added-desc"),
+  sort: librarySort.default("added-desc"),
   timeZone: z.string().max(128).optional(),
 });
 export type LibrarySearch = z.infer<typeof librarySearchSchema>;
+export const browserLibrarySearchSchema = librarySearchSchema.extend({
+  sort: z.enum([...librarySort.options, "popular", "recent", "random"]).default("added-desc"),
+  randomSeed: z.string().min(1).max(128).optional(),
+});
+export type BrowserLibrarySearch = z.infer<typeof browserLibrarySearchSchema>;
 
 export interface UserDto {
   id: string;

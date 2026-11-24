@@ -1,19 +1,23 @@
 import { createHash } from "node:crypto";
-import type { FastifyInstance } from "fastify";
+import { setImmediate } from "node:timers/promises";
+import type { FastifyInstance, FastifyReply } from "fastify";
+import { shuffle } from "@hibiki/core";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
-import { librarySearchSchema, playlistDefinitionSchema, type LibrarySearch, type LibraryCardOverviewDto, type LibraryPageDto } from "@hibiki/contracts";
+import { browserLibrarySearchSchema, playlistDefinitionSchema, type BrowserLibrarySearch, type LibrarySearch, type LibraryCardOverviewDto, type LibraryPageDto } from "@hibiki/contracts";
 import type { Db } from "./db";
 import { invariant } from "./errors";
 import { hydrateLibraryItems, jobDto, type LibraryService } from "./library";
 import { listTags } from "./taxonomy";
 import { browserOwner } from "./notes";
+import { LibrarySelections } from "./library-selections";
 
 const pageSize = 100;
 const titleOrder = new Intl.Collator("ru", { sensitivity: "base", numeric: true });
 const id = z.string().min(1).max(256);
 const searchInput = z.object({
-  filters: librarySearchSchema, timeZone: librarySearchSchema.shape.timeZone,
+  filters: browserLibrarySearchSchema, timeZone: browserLibrarySearchSchema.shape.timeZone,
+  selectionId: z.string().min(1).max(100).optional(),
 });
 const pageInput = searchInput.extend({ cursor: z.string().max(100).optional() });
 type SearchInput = z.infer<typeof pageInput>;
@@ -106,7 +110,7 @@ function missingFilter(group?: LibrarySearch["missingGroup"]) {
 
 type BorrowedStatus = { available: string[]; unknown: string[] };
 
-async function borrowedStatus(tx: Tx, ownerId: string, search: LibrarySearch, library: LibraryService): Promise<BorrowedStatus | undefined> {
+async function borrowedStatus(tx: Tx, ownerId: string, search: BrowserLibrarySearch, library: LibraryService): Promise<BorrowedStatus | undefined> {
   if (!search.availability) return;
   const tracks = await tx.sharedTrack.findMany({
     where: { recipientId: ownerId }, select: { recipientItemId: true }, orderBy: { recipientItemId: "asc" },
@@ -125,7 +129,30 @@ async function borrowedStatus(tx: Tx, ownerId: string, search: LibrarySearch, li
   return status;
 }
 
-function itemFilter(ownerId: string, search: LibrarySearch, zone?: string, borrowed?: BorrowedStatus) {
+function tagFilter(ownerId: string, search: BrowserLibrarySearch) {
+  const tagIds = [...new Set(search.tagIds)];
+  if (!tagIds.length) return;
+  const selected = tagIds.length === 1
+    ? Prisma.sql`= ${tagIds[0]}`
+    : Prisma.sql`IN (SELECT value FROM json_each(${JSON.stringify(tagIds)}))`;
+  if (tagIds.length === 1 || search.tagMode === "or") {
+    return Prisma.sql`i.id IN (
+      SELECT it.itemId FROM ItemTag it WHERE it.tagId IN (
+        SELECT descendant FROM ancestry WHERE ancestor ${selected}
+        UNION ALL SELECT id FROM Tag WHERE ownerId = ${ownerId} AND archived AND id ${selected}
+      )
+    )`;
+  }
+  return Prisma.sql`i.id IN (
+    SELECT it.itemId FROM (
+      SELECT descendant, ancestor FROM ancestry
+      UNION ALL SELECT id, id FROM Tag WHERE ownerId = ${ownerId} AND archived
+    ) a JOIN ItemTag it ON it.tagId = a.descendant
+    WHERE a.ancestor ${selected} GROUP BY it.itemId HAVING count(DISTINCT a.ancestor) = ${tagIds.length}
+  )`;
+}
+
+function itemFilter(ownerId: string, search: BrowserLibrarySearch, zone?: string, borrowed?: BorrowedStatus) {
   const sql = Prisma.sql;
   const clauses = [sql`i.ownerId = ${ownerId}`];
   if (search.kind) clauses.push(sql`i.kind = ${search.kind}`);
@@ -139,19 +166,11 @@ function itemFilter(ownerId: string, search: LibrarySearch, zone?: string, borro
   if (from) clauses.push(sql`julianday(i.createdAt) >= julianday(${from.toISOString()})`);
   if (end) clauses.push(sql`julianday(i.createdAt) < julianday(${end.toISOString()})`);
 
-  const tagIds = [...new Set(search.tagIds)];
-  if (tagIds.length) {
-    const all = search.tagMode !== "or" ? sql`HAVING count(DISTINCT a.ancestor) = ${tagIds.length}` : Prisma.empty;
-    clauses.push(sql`i.id IN (
-      SELECT it.itemId FROM (
-        SELECT descendant, ancestor FROM ancestry
-        UNION ALL
-        SELECT id, id FROM Tag WHERE ownerId = ${ownerId} AND archived
-      ) a JOIN ItemTag it ON it.tagId = a.descendant
-      WHERE a.ancestor IN (SELECT value FROM json_each(${JSON.stringify(tagIds)}))
-      GROUP BY it.itemId ${all}
-    )`);
-  }
+  const tags = tagFilter(ownerId, search);
+  if (tags) clauses.push(tags);
+  if (search.sort === "recent") clauses.push(sql`i.id IN (
+    SELECT itemId FROM ListeningSummary WHERE ownerId = ${ownerId} AND lastStartedAt IS NOT NULL
+  )`);
   if (search.performanceFilter === "male" || search.performanceFilter === "female") {
     clauses.push(sql`i.performance = 'vocal' AND EXISTS (SELECT 1 FROM json_each(i.voices) WHERE value = ${search.performanceFilter})`);
   } else if (search.performanceFilter) {
@@ -181,7 +200,18 @@ function itemFilter(ownerId: string, search: LibrarySearch, zone?: string, borro
   return Prisma.join(clauses, " AND ");
 }
 
-function orderBy(sort: LibrarySearch["sort"]) {
+function historySort(sort: BrowserLibrarySearch["sort"]) {
+  return sort === "popular" || sort === "recent";
+}
+
+function snapshotSort(sort: BrowserLibrarySearch["sort"]) {
+  return historySort(sort) || sort === "random";
+}
+
+function orderBy(sort: BrowserLibrarySearch["sort"]) {
+  if (sort === "popular") return Prisma.sql`coalesce(h.completed, 0) DESC, h.lastStartedAt DESC NULLS LAST, i.id ASC`;
+  if (sort === "recent") return Prisma.sql`h.lastStartedAt DESC, i.id ASC`;
+  if (sort === "random") return Prisma.sql`i.id ASC`;
   const direction = sort.endsWith("-desc") ? Prisma.sql`DESC` : Prisma.sql`ASC`;
   return sort.startsWith("duration")
     ? Prisma.sql`i.duration ${direction} NULLS LAST, i.id ASC`
@@ -189,7 +219,7 @@ function orderBy(sort: LibrarySearch["sort"]) {
 }
 
 type SortKey = { id: string; title: string; duration: number | null; createdAt: Date };
-function compare(a: SortKey, b: SortKey, sort: LibrarySearch["sort"]) {
+function compare(a: SortKey, b: SortKey, sort: BrowserLibrarySearch["sort"]) {
   let order;
   if (sort.startsWith("duration")) {
     if (a.duration === null || b.duration === null)
@@ -206,7 +236,7 @@ function compare(a: SortKey, b: SortKey, sort: LibrarySearch["sort"]) {
 // SQLite's built-in case folding is ASCII-only and its collations cannot
 // reproduce Russian numeric title order. Read only matching candidate keys and
 // search fields in batches, releasing the private notes after each batch.
-async function matchingKeys(tx: Tx, ownerId: string, where: Prisma.Sql, search: LibrarySearch, browser: boolean) {
+async function matchingKeys(tx: Tx, ownerId: string, where: Prisma.Sql, search: BrowserLibrarySearch, browser: boolean, signal?: AbortSignal) {
   const words = search.query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   const notes = browser ? Prisma.sql`coalesce(i.note, '') || ' ' || coalesce((
     SELECT group_concat(s.note, ' ') FROM Source s WHERE ${ownedSource}
@@ -221,6 +251,7 @@ async function matchingKeys(tx: Tx, ownerId: string, where: Prisma.Sql, search: 
   let after = "";
   const take = 256;
   for (;;) {
+    signal?.throwIfAborted();
     const rows = await tx.$queryRaw<(SortKey & { text: string | null })[]>(Prisma.sql`
       ${catalogCte(ownerId)}
       SELECT i.id, i.title, i.duration, i.createdAt, ${searchText} AS text FROM Item i
@@ -235,18 +266,19 @@ async function matchingKeys(tx: Tx, ownerId: string, where: Prisma.Sql, search: 
     }
     if (rows.length < take) break;
     after = rows.at(-1)!.id;
+    // The synchronous SQLite adapter can chain all batches in microtasks.
+    // Let a disconnected browser release the transaction before the next scan.
+    if (signal) await setImmediate();
   }
-  return keys.sort((a, b) => compare(a, b, search.sort)).map(({ id }) => id);
+  if (!snapshotSort(search.sort)) keys.sort((a, b) => compare(a, b, search.sort));
+  return keys.map(({ id }) => id);
 }
 
 export async function searchLibraryIds(tx: Tx, ownerId: string, search: LibrarySearch, library: LibraryService, zone?: string, browser = false) {
   const borrowed = await borrowedStatus(tx, ownerId, search, library);
   const where = itemFilter(ownerId, search, zone, borrowed);
   if (search.query.trim() || search.sort.startsWith("title")) return matchingKeys(tx, ownerId, where, search, browser);
-  const rows = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-    ${catalogCte(ownerId)} SELECT i.id FROM Item i WHERE ${where} ORDER BY ${orderBy(search.sort)}
-  `);
-  return rows.map(row => row.id);
+  return orderedIds(tx, ownerId, where, search.sort);
 }
 
 async function facetCounts(tx: Tx, ownerId: string, where: Prisma.Sql) {
@@ -269,68 +301,137 @@ function cursorOffset(input: string | undefined, key: string, revision: string) 
   return Number(parts[3]);
 }
 
+function idFilter(ids: string[]) {
+  return Prisma.sql`i.id IN (SELECT value FROM json_each(${JSON.stringify(ids)}))`;
+}
+
+async function orderedIds(tx: Tx, ownerId: string, where: Prisma.Sql, sort: BrowserLibrarySearch["sort"], limit = Prisma.empty) {
+  const summary = historySort(sort)
+    ? Prisma.sql`LEFT JOIN ListeningSummary h ON h.itemId = i.id AND h.ownerId = i.ownerId`
+    : Prisma.empty;
+  const rows = await tx.$queryRaw<{id: string}[]>(Prisma.sql`
+    ${catalogCte(ownerId)} SELECT i.id FROM Item i ${summary} WHERE ${where} ORDER BY ${orderBy(sort)} ${limit}
+  `);
+  return rows.map(row => row.id);
+}
+
+async function selectionIds(
+  tx: Tx, ownerId: string, where: Prisma.Sql, search: BrowserLibrarySearch, signal: AbortSignal, textMatches?: string[],
+) {
+  let all = textMatches;
+  if (all) {
+    const tags = tagFilter(ownerId, search);
+    if (tags) {
+      const tagged = await tx.$queryRaw<{id: string}[]>(Prisma.sql`
+        ${catalogCte(ownerId)} SELECT i.id FROM Item i WHERE i.ownerId = ${ownerId} AND ${tags} AND ${idFilter(all)}
+      `);
+      const keep = new Set(tagged.map(row => row.id));
+      all = all.filter(id => keep.has(id));
+    }
+  } else if (search.query.trim() || search.sort.startsWith("title")) {
+    all = await matchingKeys(tx, ownerId, where, search, true, signal);
+  }
+  if (!all || historySort(search.sort)) {
+    const eligible = all ? Prisma.sql`i.ownerId = ${ownerId} AND ${idFilter(all)}` : where;
+    all = await orderedIds(tx, ownerId, eligible, search.sort);
+  }
+  return search.sort === "random" ? shuffle(all, search.randomSeed) : all;
+}
+
+async function whileConnected<T>(reply: FastifyReply, run: (signal: AbortSignal) => Promise<T>) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  reply.raw.once("close", abort);
+  try {
+    if (reply.raw.destroyed) abort();
+    return await run(controller.signal);
+  } finally {
+    reply.raw.off("close", abort);
+  }
+}
+
 export function registerLibraryPages(app: FastifyInstance, db: Db, library: LibraryService) {
-  // The common added/duration paths use SQL COUNT and LIMIT. Remember a few
-  // ID-only selections so scrolling a Unicode search does not repeat its scan.
   const selections = new Map<string, string[]>();
   const countsCache = new Map<string, Record<string, number>>();
-  async function select(tx: Tx, ownerId: string, input: SearchInput, idsOnly: boolean) {
+  const snapshots = new LibrarySelections();
+  app.addHook("onClose", async () => snapshots.close());
+  async function select(tx: Tx, ownerId: string, input: SearchInput, idsOnly: boolean, signal: AbortSignal) {
     const search = input.filters;
     const zone = input.timeZone ?? search.timeZone;
     const key = createHash("sha256").update(JSON.stringify([ownerId, search, zone])).digest("hex").slice(0, 24);
     const borrowed = await borrowedStatus(tx, ownerId, search, library);
     const sharedRevision = borrowed ? "-" + createHash("sha256").update(JSON.stringify(borrowed)).digest("hex").slice(0, 16) : "";
     const current = (await revision(tx, ownerId)) + sharedRevision;
-    const offset = cursorOffset(input.cursor, key, current);
-    const where = itemFilter(ownerId, search, zone, borrowed);
-    let ids: string[];
-    let total: number;
-    if (search.query.trim() || search.sort.startsWith("title")) {
-      const cacheKey = key + "." + current;
-      let all = selections.get(cacheKey);
-      if (!all) {
-        all = await matchingKeys(tx, ownerId, where, search, true);
-        if (all.length <= 100_000) {
-          if (selections.size >= 4) selections.delete(selections.keys().next().value!);
-          selections.set(cacheKey, all);
-        }
-      }
-      total = all.length;
-      ids = idsOnly ? all : all.slice(offset, offset + pageSize);
+    signal.throwIfAborted();
+    const frozen = snapshotSort(search.sort);
+    let offset = 0;
+    let selectionId = input.selectionId;
+    if (frozen && input.cursor) {
+      const parts = /^s\.([a-f0-9-]{36})\.(\d{1,9})$/.exec(input.cursor);
+      invariant(parts && (!selectionId || selectionId === parts[1]), 400, "cursor", "Курсор не соответствует выборке");
+      selectionId = parts[1];
+      offset = Number(parts[2]);
     } else {
-      const limit = idsOnly ? Prisma.empty : Prisma.sql`LIMIT ${pageSize} OFFSET ${offset}`;
-      const rows = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-        ${catalogCte(ownerId)} SELECT i.id FROM Item i WHERE ${where} ORDER BY ${orderBy(search.sort)} ${limit}
-      `);
-      ids = rows.map(({ id }) => id);
-      if (idsOnly) total = ids.length;
-      else {
-        const [count] = await tx.$queryRaw<{ total: bigint }[]>(Prisma.sql`${catalogCte(ownerId)} SELECT count(*) AS total FROM Item i WHERE ${where}`);
-        total = Number(count.total);
-      }
+      offset = cursorOffset(input.cursor, key, current);
     }
-    if (idsOnly) return { ids };
-    const end = offset + ids.length;
-    let tagCounts: Record<string, number> | undefined;
-    if (offset === 0) {
-      const filters = { ...search, tagIds: [], tagMode: undefined, sort: "added-desc" as const };
-      const cacheKey = JSON.stringify([ownerId, current, filters, zone]);
-      tagCounts = countsCache.get(cacheKey);
-      if (!tagCounts) {
-        let eligible = itemFilter(ownerId, filters, zone, borrowed);
-        if (filters.query.trim()) {
-          const matching = await matchingKeys(tx, ownerId, eligible, filters, true);
-          eligible = Prisma.sql`i.ownerId = ${ownerId} AND i.id IN (SELECT value FROM json_each(${JSON.stringify(matching)}))`;
-        }
-        tagCounts = await facetCounts(tx, ownerId, eligible);
+
+    async function page(ids: string[], total: number, tagCounts?: Record<string, number>) {
+      const end = offset + ids.length;
+      const prefix = selectionId ? "s." + selectionId : key + "." + current;
+      const items = await hydrateLibraryItems(tx, ownerId, ids, true, library);
+      return { items, total, tagCounts, selectionId, nextCursor: end < total ? prefix + "." + end : null } satisfies LibraryPageDto;
+    }
+    if (selectionId || (frozen && idsOnly)) {
+      const selection = snapshots.get(selectionId, key, current);
+      if (idsOnly) return { ids: Array.isArray(selection.ids) ? selection.ids : selection.ids.slice() };
+      return page(selection.ids.slice(offset, offset + pageSize), selection.ids.length, offset === 0 ? selection.tagCounts : undefined);
+    }
+
+    const where = itemFilter(ownerId, search, zone, borrowed);
+    const cacheKey = key + "." + current;
+    const text = Boolean(search.query.trim());
+    const facets = { ...search, tagIds: [], tagMode: undefined, randomSeed: undefined,
+      sort: search.sort === "recent" ? "recent" as const : "added-desc" as const };
+    const facetKey = JSON.stringify([ownerId, current, facets, zone]);
+    // New recent snapshots must include starts since the previous first page.
+    let tagCounts = !idsOnly && offset === 0 && search.sort !== "recent" ? countsCache.get(facetKey) : undefined;
+    let all = frozen ? undefined : selections.get(cacheKey);
+    let textMatches: string[] | undefined;
+    if (!idsOnly && offset === 0 && !tagCounts) {
+      let eligible = itemFilter(ownerId, facets, zone, borrowed);
+      if (text) {
+        // Facets ignore the selected tags. One pass over these broader matches
+        // supplies both the counts and the (possibly narrower) ordered list.
+        textMatches = all && !search.tagIds.length ? all : await matchingKeys(tx, ownerId, eligible, search, true, signal);
+        eligible = Prisma.sql`i.ownerId = ${ownerId} AND ${idFilter(textMatches)}`;
+      }
+      tagCounts = await facetCounts(tx, ownerId, eligible);
+      if (search.sort !== "recent") {
         if (countsCache.size >= 8) countsCache.delete(countsCache.keys().next().value!);
-        countsCache.set(cacheKey, tagCounts);
+        countsCache.set(facetKey, tagCounts);
       }
     }
-    return {
-      items: await hydrateLibraryItems(tx, ownerId, ids, true, library), total, tagCounts,
-      nextCursor: end < total ? `${key}.${current}.${end}` : null,
-    } satisfies LibraryPageDto;
+
+    if (!all && (frozen || text || search.sort.startsWith("title"))) {
+      all = await selectionIds(tx, ownerId, where, search, signal, textMatches);
+      signal.throwIfAborted();
+      if (frozen) {
+        selectionId = snapshots.add({ key, revision: current, ids: all, tagCounts: tagCounts! });
+      } else if (all.length <= 100_000) {
+        if (selections.size >= 4) selections.delete(selections.keys().next().value!);
+        selections.set(cacheKey, all);
+      }
+    }
+
+    if (all) {
+      if (idsOnly) return { ids: all };
+      return page(all.slice(offset, offset + pageSize), all.length, tagCounts);
+    }
+    const limit = idsOnly ? Prisma.empty : Prisma.sql`LIMIT ${pageSize} OFFSET ${offset}`;
+    const ids = await orderedIds(tx, ownerId, where, search.sort, limit);
+    if (idsOnly) return { ids };
+    const [count] = await tx.$queryRaw<{total: bigint}[]>(Prisma.sql`${catalogCte(ownerId)} SELECT count(*) AS total FROM Item i WHERE ${where}`);
+    return page(ids, Number(count.total), tagCounts);
   }
 
   app.get<{ Querystring: { playlists?: string } }>("/api/library/overview", (request, reply) => {
@@ -340,12 +441,12 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
   app.post("/api/library/page", (request, reply) => {
     const ownerId = browserOwner(request, reply);
     const input = pageInput.parse(request.body);
-    return db.$transaction((tx) => select(tx, ownerId, input, false));
+    return whileConnected(reply, signal => db.$transaction(tx => select(tx, ownerId, input, false, signal)));
   });
   app.post("/api/library/ids", (request, reply) => {
     const ownerId = browserOwner(request, reply);
     const input = searchInput.parse(request.body);
-    return db.$transaction((tx) => select(tx, ownerId, input, true));
+    return whileConnected(reply, signal => db.$transaction(tx => select(tx, ownerId, input, true, signal)));
   });
   app.post("/api/library/items", async (request, reply) => {
     const ownerId = browserOwner(request, reply);

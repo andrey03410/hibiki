@@ -530,6 +530,9 @@ function registerHistoryRoutes(app: FastifyInstance, db: Db) {
       const resetAt = new Date();
       await tx.listeningAttempt.deleteMany({ where: { ownerId } });
       await tx.listeningSummary.deleteMany({ where: { ownerId } });
+      // Other tabs must discard the personal order even when their entire
+      // selection fits on one page and they never request a cursor.
+      await tx.user.update({ where: { id: ownerId }, data: { libraryRevision: { increment: 1 } } });
       await tx.historyPreference.upsert({
         where: { ownerId }, create: { ownerId, resetAt }, update: { resetAt, prunedJson: "[]" },
       });
