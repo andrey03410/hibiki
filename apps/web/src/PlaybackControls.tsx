@@ -8,22 +8,6 @@ import { animatePlayback } from "./playback-feedback";
 const seekKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"];
 
 export type BufferedRanges = [number, number][];
-function bufferedGradient(ranges: BufferedRanges, duration: number) {
-  if (!(duration > 0 && Number.isFinite(duration)) || !ranges.length) return "none";
-  const stops: string[] = [];
-  let previous = 0;
-  for (const [start, end] of ranges) {
-    const from = Math.min(100, Math.max(previous, start / duration * 100));
-    const to = Math.min(100, end / duration * 100);
-    if (to <= from) continue;
-    if (from > previous) stops.push(`transparent ${previous}% ${from}%`);
-    stops.push(`var(--buffer-color) ${from}% ${to}%`);
-    previous = to;
-  }
-  if (previous < 100) stops.push(`transparent ${previous}% 100%`);
-  return `linear-gradient(to right, ${stops.join(", ")})`;
-}
-
 export function PlaybackSeekBar({
   position, duration, className, buffered = [], moving = false, clock, onSeek, onScrubStart, onScrubEnd,
 }: {
@@ -41,6 +25,8 @@ export function PlaybackSeekBar({
   const scrubbing = useRef(false);
   const canSeek = Number.isFinite(duration) && duration > 0;
   const value = canSeek ? Math.max(0, Math.min(position, duration)) : 0;
+  const activeRange = canSeek ? buffered.find(([start, end]) => start <= value && value < end) : undefined;
+  const bufferEnd = activeRange ? Math.min(100, activeRange[1] / duration * 100) : 0;
   const valueText = canSeek
     ? `${formatDuration(value)} из ${formatDuration(duration)}`
     : "Длительность неизвестна";
@@ -105,7 +91,7 @@ export function PlaybackSeekBar({
         onSeek(next);
       }}
       style={{ "--progress": canSeek ? `${value / duration * 100}%` : "0%",
-        "--buffered": bufferedGradient(buffered, duration) } as CSSProperties}
+        "--buffer-end": `${bufferEnd}%` } as CSSProperties}
     />
   );
 }
