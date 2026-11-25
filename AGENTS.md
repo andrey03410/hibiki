@@ -39,6 +39,8 @@ watch layout с очередью справа, audio artwork, fullscreen overlay
 
 [15. Карточки плейлистов и быстрые действия](.ai/features/15-playlist-experience/README.md) — явная кнопка ссылки, переход в редактор с обложки, качество изображений и скорость работы с подборкой.
 
+[17. Смешанный плейлист по одной ссылке](.ai/features/17-mixed-playlist-sharing/README.md) — согласие автора на исходной ссылке, полный порядок с закрытыми местами и отзыв дальнейшего доступа.
+
 ## Стек и проверки
 
 TypeScript · Node.js >=22.16 · npm workspaces · Fastify 5 · SQLite + Prisma 7 ·

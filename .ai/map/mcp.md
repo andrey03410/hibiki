@@ -21,7 +21,7 @@ SDK. Транспорт без серверной MCP-сессии, с JSON-от
 | Медиатека | `media_list`, `media_get`, `media_import_youtube`, `media_download`, `media_refresh`, `media_propose_replacement`, `media_import_local`, `media_upload_begin`, `media_update_many`, `media_delete` |
 | Теги | `tags_list`, `tag_save`, `tag_delete` |
 | Плейлисты | `playlists_list`, `playlist_get`, `playlist_validate`, `playlist_preview`, `playlist_explain`, `playlist_save`, `playlist_delete` |
-| Доступ по ссылке | `share_create`, `share_list`, `share_set_expiry`, `share_revoke`, `share_open`, `share_save`, `share_copy` |
+| Доступ по ссылке | `share_create`, `share_list`, `share_set_expiry`, `share_set_reshare`, `share_revoke`, `share_open`, `share_save`, `share_copy` |
 | Задания | `jobs_list`, `job_get`, `job_cancel`, `job_retry` |
 | Перенос | `library_export`, `library_import_begin`, `library_import_apply` |
 
@@ -48,6 +48,14 @@ SDK. Транспорт без серверной MCP-сессии, с JSON-от
 принимает `itemId` для сохранения отдельного трека из текущего состава. В ответе
 `playlists_list` сохранённые общие подборки доступны в `sharedPlaylists`.
 Явный `share_copy` принимает ID сохранённой записи и возвращает задание `shared-copy`.
+
+У `share_create` есть флаг `allowReshare` с начальным значением false.
+`share_set_reshare` меняет его у действующей ссылки по её ID. Владелец разрешает
+слушать записи этой ссылки через чужой плейлист. В ответе `share_open`
+`positions` сохраняет порядок, `null` обозначает закрытое место, `items` содержит
+доступные записи. Позиция с `shared.delegated` поддерживает только прослушивание.
+Целиком можно сохранить живую подборку. Отдельное сохранение такого трека
+требует своей прямой ссылки автора.
 
 `media_propose_replacement` сохраняет URL одного ролика и объяснение к своей
 записи. Предпросмотр, отклонение и подтверждение доступны в браузерной карточке.
