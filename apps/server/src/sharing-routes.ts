@@ -11,8 +11,11 @@ import type { ShareService, SharedMediaRef } from "./sharing";
 const id = z.string().min(1).max(256);
 const token = z.string().regex(/^[\w-]{43}$/);
 const expiresAt = z.iso.datetime({ offset: true }).nullable();
-const target = z.strictObject({ kind: z.enum(["item", "playlist"]), targetId: id, expiresAt: expiresAt.optional() });
-const expiry = z.strictObject({ expiresAt });
+const target = z.strictObject({
+  kind: z.enum(["item", "playlist"]), targetId: id, expiresAt: expiresAt.optional(), allowReshare: z.boolean().optional(),
+});
+const linkSettings = z.strictObject({ expiresAt: expiresAt.optional(), allowReshare: z.boolean().optional() })
+  .refine(settings => settings.expiresAt !== undefined || settings.allowReshare !== undefined);
 const item = z.strictObject({ itemId: id });
 const optionalItem = item.partial();
 const idParam = z.object({ id });
@@ -41,8 +44,8 @@ export function registerSharing(app: FastifyInstance, sharing: ShareService, sto
 
   app.post("/api/share-links", (request, reply) => {
     sharedResponse(reply);
-    const { kind, targetId, expiresAt: until } = target.parse(request.body);
-    return sharing.create(request.user!.id, kind, targetId, until);
+    const { kind, targetId, expiresAt: until, allowReshare } = target.parse(request.body);
+    return sharing.create(request.user!.id, kind, targetId, until, allowReshare);
   });
   app.get("/api/share-links", async (request, reply) => {
     sharedResponse(reply);
@@ -54,7 +57,7 @@ export function registerSharing(app: FastifyInstance, sharing: ShareService, sto
   });
   app.patch("/api/share-links/:id", (request, reply) => {
     sharedResponse(reply);
-    return sharing.setExpiry(request.user!.id, idParam.parse(request.params).id, expiry.parse(request.body).expiresAt);
+    return sharing.updateLink(request.user!.id, idParam.parse(request.params).id, linkSettings.parse(request.body));
   });
   app.delete("/api/share-links/:id", async (request, reply) => {
     sharedResponse(reply);

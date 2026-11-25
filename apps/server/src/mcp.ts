@@ -170,7 +170,7 @@ export function buildMcp(ownerId: string, s: Services) {
         portability:
           "library_export → job_get → downloadUrl; library_import_begin → upload → job_get preview → library_import_apply",
         sharing:
-          "share_create, share_list, share_set_expiry, share_revoke. Получатель использует share_open и share_save. Явное share_copy создаёт фоновое задание и собственный файл получателя.",
+          "share_create, share_list, share_set_expiry, share_set_reshare, share_revoke. Владелец исходной ссылки может разрешить слушать запись в чужих плейлистах. В share_open порядок задаёт positions, закрытое место обозначено null. Отдельное сохранение через share_save и копирование через share_copy требуют прямого доступа.",
         constraints: {
           platform: "desktop",
           maxUploadBytes: MAX_MEDIA_UPLOAD_BYTES,
@@ -466,13 +466,16 @@ export function buildMcp(ownerId: string, s: Services) {
     },
   );
   tool("share_create", "Создать ссылку на свою запись или живой плейлист", {
-    kind: z.enum(["item", "playlist"]), targetId: id, expiresAt: expiry.optional(),
-  }, args => s.sharing.create(ownerId, args.kind, args.targetId, args.expiresAt));
+    kind: z.enum(["item", "playlist"]), targetId: id, expiresAt: expiry.optional(), allowReshare: z.boolean().optional(),
+  }, args => s.sharing.create(ownerId, args.kind, args.targetId, args.expiresAt, args.allowReshare));
   tool("share_list", "Показать выданные мной ссылки и их статусы", {},
     async () => ({ links: await s.sharing.list(ownerId) }), true);
   tool("share_set_expiry", "Задать срок действующей ссылки или сделать её бессрочной", {
     id, expiresAt: expiry,
   }, args => s.sharing.setExpiry(ownerId, args.id, args.expiresAt));
+  tool("share_set_reshare", "Разрешить или запретить слушать записи этой ссылки в плейлистах других пользователей", {
+    id, allowReshare: z.boolean(),
+  }, args => s.sharing.updateLink(ownerId, args.id, { allowReshare: args.allowReshare }));
   tool("share_revoke", "Досрочно закрыть свою ссылку", { id }, async args => {
     await s.sharing.revoke(ownerId, args.id);
     return { ok: true };
