@@ -116,10 +116,15 @@ export class QueueCatalog {
     });
   }
   rechecksPlayback = (id?: string) => id !== undefined && (this.isShared(id) || this.rows.get(id)?.shared !== undefined);
+  excludeFailedPlayback(id: string, failed: Set<string>) {
+    // Use the refreshed position: a missing media file and a revoked grant
+    // can both return 404. Only a closed position needs a retry on the next lap.
+    const closed = this.rechecksPlayback(id) && !this.rows.get(id)?.sources.length;
+    return (closed ? new Set(failed) : failed).add(id);
+  }
   async readPlayback(id: string, reads: SharedReads = new Map()) {
     const known = this.rows.get(id);
     const shared = this.sharedIds.get(id);
-    let latest: ItemDto | undefined;
     if (shared) {
       let read = reads.get(shared.source);
       if (!read) {
@@ -127,13 +132,16 @@ export class QueueCatalog {
         reads.set(shared.source, read);
       }
       const item = (await read).get(shared.id);
-      latest = item && { ...item, id };
-    } else if (known?.shared) {
-      [latest] = await this.verify([id]);
-    } else {
-      return known;
+      // A revoked position keeps its place in the queue until the next start.
+      // Discard the metadata previously returned through this access path.
+      return item ? { ...item, id } : {
+        id, title: "Запись недоступна", originalTitle: "", kind: "audio" as const,
+        duration: null, createdAt: "", updatedAt: "", tags: [], sources: [],
+      };
     }
-    return latest ?? (known && { ...known, sources: [] });
+    if (!known?.shared) return known;
+    const [latest] = await this.verify([id]);
+    return latest ?? { ...known, sources: [] };
   }
   async refreshPlayback(id: string, active = () => true, reads?: SharedReads) {
     const row = await this.readPlayback(id, reads);

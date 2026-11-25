@@ -52,6 +52,8 @@ it("scopes borrowed queue positions to the source link even for identical origin
 
 it("rechecks link membership before advancing through the original queue order", async () => {
   const tracks = ["one", "two", "three", "four"].map(audioEntry);
+  tracks[1] = { ...tracks[1]!, title: "Private title", originalTitle: "Private title", duration: 80,
+    shared: { sharedBy: "Original author", available: true, delegated: true } };
   let allowed = tracks;
   const load = vi.fn(async () => allowed);
   const fetch = vi.fn(async (ids: string[]) => ids.map(audioEntry));
@@ -65,9 +67,48 @@ it("rechecks link membership before advancing through the original queue order",
   expect(fetch).not.toHaveBeenCalled();
   expect((await catalog.nextInQueue(() => state, 1, true, new Set(), () => true))?.index).toBe(2);
   expect(load).toHaveBeenCalledTimes(1);
-  expect(catalog.rows.get(rows[1]!.id)?.sources).toEqual([]);
+  const closed = catalog.rows.get(rows[1]!.id);
+  expect(closed).toMatchObject({ title: "Запись недоступна", originalTitle: "", duration: null, sources: [], tags: [] });
+  expect(closed?.shared).toBeUndefined();
   allowed = [tracks[1]!, ...allowed];
   expect((await catalog.nextInQueue(() => state, 1, true, new Set(), () => true))?.index).toBe(1);
+  expect(catalog.rows.get(rows[1]!.id)?.shared?.sharedBy).toBe("Original author");
+});
+
+it("skips a media denial for this advance and retries the restored position on the next lap", async () => {
+  const tracks = ["a", "b", "c"].map(audioEntry);
+  let allowed = tracks;
+  const catalog = new QueueCatalog(async () => []);
+  const rows = catalog.sharedEntries("/shared/playlist", tracks, async () => allowed);
+  catalog.put(rows);
+  const failed = new Set<string>();
+  const queue = rows.map(row => row.id);
+  let state = restorePlayback({ queue, queueIndex: 1, repeat: "all" });
+  allowed = [tracks[0]!, tracks[2]!];
+  await catalog.refreshPlayback(queue[1]!);
+  const skip = catalog.excludeFailedPlayback(queue[1]!, failed);
+  expect((await catalog.nextInQueue(() => state, 1, false, skip, () => true))?.index).toBe(2);
+  allowed = tracks;
+  state = { ...state, queueIndex: 0 };
+  expect((await catalog.nextInQueue(() => state, 1, true, failed, () => true))?.index).toBe(1);
+});
+
+it("stops repeat-all when both shared files fail but their sources are still published", async () => {
+  const tracks = ["a", "b"].map(audioEntry);
+  const catalog = new QueueCatalog(async () => []);
+  const rows = catalog.sharedEntries("/shared/playlist", tracks, async () => tracks);
+  catalog.put(rows);
+  const failed = new Set<string>();
+  const state = restorePlayback({ queue: rows.map(row => row.id), repeat: "all" });
+  const advance = async () => {
+    const id = state.queue[state.queueIndex]!;
+    await catalog.refreshPlayback(id);
+    const skip = catalog.excludeFailedPlayback(id, failed);
+    return (await catalog.nextInQueue(() => state, 1, false, skip, () => true))?.index;
+  };
+  expect(await advance()).toBe(1);
+  state.queueIndex = 1;
+  expect(await advance()).toBe(-1);
 });
 
 it("rechecks repeat-one after access to the current track ends", async () => {

@@ -6,8 +6,37 @@
   overflow-wrap: anywhere;
   font-weight: 650;
 }
-.share-dialog-target + .small {
-  margin-top: 4px;
+.share-dialog .share-count {
+  margin: 4px 0 12px;
+}
+.share-count dl {
+  display: grid;
+  grid-template-columns: max-content auto;
+  gap: 2px 8px;
+  margin: 5px 0 0;
+}
+.share-count dd {
+  margin: 0;
+}
+.share-dialog .share-permission {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.share-permission label {
+  flex-direction: row;
+  align-items: baseline;
+  cursor: pointer;
+}
+.share-permission p {
+  margin: 5px 0 0 24px;
+}
+.shared-tracks .shared-track-closed {
+  grid-template-columns: 34px minmax(0, 1fr);
+  color: var(--muted);
+}
+.shared-track-closed > span {
+  text-align: center;
 }
 .share-copy {
   display: flex;

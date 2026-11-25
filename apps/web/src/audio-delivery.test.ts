@@ -94,6 +94,17 @@ describe("tab-local audio delivery", () => {
     expect(failure).toHaveBeenCalledWith("denied");
     expect(delivery.response("a", null)).toBeUndefined();
   });
+  it("only promotes owned audio without checking the queue position again", async () => {
+    const delivery = new AudioDelivery(origin().fetcher);
+    const owned = file("owned");
+    const borrowed = { ...file("borrowed"), url: "/api/shared/link/items/b/sources/audio", shared: true };
+    await delivery.prepare(owned);
+    expect(delivery.isPreparedOwnFile(owned)).toBe(true);
+    await delivery.prepare(borrowed);
+    expect(delivery.isPreparedOwnFile(borrowed)).toBe(false);
+    expect(delivery.isPreparedOwnFile(owned)).toBe(false);
+    delivery.clear();
+  });
   it("serves a shared prefix while rechecking access, then drops it on revocation", async () => {
     const server = origin();
     let rejectAccess!: () => void;

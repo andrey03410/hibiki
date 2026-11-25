@@ -1,0 +1,1 @@
+ALTER TABLE "ShareLink" ADD COLUMN "allowReshare" BOOLEAN NOT NULL DEFAULT false;

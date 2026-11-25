@@ -377,8 +377,9 @@ export class AudioDelivery {
     this.state = this.current?.bytes.coverage();
     this.listeners.forEach(listener => listener());
   };
-  isPrepared(file?: AudioFile) {
-    return !!file && this.prepared && this.next?.file.url === file.url && this.next.file.size === file.size;
+  isPreparedOwnFile(file?: AudioFile) {
+    // A buffered shared file still needs current membership at queue selection.
+    return !!file && !file.shared && this.prepared && this.next?.file.url === file.url && this.next.file.size === file.size;
   }
   suspendPreparation() { if (!this.prepared) void this.prepare(); }
   async prepare(file?: AudioFile) {

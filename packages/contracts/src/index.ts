@@ -54,7 +54,7 @@ export interface ItemDto {
   performance?: Performance;
   voices?: Voice[];
   preferredSourceId?: string;
-  shared?: { sharedBy: string; available: boolean };
+  shared?: { sharedBy: string; available: boolean; delegated?: true };
 }
 export type ShareKind = "item" | "playlist";
 export type ShareStatus = "active" | "expired" | "revoked" | "unavailable";
@@ -68,12 +68,18 @@ export interface ShareLinkDto {
   expiresAt: string | null;
   status: ShareStatus;
   trackCount: number | null;
+  totalCount: number | null;
+  allowReshare: boolean;
+  missingPermissionCount: number | null;
+  unavailableCount: number | null;
 }
 export interface SharedViewDto {
   kind: ShareKind;
   title: string;
   sharedBy: string;
   items: ItemDto[];
+  positions: (string | null)[];
+  totalCount: number;
   trackCount: number;
   savedId?: string;
 }
@@ -83,6 +89,7 @@ export interface SavedSharedPlaylistDto {
   sharedBy: string;
   status: ShareStatus;
   trackCount: number | null;
+  totalCount: number | null;
 }
 export type Rule =
   | { type: "items"; ids: string[] }

@@ -443,13 +443,18 @@ export function PlayerProvider({
       seekOnLoad.current = readPosition() ?? live.current.position;
       if (reason === "denied") {
         deniedToken.current = audioToken;
-        finishAttempt("error");
-        playIntent(false);
         element?.pause();
         element?.removeAttribute("src");
         element?.load();
         completedAudio.current = true;
-        setError("Доступ к записи закрыт.");
+        if (file?.shared) {
+          // Permission can change between queue selection and the media request.
+          void sourceError(true);
+        } else {
+          finishAttempt("error");
+          playIntent(false);
+          setError("Доступ к записи закрыт.");
+        }
       } else if (reason === "unsupported" && source) {
         setFailedSources(failed => new Set([...failed, source.id]));
         setError("Звуковая дорожка недоступна. Открываем исходный файл.");
@@ -530,7 +535,7 @@ export function PlayerProvider({
     return mediaKey.current === sourceKey;
   }
   function currentNative(element: HTMLMediaElement) {
-    return currentMedia() && native.current === element;
+    return currentMedia() && native.current === element && !(audioToken && deniedToken.current === audioToken);
   }
   function confirmPosition(position: number, rate?: number) {
     feedback.sample(position, rate);
@@ -651,7 +656,7 @@ export function PlayerProvider({
       toggle();
       return;
     }
-    const guarded = catalog.rechecksPlayback(id) && !preparedSource(id, state.mode);
+    const guarded = catalog.rechecksPlayback(id) && !preparedOwnSource(id, state.mode);
     const item = guarded ? await reloadPlaybackEntry(id, token) : itemsById.get(id);
     if (token !== intent.navigation || !item || live.current.queue !== state.queue) return;
     if (queueEntryUnavailableReason(item, state.mode)) {
@@ -670,7 +675,7 @@ export function PlayerProvider({
     catalog.put(entries);
     let selected: ItemDto | undefined = entries[index];
     if (!selected) return;
-    if (selected.shared && !catalog.isShared(selected.id) && !preparedSource(selected.id, options.fromLibrary ? "audio" : options.mode ?? "original")) {
+    if (selected.shared && !catalog.isShared(selected.id) && !preparedOwnSource(selected.id, options.fromLibrary ? "audio" : options.mode ?? "original")) {
       try {
         selected = await catalog.refreshPlayback(selected.id, isCurrent);
         if (!selected || !isCurrent()) return;
@@ -781,23 +786,23 @@ export function PlayerProvider({
       if (active()) onError((e as Error).message);
     }
   }
-  function preparedSource(id: string | undefined, mode: PlaybackMode) {
+  function preparedOwnSource(id: string | undefined, mode: PlaybackMode) {
     const item = id && itemsById.get(id);
     if (!item || !audioRelayReady()) return false;
     const source = playbackSources(item, mode)[0];
-    return playbackKind(item, source, mode) === "audio" && delivery.isPrepared(ownedAudioFile(source, item.duration));
+    return playbackKind(item, source, mode) === "audio" && delivery.isPreparedOwnFile(ownedAudioFile(source, item.duration));
   }
-  async function advanceTarget(direction: 1 | -1, ended: boolean, retry: () => void, manual = false) {
+  async function advanceTarget(direction: 1 | -1, ended: boolean, retry: () => void, manual = false, excluded = failed.current) {
     const token = manual ? intent.command() : intent.advance();
     const state = live.current;
     const nextIndex = state.queueIndex + direction;
     const index = state.repeat === "all" && !libraryOrder.tail
       ? (nextIndex + state.queue.length) % state.queue.length : nextIndex;
     const id = state.queue[index];
-    if (!(ended && state.repeat === "one") && id && !failed.current.has(id) && preparedSource(id, state.mode))
+    if (!(ended && state.repeat === "one") && id && !excluded.has(id) && preparedOwnSource(id, state.mode))
       return {index, state};
     try {
-      return await catalog.nextInQueue(() => live.current, direction, ended, failed.current, () => token === intent.navigation, () => libraryOrder.tail);
+      return await catalog.nextInQueue(() => live.current, direction, ended, excluded, () => token === intent.navigation, () => libraryOrder.tail);
     } catch (e) {
       if (intent.navigation === token) {
         mediaKey.current = sourceKey;
@@ -842,9 +847,9 @@ export function PlayerProvider({
     if (direction === 1 && index !== state.queueIndex)
       showSkipped(state, (state.queueIndex + 1) % state.queue.length, index);
   }
-  async function sourceError() {
-    if (!currentMedia() || (audioToken && deniedToken.current === audioToken)) return;
-    if (audioToken && native.current?.error) {
+  async function sourceError(accessDenied = false) {
+    if (!currentMedia() || (!accessDenied && audioToken && deniedToken.current === audioToken)) return;
+    if (!accessDenied && audioToken && native.current?.error) {
       seekOnLoad.current = readPosition() ?? live.current.position;
       setDirectAudioKey(audioToken);
       return;
@@ -881,8 +886,8 @@ export function PlayerProvider({
       return;
     }
     finishAttempt("error");
-    if (current) failed.current.add(current.id);
-    const target = await advanceTarget(1, false, () => void sourceError());
+    const excluded = current ? catalog.excludeFailedPlayback(current.id, failed.current) : failed.current;
+    const target = await advanceTarget(1, false, () => void sourceError(accessDenied), false, excluded);
     if (!target) return;
     const {state, index} = target;
     if (index >= 0) playEntry(state, index, "advance", { autoplay: playingRef.current });
@@ -890,8 +895,9 @@ export function PlayerProvider({
       setFailedSources(unsuccessful);
       playIntent(false);
     }
+    const unavailable = entry?.sources.length ? `«${entry.title}» недоступна` : "Запись недоступна";
     setError(index >= 0
-      ? `«${current?.title ?? "Запись"}» недоступна. Переходим к следующей.`
+      ? `${unavailable}. Переходим к следующей.`
       : "В очереди больше нет доступных источников.");
   }
   function positionMedia(position: number, confirmYoutubeRestart = false) {
@@ -1049,7 +1055,7 @@ export function PlayerProvider({
   async function toggle() {
     const token = intent.command();
     if (!current || waitingForVideo) return;
-    if (!playingRef.current && catalog.rechecksPlayback(current.id) && !(source?.shared && file && audioToken)) {
+    if (!playingRef.current && catalog.rechecksPlayback(current.id)) {
       const item = await reloadPlaybackEntry(current.id, token);
       if (!item || token !== intent.navigation) return;
       if (!playbackSources(item, live.current.mode).length) {
