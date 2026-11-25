@@ -831,8 +831,9 @@ export function PlayerProvider({
       setFailedSources(unsuccessful);
       playIntent(false);
     }
+    const unavailable = entry?.sources.length ? `«${entry.title}» недоступна` : "Запись недоступна";
     setError(index >= 0
-      ? `«${current?.title ?? "Запись"}» недоступна. Переходим к следующей.`
+      ? `${unavailable}. Переходим к следующей.`
       : "В очереди больше нет доступных источников.");
   }
   function positionMedia(position: number, confirmYoutubeRestart = false) {

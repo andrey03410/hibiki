@@ -52,6 +52,8 @@ it("scopes borrowed queue positions to the source link even for identical origin
 
 it("rechecks link membership before advancing through the original queue order", async () => {
   const tracks = ["one", "two", "three", "four"].map(audioEntry);
+  tracks[1] = { ...tracks[1]!, title: "Private title", originalTitle: "Private title", duration: 80,
+    shared: { sharedBy: "Original author", available: true, delegated: true } };
   let allowed = tracks;
   const load = vi.fn(async () => allowed);
   const fetch = vi.fn(async (ids: string[]) => ids.map(audioEntry));
@@ -65,9 +67,12 @@ it("rechecks link membership before advancing through the original queue order",
   expect(fetch).not.toHaveBeenCalled();
   expect((await catalog.nextInQueue(() => state, 1, true, new Set(), () => true))?.index).toBe(2);
   expect(load).toHaveBeenCalledTimes(1);
-  expect(catalog.rows.get(rows[1]!.id)?.sources).toEqual([]);
+  const closed = catalog.rows.get(rows[1]!.id);
+  expect(closed).toMatchObject({ title: "Запись недоступна", originalTitle: "", duration: null, sources: [], tags: [] });
+  expect(closed?.shared).toBeUndefined();
   allowed = [tracks[1]!, ...allowed];
   expect((await catalog.nextInQueue(() => state, 1, true, new Set(), () => true))?.index).toBe(1);
+  expect(catalog.rows.get(rows[1]!.id)?.shared?.sharedBy).toBe("Original author");
 });
 
 it("rechecks repeat-one after access to the current track ends", async () => {
