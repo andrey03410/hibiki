@@ -1,7 +1,8 @@
-import { ownerAccess, requireHeavy, release, retain, reserve, kanameEnabled } from "./kaname";
+import { discardReservation } from "./storage-writer";
+import { ownerAccess, requireHeavy, release, retain, reserve, kanameEnabled, startHeavyStorage, finishHeavyStorage } from "./kaname";
 import { MAX_ARCHIVE_UPLOAD_BYTES } from "./upload-policy";
 import { randomUUID } from "node:crypto";
-import { copyFile, mkdir, realpath, rm, lstat } from "node:fs/promises";
+import { copyFile, rename, readdir, mkdir, realpath, rm, lstat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Job, Prisma } from "@prisma/client";
@@ -31,7 +32,8 @@ import {
   inspectArchive,
 } from "./portability.js";
 
-const MAX_ATTEMPTS = 3;
+import { ImportArchives, applications, lockPreview, MAX_ATTEMPTS } from "./import-archives";
+
 const LEASE_MS = 30_000;
 const schemas = {
   "youtube-import": z.object({ url: z.string().max(2000) }).strict(),
@@ -78,12 +80,15 @@ const asObject = (value: string | null): Record<string, any> =>
 export class JobsService {
   private active = new Map<string, AbortController>();
   private stopping = false;
+  private archives: ImportArchives;
+  private nextArchiveRecovery = 0;
   private sharing: ShareService;
   constructor(
     public db: Db,
     public library: LibraryService,
     public storageRoot: string,
   ) {
+    this.archives = new ImportArchives(db, storageRoot);
     this.sharing = new ShareService(db, library);
   }
   async backfillPlayback(signal?: AbortSignal) {
@@ -177,21 +182,25 @@ export class JobsService {
           "Архив больше допустимых 20 GiB",
         );
         const directory = this.directory(id);
-        archiveHold = uploadHold ?? await reserve(this.db, ownerId, stat.size, access);
-        await mkdir(directory, { recursive: true });
         const staged = path.join(directory, "input.zip");
-        await copyFile(archive, staged);
+        archiveHold = await reserve(this.db, ownerId, uploadHold ? 0 : stat.size, access, uploadHold ?? randomUUID(), staged);
+        await mkdir(directory, { recursive: true });
+        if (uploadHold) await rename(archive, staged);
+        else await copyFile(archive, staged);
         parsed.archivePath = staged;
         delete parsed.apply;
       }
       return jobDto(await this.db.$transaction(async tx => {
-        if (access && archiveHold) await tx.kanameStorage.update({ where: { id: archiveHold, ownerId }, data: { id: "job-" + id, expiresAt: null } });
+        if (archiveHold) {
+          await tx.kanameStorage.update({ where: { id: archiveHold, ownerId }, data: { id: "job-" + id } });
+          await retain(tx, "job-" + id);
+        }
         return tx.job.create({ data: { id, ownerId, kind, browserOnly, inputJson: JSON.stringify(parsed) } });
       }));
     } catch (error) {
-      await release(this.db, archiveHold);
       if (kind === "import")
         await rm(this.directory(id), { recursive: true, force: true });
+      if (!uploadHold) await release(this.db, archiveHold);
       throw error;
     }
   }
@@ -250,36 +259,29 @@ export class JobsService {
     return this.get(ownerId, id, browser);
   }
   async applyImport(ownerId: string, previewJobId: string, browser = false): Promise<JobDto> {
-    const preview = await this.owned(ownerId, previewJobId, browser);
-    const input = asObject(preview.inputJson);
-    const result = asObject(preview.resultJson);
-    invariant(
-      preview.kind === "import" &&
-        preview.state === "done" &&
-        !input.apply &&
-        result.preview?.canApply &&
-        result.archiveHash,
-      409,
-      "import_preview_required",
-      "Нужен завершённый безопасный предпросмотр",
-    );
-    const id = randomUUID();
-    return jobDto(
-      await this.db.job.create({
-        data: {
-          id,
-          ownerId,
-          kind: "import",
-          browserOnly: preview.browserOnly,
-          inputJson: JSON.stringify({
-            archivePath: input.archivePath,
-            apply: true,
-            previewJobId,
-            archiveHash: result.archiveHash,
-          }),
-        },
-      }),
-    );
+    return jobDto(await this.db.$transaction(async tx => {
+      await lockPreview(tx, ownerId, previewJobId);
+      const preview = await tx.job.findFirst({ where: { ownerId, id: previewJobId, ...(browser ? {} : { browserOnly: false }) } });
+      invariant(preview, 404, "job_not_found", "Задание не найдено");
+      const input = asObject(preview.inputJson);
+      const result = asObject(preview.resultJson);
+      invariant(preview.kind === "import" && preview.state === "done" && !input.apply &&
+        result.preview?.canApply && result.archiveHash, 409, "import_preview_required", "Нужен завершённый безопасный предпросмотр");
+      const jobs = await applications(tx, ownerId, previewJobId);
+      const existing = jobs.find(job => ["queued", "running"].includes(job.state))
+        ?? (preview.archiveState && jobs.find(job => job.state === "done"));
+      if (existing) return tx.job.findUniqueOrThrow({ where: { id: existing.id } });
+      return tx.job.create({ data: {
+        id: randomUUID(), ownerId, kind: "import", browserOnly: preview.browserOnly,
+        inputJson: JSON.stringify({ archivePath: input.archivePath, apply: true, previewJobId, archiveHash: result.archiveHash }),
+      } });
+    }));
+  }
+  archiveCleanupPreview(ownerId: string) {
+    return this.archives.estimate(ownerId);
+  }
+  cleanupArchives(ownerId: string) {
+    return this.archives.cleanup(ownerId);
   }
   async exportPath(ownerId: string, id: string, browser = false): Promise<string> {
     const job = await this.owned(ownerId, id, browser);
@@ -289,7 +291,7 @@ export class JobsService {
       "export_not_ready",
       "Экспорт ещё не готов",
     );
-    return path.join(this.directory(id), "library.hibiki.zip");
+    return path.join(this.directory(id), asObject(job.resultJson).exportAttempt ? `export-${job.attempt}` : "", "library.hibiki.zip");
   }
   private directory(id: string) {
     return path.join(this.storageRoot, "jobs", id);
@@ -301,6 +303,10 @@ export class JobsService {
   async runOnce(): Promise<boolean> {
     if (this.stopping) return false;
     const now = new Date();
+    if (now.getTime() >= this.nextArchiveRecovery) {
+      this.nextArchiveRecovery = now.getTime() + 60_000;
+      await this.archives.cleanup();
+    }
     await this.db.job.updateMany({
       where: {
         cancelRequested: false,
@@ -432,27 +438,41 @@ export class JobsService {
         throw new Error("Lease задания утрачен");
       }
     };
+    const discardUnpublishedExport = async () => {
+      if (job.kind === "export") {
+        const hold = `export-work-${job.id}-${job.attempt}`;
+        if (await this.db.kanameStorage.findUnique({ where: { id: hold } })) {
+          await rm(path.join(this.directory(job.id), `export-${job.attempt}`), { recursive: true, force: true });
+          await release(this.db, hold);
+        }
+      }
+    };
     try {
       await mkdir(this.directory(job.id), { recursive: true });
       const result = await this.execute(job, controller.signal, save);
       controller.signal.throwIfAborted();
-      await this.db.job.updateMany({
-        where: {
-          id: job.id,
-          state: "running",
-          attempt: job.attempt,
-          cancelRequested: false,
-          leaseUntil: { gt: new Date() },
-        },
-        data: {
-          state: "done",
-          leaseUntil: null,
-          progress: 1,
-          resultJson: JSON.stringify(result),
-          error: null,
-        },
+      const previewId: string | undefined = job.kind === "import" ? asObject(job.inputJson).previewJobId : undefined;
+      await this.db.$transaction(async tx => {
+        const finished = await tx.job.updateMany({
+          where: { id: job.id, state: "running", attempt: job.attempt, cancelRequested: false, leaseUntil: { gt: new Date() } },
+          data: { state: "done", leaseUntil: null, progress: 1, resultJson: JSON.stringify(result), error: null },
+        });
+        if (finished.count && job.kind === "export") {
+          const id = "export-" + job.id;
+          await tx.kanameStorage.update({
+            where: { id: `export-work-${job.id}-${job.attempt}`, ownerId: job.ownerId }, data: { id },
+          });
+          await retain(tx, id);
+        }
+        if (finished.count && previewId) await tx.job.updateMany({
+          where: { id: previewId, ownerId: job.ownerId, archiveState: null },
+          data: { archiveState: "pending" },
+        });
       });
+      await discardUnpublishedExport();
+      if (previewId) await this.archives.remove({ ownerId: job.ownerId, id: previewId }, true);
     } catch (error) {
+      await discardUnpublishedExport();
       const current = await this.db.job.findUnique({ where: { id: job.id } });
       if (current?.state === "running" && current.attempt === job.attempt) {
         const cancelled = current.cancelRequested;
@@ -659,12 +679,14 @@ export class JobsService {
         this.directory(job.id),
         `download-${job.attempt}`,
       );
+      const downloadHold = `download-${job.id}-${job.attempt}`;
       let progress = 0;
       let lastWrite = 0;
       let writing = false;
       let progressError: unknown;
       let progressWrite = Promise.resolve();
       try {
+        await startHeavyStorage(this.db, job.ownerId, access, downloadHold, temporary);
         const file = await downloadYoutube(
           externalId,
           input.mode ?? "video",
@@ -690,6 +712,7 @@ export class JobsService {
             }
           },
         );
+        await finishHeavyStorage(this.db, job.ownerId, downloadHold, temporary);
         await progressWrite;
         if (progressError) throw progressError;
         signal.throwIfAborted();
@@ -709,34 +732,31 @@ export class JobsService {
         return result;
       } finally {
         await progressWrite;
-        await rm(temporary, { recursive: true, force: true });
+        await discardReservation(this.db, job.ownerId, downloadHold);
       }
     }
     if (job.kind === "export") {
-      const id = "export-" + job.id;
-      if (access) await release(this.db, id);
-      try {
-        const output = await exportLibrary(
-          this.db,
-          job.ownerId,
-          this.storageRoot,
-          path.join(this.directory(job.id), "library.hibiki.zip"),
-          {
-            includeFiles: input.includeFiles,
-            storage: access ? { id, access } : undefined,
-            includeNotes: job.browserOnly && input.includeNotes,
-            includeHistorySummary: job.browserOnly && input.includeHistorySummary,
-            signal,
-          },
-        );
-        await retain(this.db, id);
-        await save(output, 1, 1);
-        return output;
-      } catch (error) {
-        await rm(path.join(this.directory(job.id), "library.hibiki.zip"), { force: true });
-        await release(this.db, id);
-        throw error;
+      // Old workers wrote directly in the job directory. New attempts have
+      // separate files and charges even if a paused worker outlives its lease.
+      for (const name of await readdir(this.directory(job.id))) {
+        if (name === "library.hibiki.zip" || (name.startsWith("library.hibiki.zip.") && name.endsWith(".part"))) {
+          await rm(path.join(this.directory(job.id), name));
+        }
       }
+      await this.db.$executeRaw`DELETE FROM KanameStorage WHERE id = ${"export-" + job.id} AND ownerId = ${job.ownerId}
+        AND EXISTS (SELECT 1 FROM Job WHERE id = ${job.id} AND state = 'running' AND attempt = ${job.attempt})`;
+      const id = `export-work-${job.id}-${job.attempt}`;
+      const directory = path.join(this.directory(job.id), `export-${job.attempt}`);
+      const output = await exportLibrary(this.db, job.ownerId, this.storageRoot, path.join(directory, "library.hibiki.zip"), {
+        includeFiles: input.includeFiles,
+        storage: { id, access },
+        includeNotes: job.browserOnly && input.includeNotes,
+        includeHistorySummary: job.browserOnly && input.includeHistorySummary,
+        signal,
+      });
+      const result = { ...output, exportAttempt: job.attempt };
+      await save(result, 1, 1);
+      return result;
     }
     if (job.kind === "import") {
       if (input.apply) {
@@ -760,13 +780,13 @@ export class JobsService {
         this.directory(job.id),
         `inspection-${job.attempt}`,
       );
-      const inspectionHold = randomUUID();
+      const inspectionHold = `inspection-${job.id}-${job.attempt}`;
       try {
         const checked = await inspectArchive(
           input.archivePath,
           workDir,
           signal,
-          async bytes => { await reserve(this.db, job.ownerId, bytes, access, inspectionHold); },
+          async bytes => { await reserve(this.db, job.ownerId, bytes, access, inspectionHold, workDir); },
         );
         invariant(job.browserOnly || !archiveRequiresBrowser(checked.manifest),
           403, "browser_only", "Архив с личными данными или правилами истории импортируется только из браузера");
@@ -843,6 +863,7 @@ export class JobsService {
           this.storageRoot,
           checked,
           signal,
+          inspectionHold,
         );
         await save(applied, 1, 1);
         return applied;

@@ -1,3 +1,5 @@
+import { discardReservation } from "./storage-writer";
+import { accountStorage } from "./account-storage";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
@@ -12,7 +14,7 @@ import { z, ZodError } from "zod";
 import type { UserDto } from "@hibiki/contracts";
 import { librarySearchSchema, itemPatchSchema, playlistDefinitionSchema, tagInputSchema } from "@hibiki/contracts";
 import type { Db } from "./db";
-import { canRunHeavy, env, kanameEnabled, markActivity, meterStorage, ownerAccess, release, requireHeavy } from "./kaname";
+import { canRunHeavy, env, kanameEnabled, markActivity, meterStorage, ownerAccess, requireHeavy } from "./kaname";
 import { registerKaname } from "./kaname-routes";
 import { AuthService } from "./auth";
 import { hydrateLibraryItems, LibraryService } from "./library";
@@ -315,12 +317,12 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
         "archive_required",
         "Выберите архив .zip библиотеки Hibiki",
       );
-      const hold = randomUUID();
+      const hold = "upload-" + randomUUID();
       const temporaryDir = join(dir, hold);
       await mkdir(temporaryDir);
       const tmp = join(temporaryDir, filename);
       try {
-        await pipeline(part.file, meterStorage(db, ownerId, access, hold), createWriteStream(tmp, { flags: "wx" }));
+        await pipeline(part.file, meterStorage(db, ownerId, access, hold, temporaryDir), createWriteStream(tmp, { flags: "wx" }));
         invariant(
           !part.file.truncated,
           413,
@@ -334,12 +336,16 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
           }, browserAccess(request), hold);
         } else
           items.push(
-            (await library.importLocal(ownerId, tmp, { creditId: hold }))
+            (await library.importLocal(ownerId, tmp, { uploadReservation: hold }))
               .item,
           );
       } finally {
-        await rm(temporaryDir, { recursive: true, force: true });
-        await release(db, hold);
+        try {
+          await rm(temporaryDir, { recursive: true, force: true });
+        } finally {
+          // A failed ZIP handoff may have moved the upload into its job directory.
+          await discardReservation(db, ownerId, hold);
+        }
       }
     }
     invariant(
@@ -353,6 +359,14 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
   app.post("/api/items/upload", (request) =>
     receiveUpload(request, request.user!.id),
   );
+  app.get("/api/storage", (request, reply) => {
+    reply.header("Cache-Control", "private, no-store");
+    return accountStorage(jobs, request.user!.id, request.access?.limits.storageBytes ?? null);
+  });
+  app.post("/api/storage/cleanup", (request) => {
+    z.object({ confirm: z.literal(true) }).strict().parse(request.body);
+    return jobs.cleanupArchives(request.user!.id);
+  });
   app.post("/api/imports/upload", (request) =>
     receiveUpload(request, request.user!.id, true),
   );

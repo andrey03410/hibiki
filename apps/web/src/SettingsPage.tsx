@@ -5,6 +5,7 @@ import type { UserDto } from "@hibiki/contracts";
 import { api } from "./api";
 import { Button, ErrorMessage, Modal, PageTop, useData } from "./WorkspaceUi";
 import { KanameSettings } from "./KanameSettings";
+import { StorageSettings } from "./StorageSettings";
 import { YoutubeSyncSettings } from "./YoutubeSync";
 import { HistorySettings } from "./HistorySettings";
 
@@ -61,6 +62,7 @@ export default function SettingsPage({ user, kaname }: { user: UserDto; kaname: 
       </div>
       <div className="settings-layout">
         {kaname && <KanameSettings userId={user.id} />}
+        <StorageSettings key={user.id} />
         <YoutubeSyncSettings />
         <HistorySettings playlists={overview.playlists} revision={overview.revision} />
         <section className="settings-card">

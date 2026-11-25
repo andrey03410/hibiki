@@ -1,7 +1,8 @@
-import { canRunHeavy, ownerAccess, checkItems, requireHeavy, reserve, release } from "./kaname";
+import { canRunHeavy, ownerAccess, checkItems, startHeavyStorage, finishHeavyStorage, requireHeavy, moveReservedFile, reserve, release } from "./kaname";
+import { discardReservation, lockStorage } from "./storage-writer";
 import { randomUUID } from "node:crypto";
 import { rm, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { playbackFields } from "./media-playback";
 import type { Db } from "./db";
 import { Prisma } from "@prisma/client";
@@ -325,7 +326,7 @@ export class LibraryService {
     filePath: string,
     options: {
       title?: string;
-      creditId?: string;
+      uploadReservation?: string;
       itemId?: string;
       signal?: AbortSignal;
       validateAccess?: (tx: Prisma.TransactionClient) => Promise<void>;
@@ -408,30 +409,39 @@ export class LibraryService {
       }
     }
     if (!media.browserCompatible) requireHeavy(access);
-    const prepared = await preparePlayback(
-      filePath,
-      media,
-      join(this.storageRoot, "tmp", "playback"),
-      { signal: options.signal },
-    );
+    const playbackHold = randomUUID();
+    const workDir = join(this.storageRoot, "tmp", "playback", playbackHold);
     const staged = new Map<string, Awaited<ReturnType<typeof stageMediaCopy>>>();
-    let reservation: string | undefined;
+    const reservation = randomUUID();
+    let committed = false;
     try {
+      if (!media.browserCompatible) await startHeavyStorage(this.db, ownerId, access, playbackHold, workDir);
+      const prepared = await preparePlayback(filePath, media, workDir, { signal: options.signal });
+      if (prepared) await finishHeavyStorage(this.db, ownerId, playbackHold, workDir);
       const candidates = [{ path: filePath, media }, ...(prepared ? [prepared] : [])];
-      let bytes = 0;
-      const missing = [];
       for (const candidate of candidates) {
-        const hash = candidate.media.hash;
-        const known = await this.db.mediaFile.findUnique({ where: { ownerId_hash: { ownerId, hash } } });
-        if (!known || known.path.startsWith("missing/")) bytes += candidate.media.bytes;
-        if (!(await fileIntact(known))) missing.push(candidate);
+        const info = candidate.media;
+        if (staged.has(info.hash)) continue;
+        const known = await this.db.mediaFile.findUnique({ where: { ownerId_hash: { ownerId, hash: info.hash } } });
+        if (await fileIntact(known)) continue;
+        const transferred = candidate.path === prepared?.path ? playbackHold : options.uploadReservation;
+        let move = false;
+        if (transferred) {
+          const hold = await this.db.kanameStorage.findFirst({ where: { id: transferred, ownerId, bytes: BigInt(info.bytes) } });
+          const full = resolve(candidate.path);
+          const paths: string[] = JSON.parse(hold?.workPaths ?? "[]");
+          move = !!hold && (paths.some(name => {
+            const path = storagePath(this.storageRoot, name);
+            return full === path || full.startsWith(path + sep);
+          }) || (!!options.itemId && transferred.startsWith("stage-") && !!await this.db.sourceProposal.count({
+            where: { id: transferred.slice(6), ownerId, itemId: options.itemId,
+              stagedPath: relative(resolve(this.storageRoot), full), status: "applying" },
+          })));
+        }
+        staged.set(info.hash, await stageMediaCopy(this.storageRoot, ownerId, info.hash, info.ext, candidate.path,
+          info.bytes, (paths, bytes) => reserve(this.db, ownerId, bytes, access, reservation, paths),
+          move ? rename => moveReservedFile(this.db, ownerId, info.bytes, transferred!, reservation, rename) : undefined));
       }
-      if (access) {
-        const credit = options.creditId && await this.db.kanameStorage.findFirst({ where: { id: options.creditId, ownerId } });
-        reservation = await reserve(this.db, ownerId, Math.max(0, bytes - Number(credit ? credit.bytes : 0)), access);
-      }
-      for (const { path, media: info } of missing)
-        staged.set(info.hash, await stageMediaCopy(this.storageRoot, ownerId, info.hash, info.ext, path));
       access = await ownerAccess(this.db, ownerId);
       if (prepared) requireHeavy(access);
       invariant(!options.applyReplacement || prepared || media.browserCompatible,
@@ -439,6 +449,7 @@ export class LibraryService {
       const title = (options.title?.trim() || media.title).slice(0, 500);
       const validateAccess = await options.prepareValidateAccess?.() ?? options.validateAccess;
       const result = await this.db.$transaction(async (tx) => {
+        await lockStorage(tx);
         // Re-check under the write transaction: parallel imports may finish probing together.
         const currentCanonical = await tx.source.findUnique({
           where: { ownerId_key: { ownerId, key: canonicalKey } },
@@ -460,8 +471,8 @@ export class LibraryService {
           });
           const copy = staged.get(info.hash);
           if (copy) {
-            await copy.publish();
-            const path = copy.path;
+            const path = file && !file.path.startsWith("missing/") ? file.path : copy.path;
+            await copy.publish(storagePath(this.storageRoot, path));
             file = await tx.mediaFile.upsert({
               where: { ownerId_hash: { ownerId, hash: info.hash } },
               create: {
@@ -568,17 +579,23 @@ export class LibraryService {
         }
         if (options.applyReplacement) await options.applyReplacement(tx, preferredSource.id);
         options.signal?.throwIfAborted();
+        if (staged.get(media.hash)?.moved) await release(tx, options.uploadReservation);
+        if (prepared && staged.get(prepared.media.hash)?.moved) await release(tx, playbackHold);
         await release(tx, reservation);
         return { itemId, reused };
       }, { timeout: 120000 });
+      committed = true;
       return {
         item: await this.getItem(ownerId, result.itemId),
         reused: result.reused,
       };
     } finally {
-      await Promise.all([...staged.values()].map(copy => copy.discard()));
-      await release(this.db, reservation);
-      if (prepared) await rm(prepared.path, { force: true });
+      try {
+        if (!committed) await discardReservation(this.db, ownerId, reservation);
+      } finally {
+        await discardReservation(this.db, ownerId, playbackHold);
+        if (!media.browserCompatible) await rm(workDir, { recursive: true, force: true });
+      }
     }
   }
   async upsertYoutube(

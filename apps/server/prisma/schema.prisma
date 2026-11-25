@@ -194,6 +194,8 @@ model Job {
   leaseUntil DateTime?
   cancelRequested Boolean @default(false)
   browserOnly Boolean @default(false)
+  archiveState String?
+  @@index([archiveState])
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
@@ -333,6 +335,9 @@ model KanameActivity {
 }
 
 model KanameStorage {
+  writer String?
+  workPaths String?
+  measureOnDisk Boolean @default(false)
   id String @id
   ownerId String
   bytes BigInt

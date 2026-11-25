@@ -37,7 +37,7 @@ export function KanameSettings({ userId, adminPage = false }: { userId: string; 
     {account && <>
       <p>{roleNames[account.role]} Hibiki</p>
       <p>Записи: {account.usage.counts.items}{account.limits.items === null ? " · без ограничения" : " из " + account.limits.items}</p>
-      <p>Хранилище: {formatGB(account.usage.storageBytes)}{account.limits.storageBytes === null ? " · без ограничения" : " из " + formatGB(account.limits.storageBytes)}</p>
+      {adminPage && <p>Хранилище: {formatGB(account.usage.storageBytes)}{account.limits.storageBytes === null ? " · без ограничения" : " из " + formatGB(account.limits.storageBytes)}</p>}
       <a href={account.portal}>Личный кабинет Kaname ↗</a>
     </>}
     {admin && <details open={adminPage || undefined}><summary>Управление Hibiki</summary>

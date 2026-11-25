@@ -1,7 +1,8 @@
-import { ownerAccess, checkItems, reserve, release, meterStorage, type Access } from "./kaname";
+import { lockStorage, discardReservation } from "./storage-writer";
+import { ownerAccess, checkItems, moveReservedFile, reserve, release, meterStorage, type Access } from "./kaname";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, constants } from "node:fs";
-import { copyFile, lstat, mkdir, realpath, rm } from "node:fs/promises";
+import { copyFile, lstat, mkdir, realpath, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform, type Readable } from "node:stream";
@@ -288,7 +289,7 @@ export async function exportLibrary(
     includeFiles: boolean;
     includeNotes?: boolean;
     includeHistorySummary?: boolean;
-    storage?: { id: string; access: Access };
+    storage?: { id: string; access: Access | null };
     signal?: AbortSignal;
   },
 ): Promise<{ counts: ImportPreview["counts"]; missingFiles: string[] }> {
@@ -447,13 +448,12 @@ export async function exportLibrary(
         archive.addFile(entries.get(file.id)!, file.path, { compress: false });
     const complete = pipeline(
       archive.outputStream,
-      meterStorage(db, ownerId, options.storage?.access ?? null, options.storage?.id ?? ""),
+      meterStorage(db, ownerId, options.storage?.access ?? null, options.storage?.id ?? "", [temporary, destination]),
       createWriteStream(temporary, { flags: "wx" }),
       { signal: options.signal },
     );
     archive.end();
     await complete;
-    const { rename } = await import("node:fs/promises");
     await rename(temporary, destination);
   } catch (error) {
     await rm(temporary, { force: true });
@@ -974,6 +974,7 @@ export async function applyArchive(
   storageRoot: string,
   checked: CheckedArchive,
   signal?: AbortSignal,
+  inspectionHold?: string,
 ): Promise<{ added: number; reused: number; missingFiles: string[] }> {
   const access = await ownerAccess(db, ownerId);
   const manifest = validateManifest(checked.manifest);
@@ -1004,6 +1005,10 @@ export async function applyArchive(
     }
   >();
   const reservation = randomUUID();
+  const directory = path.join("imported", ownerId, reservation);
+  const inspection = inspectionHold && await db.kanameStorage.findFirst({ where: { ownerId, id: inspectionHold, expiresAt: { not: null } } });
+  const inspectionDirs: string[] = JSON.parse(inspection && inspection.workPaths || "[]");
+  let movedBytes = 0;
   try {
     // Copy and checksum large bytes before opening the SQLite write transaction.
     for (const file of manifest.files) {
@@ -1028,16 +1033,24 @@ export async function applyArchive(
         copied: undefined as string | undefined,
       };
       if (!usable && file.included) {
-        if (!existing || existing.path.startsWith("missing/")) await reserve(db, ownerId, file.bytes, access, reservation);
-        const relative = `imported/${ownerId}/${randomUUID()}${path.extname(file.path)}`;
+        const relative = path.join(directory, randomUUID() + path.extname(file.path));
         const destination = path.join(storageRoot, relative);
-        await mkdir(path.dirname(destination), { recursive: true });
-        await copyFile(
-          checked.files.get(file.path)!.path,
-          destination,
-          constants.COPYFILE_EXCL,
-        );
+        const source = checked.files.get(file.path)!.path;
+        const move = !!inspection && movedBytes + file.bytes <= Number(inspection.bytes)
+          && inspectionDirs.includes(path.relative(storageRoot, path.dirname(source)));
+        await reserve(db, ownerId, move ? 0 : file.bytes, access, reservation, path.join(storageRoot, directory));
         cleanup.push(destination);
+        await mkdir(path.dirname(destination), { recursive: true });
+        if (move) {
+          try {
+            await moveReservedFile(db, ownerId, file.bytes, inspectionHold!, reservation, () => rename(source, destination));
+            movedBytes += file.bytes;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+            await reserve(db, ownerId, file.bytes, access, reservation);
+            await copyFile(source, destination, constants.COPYFILE_EXCL);
+          }
+        } else await copyFile(source, destination, constants.COPYFILE_EXCL);
         plan.relative = relative;
         plan.usable = true;
         plan.copied = destination;
@@ -1047,6 +1060,7 @@ export async function applyArchive(
     const usedPaths = new Set<string>();
     const result = await db.$transaction(
       async (tx) => {
+        await lockStorage(tx);
         const maps = {
           items: new Map<string, string>(),
           tags: new Map<string, string>(),
@@ -1409,21 +1423,23 @@ export async function applyArchive(
           update: { json: JSON.stringify(settings) },
         });
         signal?.throwIfAborted();
+        // Parallel imports may publish the same hash. Delete losing copies while
+        // their reservation is still held, before committing the winning files.
+        for (const file of cleanup)
+          if (!usedPaths.has(file)) await rm(file, { force: true });
+        for (const plan of prepared.values()) {
+          if (!plan.copied || !usedPaths.has(plan.copied) || !plan.previousPath || plan.previousPath.startsWith("missing/")) continue;
+          if (!await tx.mediaFile.count({ where: { ownerId, path: plan.previousPath } }))
+            await storagePath(storageRoot, plan.previousPath).then(file => rm(file, { force: true })).catch(error => { if (error.code !== "ENOENT") throw error; });
+        }
         await release(tx, reservation);
         return { added, reused, missingFiles: checked.preview.missingFiles };
       },
       { timeout: 120000 },
     );
-    await Promise.all(
-      cleanup
-        .filter((file) => !usedPaths.has(file))
-        .map((file) => rm(file, { force: true }).catch(() => {})),
-    );
     return result;
   } catch (error) {
-    await Promise.all(cleanup.map((file) => rm(file, { force: true })));
+    await discardReservation(db, ownerId, reservation);
     throw error;
-  } finally {
-    await release(db, reservation);
   }
 }
