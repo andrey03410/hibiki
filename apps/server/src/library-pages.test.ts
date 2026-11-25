@@ -686,7 +686,7 @@ it("stops the current text search between batches when its HTTP client disconnec
   const transaction = new Promise<string>(resolve => { finish = resolve; });
   let batches = 0;
   db.$on("query", event => {
-    if (event.query.includes(" AS text FROM Item i")) {
+    if (event.query.includes(" AS assigned FROM Item i")) {
       batches++;
       if (batches === 1) controller.abort();
     }
@@ -746,4 +746,30 @@ it("reuses counts across tag choices and sends compact cards with playback metad
   expect(cardPage.items[0].sources[0]).not.toHaveProperty("fileId");
   const narrowed = (await post("page", {filters:{query:"absent"},cards:true,countsKey:first.countsKey})).json();
   expect(narrowed.tagCounts).toEqual({tag:0});
+});
+
+it("reconstructs the compact directory and its indexed counts including legacy and archived tags", async () => {
+  await ctx.db.tag.createMany({data:[
+    {id:"old", ownerId:ctx.userId, name:"Архив", archived:true},
+    {id:"p", ownerId:ctx.userId, name:"Студия", group:"source", aliases:JSON.stringify(["Мастерская"])},
+    {id:"c", ownerId:ctx.userId, name:"Работа", group:"source", parentIds:JSON.stringify(["p","old"]), legacyFlat:true},
+    {id:"unused", ownerId:ctx.userId, name:"Не используется"},
+    {id:"foreign", ownerId:ctx.otherUserId, name:"Чужой"},
+  ]});
+  await ctx.db.item.create({data:{...track("song"),tags:{create:{tagId:"c"}}}});
+  const full = (await overview()).json();
+  const result = await app.inject({url:"/api/library/overview?playlists=summary&format=compact",headers:{cookie}});
+  const compact = result.json();
+  expect(compact.directory).toHaveLength(3);
+  const {validateOverview} = await import("../../web/src/library-pages");
+  expect(validateOverview(compact)).toEqual(full);
+  expect(compact.archivedTagNames).toEqual({old:"Архив"});
+  const body = {filters:{query:"мастЕрскАЯ"}, cards:true, indexedCounts:true, tagRevision:full.revision};
+  const page = (await post("page",body)).json();
+  expect(page.items.map((item: {id:string}) => item.id)).toEqual(["song"]);
+  expect(page.countsByIndex).toEqual(full.tags.map((tag:{id:string}) => full.tagCounts[tag.id]));
+  expect(page.tagCounts).toBeUndefined();
+  const stale = (await post("page",{...body,tagRevision:"stale"})).json();
+  expect(stale.tagCounts).toEqual(full.tagCounts);
+  expect(stale.countsByIndex).toBeUndefined();
 });

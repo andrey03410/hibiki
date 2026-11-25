@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { shuffle } from "@hibiki/core";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
-import { browserLibrarySearchSchema, playlistDefinitionSchema, type BrowserLibrarySearch, type LibrarySearch, type LibraryCardOverviewDto, type ItemDto, type LibraryCardDto } from "@hibiki/contracts";
+import { browserLibrarySearchSchema, playlistDefinitionSchema, type BrowserLibrarySearch, type LibrarySearch, type CompactLibraryOverviewDto, type LibraryDirectoryRow, type LibraryCardOverviewDto, type ItemDto, type LibraryCardDto } from "@hibiki/contracts";
 import type { Db } from "./db";
 import { invariant } from "./errors";
 import { hydrateLibraryItems, jobDto, type LibraryService } from "./library";
@@ -20,7 +20,7 @@ const searchInput = z.object({
   selectionId: z.string().min(1).max(100).optional(),
 });
 const pageInput = searchInput.extend({ cursor: z.string().max(100).optional(), countsKey: z.string().max(100).optional(),
-  cards: z.boolean().optional(), picker: z.boolean().optional(), tagRevision: z.string().max(100).optional() });
+  cards: z.boolean().optional(), indexedCounts: z.boolean().optional(), picker: z.boolean().optional(), tagRevision: z.string().max(100).optional() });
 type SearchInput = z.infer<typeof pageInput>;
 type Tx = Prisma.TransactionClient;
 
@@ -69,6 +69,18 @@ async function overview(tx: Tx, ownerId: string, cardsOnly: boolean, current: st
     tagCounts: counts,
     revision: current, overviewToken, countsKey: facetToken(ownerId, current, browserLibrarySearchSchema.parse({})),
   };
+}
+
+function compactOverview(value: LibraryCardOverviewDto, indexes: Map<string, number>): CompactLibraryOverviewDto {
+  const {tags, tagCounts, ...summary} = value;
+  const directory = tags.map(tag => {
+    const row: LibraryDirectoryRow = [tag.id, tag.name, tag.color, tag.group!, tagCounts[tag.id]!];
+    if (tag.aliases?.length) row[5] = tag.aliases;
+    if (tag.parentIds?.length) row[6] = tag.parentIds.map(id => indexes.get(id) ?? id);
+    if (tag.legacyFlat) row[7] = true;
+    return row;
+  });
+  return {...summary, directory};
 }
 
 function durationBound(value: string) {
@@ -256,26 +268,36 @@ async function matchingKeys(tx: Tx, ownerId: string, where: Prisma.Sql, search: 
   const notes = browser ? Prisma.sql`coalesce(i.note, '') || ' ' || coalesce((
     SELECT group_concat(s.note, ' ') FROM Source s WHERE ${ownedSource}
   ), '')` : Prisma.sql`''`;
-  const searchText = words.length ? Prisma.sql`
-    i.originalTitle || ' ' || ${notes} || ' ' || coalesce((
-      SELECT group_concat(c.label || ' ' || coalesce((SELECT group_concat(value, ' ') FROM json_each(c.aliases)), ''), ' ')
-      FROM ItemTag it JOIN ancestry a ON a.descendant = it.tagId JOIN catalog c ON c.id = a.ancestor
-      WHERE it.itemId = i.id
-    ), '')` : Prisma.sql`NULL`;
+  // Resolve each assigned tag's name, aliases and inherited labels once. A
+  // correlated ancestry join per item repeats this work for the whole catalog.
+  const tagLabels = words.length ? await tx.$queryRaw<{id: string; labels: string}[]>(Prisma.sql`
+    ${catalogCte(ownerId)}
+    SELECT a.descendant AS id, group_concat(c.label || ' ' || coalesce((
+      SELECT group_concat(value, ' ') FROM json_each(c.aliases)), ''), ' ') AS labels
+    FROM ancestry a JOIN catalog c ON c.id = a.ancestor GROUP BY a.descendant
+  `) : [];
+  const labels = new Map(tagLabels.map(row => [row.id, row.labels.toLocaleLowerCase()]));
+  const fields = words.length ? Prisma.sql`i.originalTitle || ' ' || ${notes} AS text,
+    (SELECT json_group_array(it.tagId) FROM ItemTag it WHERE it.itemId = i.id) AS assigned`
+    : Prisma.sql`NULL AS text, NULL AS assigned`;
   const keys: SortKey[] = [];
   let after = "";
   const take = 256;
   for (;;) {
     signal?.throwIfAborted();
-    const rows = await tx.$queryRaw<(SortKey & { text: string | null })[]>(Prisma.sql`
+    const rows = await tx.$queryRaw<(SortKey & { text: string | null; assigned: string | null })[]>(Prisma.sql`
       ${catalogCte(ownerId)}
-      SELECT i.id, i.title, i.duration, i.createdAt, ${searchText} AS text FROM Item i
+      SELECT i.id, i.title, i.duration, i.createdAt, ${fields} FROM Item i
       WHERE ${where} AND i.id > ${after} ORDER BY i.id LIMIT ${take}
     `);
     for (const row of rows) {
       if (row.text !== null) {
         const text = (row.title + " " + row.text).toLocaleLowerCase();
-        if (!words.every((word) => text.includes(word))) continue;
+        const remaining = words.filter(word => !text.includes(word));
+        if (remaining.length) {
+          const assigned: string[] = JSON.parse(row.assigned!);
+          if (!remaining.every(word => assigned.some(id => labels.get(id)?.includes(word)))) continue;
+        }
       }
       keys.push({ id: row.id, title: row.title, duration: row.duration, createdAt: row.createdAt });
     }
@@ -418,6 +440,7 @@ async function whileConnected<T>(reply: FastifyReply, run: (signal: AbortSignal)
 
 export function registerLibraryPages(app: FastifyInstance, db: Db, library: LibraryService) {
   const selections = new Map<string, string[]>();
+  let retainedSelectionIds = 0;
   const tagDirectories = new Map<string, { revision: string; indexes: Map<string, number> }>();
   const countsCache = new Map<string, Record<string, number>>();
   const snapshots = new LibrarySelections();
@@ -452,14 +475,17 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
       }
       // Recent selections freeze history separately from library mutations.
       const token = search.sort === "recent" ? countsKey + "." + selectionId : countsKey;
+      const directory = tagDirectories.get(ownerId);
+      const indexes = directory?.revision === current && input.tagRevision === current ? directory.indexes : undefined;
+      const indexed = input.cards && input.indexedCounts && indexes && tagCounts;
       const counts = offset > 0 ? {} : token === input.countsKey
-        ? { countsKey: token, countsUnchanged: true } : { countsKey: token, tagCounts };
+        ? { countsKey: token, countsUnchanged: true }
+        : indexed ? { countsKey: token, countsByIndex: Array.from(indexes.keys(), id => tagCounts[id] ?? 0) }
+        : { countsKey: token, tagCounts };
       const items = await hydrateLibraryItems(tx, ownerId, ids, true, library);
       const pageInfo = { total, ...counts, selectionId, nextCursor };
       if (!input.cards) return { ...pageInfo, items };
       const tags = new Map<string, ItemDto["tags"][number]>();
-      const directory = tagDirectories.get(ownerId);
-      const indexes = directory?.revision === current && input.tagRevision === current ? directory.indexes : undefined;
       const cards: LibraryCardDto[] = items.map(({tags: assigned, originalTitle, updatedAt, ...item}) => {
         for (const tag of assigned) {
           if (tag.archived || input.tagRevision !== current) tags.set(tag.id, tag);
@@ -509,8 +535,15 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
       if (frozen) {
         selectionId = snapshots.add({ key, revision: current, ids: all, tagCounts: tagCounts! });
       } else if (all.length <= 100_000) {
-        if (selections.size >= 4) selections.delete(selections.keys().next().value!);
+        // Short text matches consume very few IDs. Keep recent queries across
+        // successive track searches while preserving the original total ID budget.
+        while (selections.size >= 32 || retainedSelectionIds + all.length > 400_000) {
+          const oldest = selections.keys().next().value!;
+          retainedSelectionIds -= selections.get(oldest)!.length;
+          selections.delete(oldest);
+        }
         selections.set(cacheKey, all);
+        retainedSelectionIds += all.length;
       }
     }
 
@@ -525,7 +558,7 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
     return page(ids, Number(count.total), tagCounts);
   }
 
-  app.get<{ Querystring: { playlists?: string; since?: string } }>("/api/library/overview", async (request, reply) => {
+  app.get<{ Querystring: { playlists?: string; since?: string; format?: string } }>("/api/library/overview", async (request, reply) => {
     const ownerId = browserOwner(request, reply);
     const cardsOnly = request.query.playlists === "summary";
     const result = await db.$transaction(async tx => {
@@ -539,7 +572,7 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
       if (tagDirectories.size >= 8) tagDirectories.delete(tagDirectories.keys().next().value!);
       tagDirectories.set(ownerId, {revision: result.revision, indexes: new Map(result.tags.map((tag, index) => [tag.id, index]))});
     }
-    return result;
+    return cardsOnly && request.query.format === "compact" ? compactOverview(result, tagDirectories.get(ownerId)!.indexes) : result;
   });
   app.post("/api/library/page", (request, reply) => {
     const ownerId = browserOwner(request, reply);

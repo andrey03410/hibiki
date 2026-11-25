@@ -150,3 +150,9 @@ it("recovers the full queue from a new first page when its original snapshot exp
   expect(ids.mock.calls).toEqual([["expired"], ["fresh"]]);
   expect(pages.snapshot()).toMatchObject({ selectionId: "fresh", items: rows(400, 100) });
 });
+
+it("dispatches a pasted or replaced search immediately", () => {
+  const read = vi.fn().mockResolvedValue(first);
+  new LibraryPages(read).open({...defaultLibrarySearch,query:"Название записи"}, {...defaultLibrarySearch,query:"Другая запись"});
+  expect(read).toHaveBeenCalledTimes(1);
+});

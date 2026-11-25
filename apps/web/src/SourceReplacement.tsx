@@ -19,19 +19,29 @@ interface Props {
   item: Pick<ItemDto, "id">;
   reload: () => void | Promise<void>;
   localOnly?: boolean;
+  focusSource?: boolean;
 }
 
 async function listProposals(path: string) {
   return (await api<{ proposals: Proposal[] }>(path)).proposals;
 }
 
-export function SourceReplacement({ item, reload, localOnly }: Props) {
-  return <ReplacementForm key={item.id} item={item} reload={reload} localOnly={localOnly} />;
+export function SourceReplacement(props: Props) {
+  return <ReplacementForm key={props.item.id} {...props} />;
 }
 
-function ReplacementForm({ item, reload, localOnly }: Props) {
+function ReplacementForm({ item, reload, localOnly, focusSource }: Props) {
   const path = `/items/${encodeURIComponent(item.id)}/replacements`;
   const headingId = useId();
+  const section = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!focusSource) return;
+    const frame = requestAnimationFrame(() => {
+      section.current?.scrollIntoView({block: "start"});
+      section.current?.querySelector("input")?.focus({preventScroll: true});
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusSource]);
   const fileInput = useRef<HTMLInputElement>(null);
   const [url, setUrl] = useState("");
   const [file, setFile] = useState<File>();
@@ -112,7 +122,7 @@ function ReplacementForm({ item, reload, localOnly }: Props) {
   }
 
   return (
-    <section className="source-replacement" aria-labelledby={headingId} aria-busy={busy}>
+    <section ref={section} className="source-replacement" aria-labelledby={headingId} aria-busy={busy}>
       <h3 id={headingId}>{localOnly ? "Добавить свой файл" : "Заменить источник"}</h3>
       {!localOnly && <div className="source-replacement-input">
         <label>

@@ -1,4 +1,4 @@
-import type { ItemDto, LibraryCardPageDto, LibraryPageDto, LibraryCardOverviewDto } from "@hibiki/contracts";
+import type { CompactLibraryOverviewDto, ItemDto, LibraryCardPageDto, LibraryPageDto, LibraryCardOverviewDto } from "@hibiki/contracts";
 import { api, ApiError } from "./api";
 import type { LibrarySearch } from "./library-search";
 
@@ -16,18 +16,43 @@ export class LibraryCardReader {
   async page(filters: LibrarySearch, overview: LibraryCardOverviewDto, cursor: string | undefined, signal: AbortSignal, selectionId?: string): Promise<LibraryPageDto> {
     const previous = this.last ?? { key: overview.countsKey, counts: overview.tagCounts };
     const page = await api<LibraryCardPageDto>("/library/page", "POST", {
-      ...searchBody(filters, selectionId), cursor, cards: true, tagRevision: overview.revision, countsKey: previous.key,
-    }, undefined, signal);
+      ...searchBody(filters, selectionId), cursor, cards: true, indexedCounts: true, tagRevision: overview.revision, countsKey: previous.key,
+    }, "high", signal);
     const tags = new Map([...overview.tags, ...page.tags].map(tag => [tag.id, tag]));
     const items = page.items.map(({tagRefs, ...card}) => ({ ...card, updatedAt: card.updatedAt ?? card.createdAt,
       originalTitle: card.originalTitle ?? card.title, tags: tagRefs.map(ref => typeof ref === "number" ? overview.tags[ref]! : tags.get(ref)!) }));
-    const counts = page.countsUnchanged ? previous.counts : page.tagCounts;
+    if (page.countsByIndex && (page.countsByIndex.length !== overview.tags.length
+      || !page.countsByIndex.every(count => Number.isSafeInteger(count) && count >= 0))) {
+      throw new ApiError("BAD_RESPONSE", "Не удалось прочитать счётчики тегов.");
+    }
+    const counts = page.countsUnchanged ? previous.counts : page.countsByIndex
+      ? Object.fromEntries(overview.tags.map((tag, i) => [tag.id, page.countsByIndex![i]])) : page.tagCounts;
     if (counts && page.countsKey) this.last = {key: page.countsKey, counts};
     return {...page, items, tagCounts: counts};
   }
 }
 
-export function validateOverview(value: LibraryCardOverviewDto): LibraryCardOverviewDto {
+export function validateOverview(value: LibraryCardOverviewDto | CompactLibraryOverviewDto): LibraryCardOverviewDto {
+  if (value && "directory" in value) {
+    const {directory, ...summary} = value;
+    const invalid = () => new ApiError("BAD_RESPONSE", "Не удалось прочитать сводку медиатеки.");
+    if (!Array.isArray(directory)) throw invalid();
+    const tags = directory.map(row => {
+      if (!Array.isArray(row)) throw invalid();
+      const [id, name, color, group, count, aliases, parents, legacyFlat] = row;
+      if (typeof id !== "string" || typeof name !== "string" || typeof color !== "string"
+        || !["source","artist","genre","mood","extra"].includes(group) || !Number.isSafeInteger(count) || count < 0
+        || (aliases != null && (!Array.isArray(aliases) || !aliases.every(a => typeof a === "string")))
+        || (parents != null && !Array.isArray(parents)) || (legacyFlat != null && legacyFlat !== true)) throw invalid();
+      const parentIds = (parents ?? []).map(ref => {
+        if (typeof ref === "string") return ref;
+        if (!Number.isInteger(ref) || typeof directory[ref]?.[0] !== "string") throw invalid();
+        return directory[ref]![0];
+      });
+      return {id, name, color, group, aliases: aliases ?? [], parentIds, archived: false, ...(legacyFlat && {legacyFlat})};
+    });
+    value = {...summary, tags, tagCounts: Object.fromEntries(directory.map(row => [row[0], row[4]]))};
+  }
   if (!value || typeof value.revision !== "string" || typeof value.overviewToken !== "string"
     || !Number.isSafeInteger(value.total) || !value.tagCounts || Array.isArray(value.tagCounts) || typeof value.tagCounts !== "object"
     || !Array.isArray(value.tags) || !value.tags.every(tag => tag && typeof tag.id === "string" && typeof tag.name === "string")
@@ -71,7 +96,10 @@ export class LibraryPages {
     this.controller = undefined;
   };
   open(filters: LibrarySearch, previous?: LibrarySearch) {
-    if (previous && filters.query.trim() && previous.query !== filters.query) {
+    // Debounce typing. A paste, full-title replacement or clear is ready to submit.
+    const singleEdit = previous && (filters.query.length === previous.query.length + 1 && filters.query.startsWith(previous.query)
+      || previous.query.length === filters.query.length + 1 && previous.query.startsWith(filters.query));
+    if (singleEdit && filters.query.trim()) {
       this.cancel();
       this.timer = setTimeout(() => void this.refresh(), 150);
     } else if (this.state.selectionId) {
