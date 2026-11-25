@@ -8,7 +8,7 @@ import { z } from "zod";
 import { parseFromTokenizer } from "music-metadata";
 import { fromFile } from "strtok3";
 import type { Db } from "./db";
-import { invariant } from "./errors";
+import { HttpError, invariant } from "./errors";
 import { storagePath } from "./media";
 
 const maxArtworkBytes = 5 * 1024 ** 2;
@@ -52,6 +52,8 @@ function imageMime(bytes: Buffer): Artwork["mime"] | undefined {
 
 async function readArtwork(path: string): Promise<Artwork | undefined> {
   let tokenizer: Awaited<ReturnType<typeof fromFile>> | undefined;
+  let readFailed = false;
+  const ioError = (error: unknown) => error instanceof Error && typeof (error as NodeJS.ErrnoException).syscall === "string";
   try {
     tokenizer = await fromFile(path, {
       regularFileOnly: true,
@@ -78,7 +80,11 @@ async function readArtwork(path: string): Promise<Artwork | undefined> {
           throw new Error("Artwork metadata extraction budget exceeded");
         }
         metadataBytes += length;
-        return read(buffer, options);
+        try { return await read(buffer, options); }
+        catch (error) {
+          if (ioError(error)) readFailed = true;
+          throw error;
+        }
       };
     }
     const metadata = await parseFromTokenizer(tokenizer, {
@@ -87,6 +93,7 @@ async function readArtwork(path: string): Promise<Artwork | undefined> {
       maxMetadataEntries: 128,
     });
     // Some format parsers recover from read errors with partial metadata.
+    if (readFailed) throw new HttpError(503, "artwork_read_failed", "Временно не удалось прочитать обложку");
     if (budgetExceeded) return undefined;
     const pictures = [...(metadata.common.picture ?? [])].sort(
       (a, b) =>
@@ -98,8 +105,9 @@ async function readArtwork(path: string): Promise<Artwork | undefined> {
       const mime = imageMime(bytes);
       if (mime) return { bytes, mime };
     }
-  } catch {
-    // Missing, malformed and oversized metadata all use the player's fallback.
+  } catch (error) {
+    if (readFailed || ioError(error)) throw new HttpError(503, "artwork_read_failed", "Временно не удалось прочитать обложку");
+    // Malformed or oversized metadata uses the player’s fallback.
   } finally {
     await tokenizer?.close();
   }

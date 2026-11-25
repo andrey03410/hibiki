@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, writeFile, rm } from "node:fs/promises";
@@ -10,6 +10,8 @@ import { pruneArtworkCache } from "./artwork";
 import { testContext } from "./test-utils";
 import { exportLibrary, inspectArchive, applyArchive } from "./portability";
 import { storagePath } from "./media";
+
+vi.mock("strtok3", { spy: true });
 
 const png = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0ZkAAAAASUVORK5CYII=",
@@ -101,6 +103,17 @@ describe("embedded audio artwork", () => {
   const get = (url: string) =>
     app.inject({ url, cookies: { hibiki_session: cookie } });
 
+  it("retries a transient read failure without persisting a missing image", async () => {
+    const item = await importCover(png);
+    const tokenizer = await import("strtok3");
+    const open = vi.mocked(tokenizer.fromFile).mockRejectedValueOnce(
+      Object.assign(new Error("temporary read failure"), {code: "EIO", syscall: "open"}));
+    try {
+      const url = artworkUrl(item.id) + "?size=thumb";
+      expect((await get(url)).statusCode).toBe(503);
+      expect((await get(url)).statusCode).toBe(200);
+    } finally { open.mockClear(); }
+  });
   it("reuses a disk rendition after restarting and validates its version before allowing immutable HTTP caching", async () => {
     const item = await importCover(png);
     const file = item.sources.find(s => s.hash)!;
