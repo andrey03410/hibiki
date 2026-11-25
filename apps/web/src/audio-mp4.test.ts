@@ -53,3 +53,55 @@ it("enables Chromium fragment delivery only for a large fast-start M4A with a su
     expect(canUseM4aSource({...large, mime: "audio/mpeg"})).toBe(false);
   } finally { vi.unstubAllGlobals(); }
 });
+
+it("keeps filling the original after WebKit has enough decoded audio, then trims and resumes on playback", async () => {
+  const { AudioDelivery } = await import("./audio-delivery");
+  const { attachM4aSource } = await import("./audio-mp4");
+  const media = Object.assign(new EventTarget(), { src: "", currentTime: 0 });
+  const native = new EventTarget();
+  let ahead = 0, first = 0, appends = 0, removals = 0;
+  const buffer = Object.assign(native, {
+    buffered: { get length() { return ahead ? 1 : 0; }, start: () => first, end: () => ahead },
+    appendBuffer() {
+      if (ahead - first >= 120) throw new DOMException("Decoder quota", "QuotaExceededError");
+      appends++;
+      ahead += 60;
+      queueMicrotask(() => native.dispatchEvent(new Event("updateend")));
+    },
+    remove(_start: number, until: number) {
+      removals++;
+      first = until;
+      queueMicrotask(() => native.dispatchEvent(new Event("updateend")));
+    },
+  });
+  vi.stubGlobal("navigator", {vendor:"Apple Computer, Inc."});
+  vi.stubGlobal("MediaSource", class extends EventTarget {
+    readyState = "open";
+    addSourceBuffer() { return buffer; }
+    endOfStream() {}
+  });
+  const objectUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:test");
+  const original = new Uint8Array(1024 * 1024);
+  const file = {url:"/files/long", size:original.length, mime:"audio/mp4", prefix:64*1024, audioStart:0, duration:600};
+  const delivery = new AudioDelivery(async (_url, init) => {
+    const [start, last] = new Headers(init.headers).get("Range")!.slice(6).split("-");
+    const end = last ? Number(last)+1 : original.length;
+    return new Response(original.slice(Number(start),end), {status:206,headers:{"Content-Range":`bytes ${start}-${end-1}/${original.length}`}});
+  });
+  const fallback = vi.fn();
+  delivery.select(file,"owner");
+  const session = attachM4aSource(media as unknown as HTMLMediaElement, file, delivery, "owner", fallback);
+  try {
+    session.start();
+    await delivery.fill();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(appends).toBe(2);
+    expect(delivery.snapshot()?.complete).toBe(true);
+    expect(fallback).not.toHaveBeenCalled();
+    media.currentTime = 85;
+    media.dispatchEvent(new Event("timeupdate"));
+    await vi.waitFor(() => expect(appends).toBe(3));
+    expect(removals).toBe(1);
+    expect(fallback).not.toHaveBeenCalled();
+  } finally { session.close(); delivery.clear(); objectUrl.mockRestore(); vi.unstubAllGlobals(); }
+});

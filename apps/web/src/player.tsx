@@ -2029,8 +2029,9 @@ export function PlayerProvider({
   return (
     <CardsContext.Provider value={cards}><CommandsContext.Provider value={stableCommands}><PlayerContext.Provider value={controller}>
       {children(player, miniPlayer)}
+      {/* WebKit retains playback permission on this element when MSE falls back to Range. */}
       {source && presentationKind === "audio" && (
-        <audio key={m4aEnabled ? `mse-${audioToken}` : audioToken ?? sourceKey} ref={attachNative}
+        <audio key={audioToken ?? sourceKey} ref={attachNative}
           data-audio-source={audioUrl} src={m4aEnabled ? undefined : audioUrl}
           preload={playing ? "auto" : "none"} {...nativeEvents} />
       )}

@@ -1,22 +1,6 @@
 import { updateSourceBuffer } from "./media-source-buffer";
+import { audioBufferWindow } from "./audio-buffer-window";
 import type { AudioFile } from "./audio-delivery";
-
-// The original continues filling in AudioDelivery while the decoder retains only the
-// next minute or so of packets. A seek beyond the decoder's window returns to Range.
-function waitForPlayhead(element: HTMLMediaElement, time: number, signal: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    signal.throwIfAborted();
-    const clear = () => {
-      element.removeEventListener("timeupdate", check);
-      signal.removeEventListener("abort", abort);
-    };
-    const check = () => { if (element.currentTime >= time) { clear(); resolve(); } };
-    const abort = () => { clear(); reject(signal.reason); };
-    element.addEventListener("timeupdate", check);
-    signal.addEventListener("abort", abort, {once:true});
-    check();
-  });
-}
 
 // Chromium's progressive demuxer can read over a megabyte before playing long M4A
 // tracks. Give MSE small fragments containing exactly the indexed AAC packets.
@@ -58,18 +42,12 @@ export async function playAudioFragments(element: HTMLMediaElement, media: Media
     const reader = read(`bytes=${prefixEnd}-`).body!.getReader();
     const cancel = () => { void reader.cancel().catch(() => {}); };
     signal.addEventListener("abort", cancel, {once:true});
-    let position = prefixEnd, trimmedBefore = 0;
+    let position = prefixEnd;
+    const waitForRoom = audioBufferWindow(element, target, file, signal);
     try {
       while (position < file.size) {
         signal.throwIfAborted();
-        const ranges = target.buffered;
-        const end = ranges.length ? ranges.end(ranges.length - 1) : 0;
-        if (end > element.currentTime + 90) await waitForPlayhead(element, end - 45, signal);
-        const trim = element.currentTime - 15;
-        if (trim > trimmedBefore + 30 && ranges.length) {
-          await updateSourceBuffer(target, signal, () => target.remove(0, trim));
-          trimmedBefore = trim;
-        }
+        await waitForRoom();
         const chunk = await reader.read();
         if (chunk.done) throw new Error("Incomplete audio representation");
         parser.appendBuffer(MP4BoxBuffer.fromArrayBuffer(chunk.value.buffer as ArrayBuffer, position));

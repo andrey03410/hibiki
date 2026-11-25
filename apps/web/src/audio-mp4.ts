@@ -1,3 +1,4 @@
+import { audioBufferWindow } from "./audio-buffer-window";
 import { updateSourceBuffer } from "./media-source-buffer";
 import { playAudioFragments } from "./audio-fragments";
 import type { AudioDelivery, AudioFile } from "./audio-delivery";
@@ -118,9 +119,11 @@ export function attachM4aSource(
       }
       signal.throwIfAborted();
       reader = read(`bytes=${start}-${end - 1}`).body!.getReader();
+      const waitForRoom = audioBufferWindow(element, buffer, file, signal);
       let offset = start;
       const probeEnd = Math.max(file.prefix, file.audioStart ?? 0) + 256 * 1024;
       for (;;) {
+        await waitForRoom();
         const chunk = await reader.read();
         if (chunk.done) break;
         // AudioDelivery returns a private, non-shared page for every read.
