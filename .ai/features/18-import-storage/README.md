@@ -2,11 +2,11 @@
 id: 18
 title: Освобождение места после импорта медиатеки
 track: product
-stage: review
+stage: merged
 branch: codex/18-import-storage
 pr: https://github.com/andrey03410/hibiki/pull/25
 started: 2026-11-25
-merged:
+merged: 2026-11-25
 ---
 
 # 18. Освобождение места после импорта медиатеки
@@ -19,7 +19,7 @@ Hibiki освобождает исходный ZIP после применени
 - [x] [Продукт](product.md) подтверждён с уточнениями по квоте и MCP
 - [x] [Техника](tech.md) и [план](plan.md)
 - [x] Реализация и [проверка](verify.md)
-- [ ] Приёмка владельцем и вливание
+- [x] Автономная приёмка и [вливание через PR №25](https://github.com/andrey03410/hibiki/pull/25)
 
 ## Автономная реализация
 
