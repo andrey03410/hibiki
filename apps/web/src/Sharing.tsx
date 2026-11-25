@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { ArrowLeft, Check, Copy, FilePlus2, Headphones, Link2, ListMusic, LoaderCircle, Pause, Play, RefreshCw, Trash2, X } from "lucide-react";
+import { ArrowLeft, Check, Copy, FilePlus2, Headphones, Link2, ListMusic, LoaderCircle, Pause, Play, RefreshCw, Settings2, Trash2, X } from "lucide-react";
 import type { ItemDto, PlaybackMode, SavedSharedPlaylistDto, ShareKind, ShareLinkDto, SharedViewDto } from "@hibiki/contracts";
 import { api, formatDuration, mediaWord } from "./api";
 import { ItemArtwork } from "./ItemArtwork";
 import { usePlayer } from "./player";
 import { playbackSources } from "./player-model";
-import { formatShareExpiry, isClosedShare, issueShare, shareExpiry, shareLocalTime, shareStatusLabel, type ShareDuration } from "./sharing-model";
+import { formatShareExpiry, isClosedShare, issueShare, orderedSharedItems, shareExpiry, shareLocalTime, shareStatusLabel, type ShareDuration } from "./sharing-model";
 import { useSharingRequest } from "./use-sharing-request";
 import "./sharing.css";
 
@@ -70,36 +70,63 @@ function CopyLink({ url, withField = false }: { url: string; withField?: boolean
   );
 }
 
+type LinkUpdate = { expiresAt: string | null } | { allowReshare: boolean };
+
+function updateShareLink(id: string, settings: LinkUpdate) {
+  return api<ShareLinkDto>(`/share-links/${encodeURIComponent(id)}`, "PATCH", settings);
+}
+
+function sharedCount(trackCount: number, totalCount?: number | null) {
+  return totalCount == null ? `${trackCount} ${mediaWord(trackCount)}` : `Доступно по ссылке — ${trackCount} из ${totalCount}`;
+}
+
 export function ShareLinkFields({ link, origin, patch }: {
   link: ShareLinkDto;
   origin: string;
-  patch: (expiresAt: string | null) => Promise<void>;
+  patch: (settings: LinkUpdate) => Promise<void>;
 }) {
   const [selected, setSelected] = useState<ShareDuration>(link.expiresAt ? "custom" : "never");
   const [applied, setApplied] = useState(selected);
   const [localTime, setLocalTime] = useState(link.expiresAt ? shareLocalTime(link.expiresAt) : "");
-  const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<"expiry" | "permission">();
+  const busy = pending !== undefined;
+  const hintId = useId();
   const [error, setError] = useState("");
   async function apply(duration: ShareDuration) {
     const previous = applied;
     setError("");
-    setBusy(true);
+    setPending("expiry");
     try {
-      await patch(shareExpiry(duration, localTime));
+      await patch({ expiresAt: shareExpiry(duration, localTime) });
       setApplied(duration);
     } catch (error) {
       if (duration !== "custom") setSelected(previous);
       setError((error as Error).message);
     } finally {
-      setBusy(false);
+      setPending(undefined);
+    }
+  }
+  async function setPermission(allowReshare: boolean) {
+    setError("");
+    setPending("permission");
+    try {
+      await patch({ allowReshare });
+    } catch (error) {
+      setError((error as Error).message);
+    } finally {
+      setPending(undefined);
     }
   }
   return (
     <>
       <p className="share-dialog-target" title={link.title}>{link.title}</p>
-      {link.kind === "playlist" && <p className="small muted" role="status">
-        {link.trackCount === null ? "Считаем записи…" : `${link.trackCount} ${mediaWord(link.trackCount)}`}
-      </p>}
+      {link.kind === "playlist" && <div className="share-count small muted" role="status">
+        {link.trackCount === null ? "Считаем записи…" : sharedCount(link.trackCount, link.totalCount)}
+        {(!!link.missingPermissionCount || !!link.unavailableCount) && <dl>
+          {!!link.missingPermissionCount && <><dt>Требуется разрешение автора</dt><dd>{link.missingPermissionCount}</dd></>}
+          {!!link.unavailableCount && <><dt>Оригинал недоступен</dt><dd>{link.unavailableCount}</dd></>}
+        </dl>}
+      </div>}
       {link.url && <CopyLink url={new URL(link.url, origin).href} withField />}
       <form className="share-duration" onSubmit={event => { event.preventDefault(); void apply("custom"); }}>
         <label>
@@ -122,10 +149,22 @@ export function ShareLinkFields({ link, origin, patch }: {
           <button type="submit" className="button subtle" disabled={busy}>Применить</button>
         </div>}
         <span className="small muted" role="status">
-          {busy ? "Сохраняем срок…" : link.expiresAt ? `Действует до ${formatShareExpiry(link.expiresAt)}` : "Ссылка действует бессрочно"}
+          {pending === "expiry" ? "Сохраняем срок…" : link.expiresAt ? `Действует до ${formatShareExpiry(link.expiresAt)}` : "Ссылка действует бессрочно"}
         </span>
-        {error && <p className="small danger-text" role="alert">{error}</p>}
       </form>
+      <div className="share-permission">
+        <label>
+          <input type="checkbox" checked={link.allowReshare ?? false} disabled={busy} aria-describedby={hintId}
+            onChange={event => void setPermission(event.target.checked)} />
+          Разрешить слушать в плейлистах других пользователей
+        </label>
+        <p className="small muted" id={hintId}>
+          Вошедшие в Hibiki пользователи смогут слушать {link.kind === "playlist" ? "ваши записи из этой подборки" : "эту запись"} по уже выданным и будущим ссылкам на чужие плейлисты.
+          {link.kind === "playlist" && " При изменении состава разрешение действует на записи, которые сейчас входят в подборку."}
+        </p>
+        {pending === "permission" && <span className="small muted" role="status">Сохраняем разрешение…</span>}
+      </div>
+      {error && <p className="small danger-text" role="alert">{error}</p>}
     </>
   );
 }
@@ -154,7 +193,10 @@ export function IssueShare({ kind, targetId, issued, close }: {
       const next = await api<ShareLinkDto>(`/share-links/${encodeURIComponent(id)}`, "GET", undefined, "low").catch(() => undefined);
       if (!active) return;
       if (next?.trackCount != null) {
-        setLink(current => current && { ...current, trackCount: next.trackCount });
+        setLink(current => current && {
+          ...current, trackCount: next.trackCount, totalCount: next.totalCount,
+          missingPermissionCount: next.missingPermissionCount, unavailableCount: next.unavailableCount,
+        });
         return;
       }
       timer = window.setTimeout(readCount, 3000);
@@ -162,9 +204,8 @@ export function IssueShare({ kind, targetId, issued, close }: {
     void readCount();
     return () => { active = false; window.clearTimeout(timer); };
   }, [id, pendingCount]);
-  async function patch(expiresAt: string | null) {
-    const updated = await api<ShareLinkDto>(`/share-links/${encodeURIComponent(id!)}`, "PATCH", { expiresAt });
-    setLink(current => ({ ...updated, trackCount: updated.trackCount ?? current?.trackCount ?? null }));
+  async function patch(settings: LinkUpdate) {
+    setLink(await updateShareLink(id!, settings));
   }
   return (
     <ShareDialog title="Поделиться" close={close}>
@@ -188,9 +229,17 @@ function Loading({ children }: { children: ReactNode }) {
 export function ShareManager() {
   const { data, error, refresh, setData } = useSharingRequest<{ links: ShareLinkDto[] }>("/share-links");
   const [target, setTarget] = useState<ShareLinkDto>();
+  const [editingId, setEditingId] = useState<string>();
+  const editing = editingId && data?.links.find(link => link.id === editingId && link.status === "active");
   const [busy, setBusy] = useState(false);
   const [revokeError, setRevokeError] = useState("");
   const close = () => { if (!busy) { setTarget(undefined); setRevokeError(""); } };
+  async function patch(settings: LinkUpdate) {
+    if (!editing) return;
+    const updated = await updateShareLink(editing.id, settings);
+    setData(before => before && { links: before.links.map(link => link.id === updated.id ? updated : link) });
+    void refresh();
+  }
   async function revoke() {
     if (!target) return;
     setBusy(true);
@@ -226,6 +275,9 @@ export function ShareManager() {
           <div className="share-link-actions">
             {link.status === "active" && <>
               {link.url && <CopyLink url={link.url} />}
+              <button type="button" className="button subtle" onClick={() => setEditingId(link.id)} aria-label={`Настройки ссылки на «${link.title}»`}>
+                <Settings2 size={15} /> Настройки
+              </button>
               <button type="button" className="button subtle" onClick={() => setTarget(link)}>
                 <Trash2 size={15} /> Отозвать
               </button>
@@ -233,6 +285,9 @@ export function ShareManager() {
           </div>
         </li>)}
       </ul>}
+      {editing && <ShareDialog title="Настройки ссылки" close={() => setEditingId(undefined)}>
+        <ShareLinkFields key={editing.id} link={editing} origin={location.origin} patch={patch} />
+      </ShareDialog>}
       {target && <ShareDialog title="Отозвать ссылку?" close={close}>
         <p>Доступ по ссылке на «{target.title}» закроется.</p>
         {revokeError && <p className="error-box" role="alert">{revokeError}</p>}
@@ -255,7 +310,7 @@ export function SavedSharedPlaylistCard({ playlist }: { playlist: SavedSharedPla
       <p>Поделился {playlist.sharedBy}</p>
       <span className="small muted">
         {playlist.status !== "active" ? "Доступ закрыт" : playlist.trackCount === null
-          ? "Обновляется автоматически" : `${playlist.trackCount} ${mediaWord(playlist.trackCount)}`}
+          ? "Обновляется автоматически" : sharedCount(playlist.trackCount, playlist.totalCount)}
       </span>
     </article>
   );
@@ -283,14 +338,20 @@ function SharedMedia({ path, saved, refreshLibrary }: { path: string; saved?: bo
   const closed = isClosedShare(error);
   const available = !closed && data;
   const cover = available && data.items.find(item => item.sources.some(source => source.thumbnail));
+  const positions = available ? orderedSharedItems(available) : [];
   const singleItemId = data?.kind === "item" ? data.items[0]?.id : undefined;
   const singlePlaying = !!singleItemId && player.playing && player.current?.id === player.sharedId(path, singleItemId);
   const savedPlaylistId = data?.kind === "playlist" && (savedId ?? data.savedId);
   const alreadySaved = savedId ?? data?.savedId;
   useEffect(() => () => { ++playbackRequest.current; }, []);
   const loadEntries = useCallback(async () => {
-    try { return (await api<SharedViewDto>(path, "GET", undefined, "high")).items; }
-    catch (failure) { if (isClosedShare(failure)) return []; throw failure; }
+    try {
+      const view = await api<SharedViewDto>(path, "GET", undefined, "high");
+      return orderedSharedItems(view).filter((item): item is ItemDto => item !== null);
+    } catch (failure) {
+      if (isClosedShare(failure)) return [];
+      throw failure;
+    }
   }, [path]);
   async function play(itemId?: string, mode: PlaybackMode = "original") {
     if (itemId && player.sharedId(path, itemId) === player.current?.id && player.playing) {
@@ -361,7 +422,7 @@ function SharedMedia({ path, saved, refreshLibrary }: { path: string; saved?: bo
           <h1>{data?.title ?? (closed ? "Доступ закрыт" : "Плейлист")}</h1>
           {data && <p className="muted">Поделился {data.sharedBy}{saved && !closed && " · Состав обновляется автоматически"}</p>}
           {closed && <p role="status" className="muted">{data ? "Доступ закрыт" : "Ссылка больше не действует."}</p>}
-          {available && data.kind === "playlist" && <p className="muted">{data.trackCount} {mediaWord(data.trackCount)}</p>}
+          {available && data.kind === "playlist" && <p className="muted">{sharedCount(data.trackCount, data.totalCount)}</p>}
           <div className="playlist-actions">
             {available && <>
               <button className="button primary" type="button" disabled={!data.items.some(item => playbackSources(item).length) || playingRequest !== undefined}
@@ -385,9 +446,15 @@ function SharedMedia({ path, saved, refreshLibrary }: { path: string; saved?: bo
         </div>
       </div>}
       {actionError && <p className="error-box" role="alert">{actionError}</p>}
-      {available && data.kind === "playlist" && (data.items.length > 0
+      {available && data.kind === "playlist" && positions.length > 0 && !data.trackCount && (
+        <p className="muted" role="status">Все записи в подборке закрыты для прослушивания, поэтому очередь пока пуста.</p>
+      )}
+      {available && data.kind === "playlist" && (positions.length > 0
         ? <ol className="shared-tracks" aria-label="Состав плейлиста">
-          {data.items.map((item, index) => {
+          {positions.map((item, index) => {
+            if (!item) return <li key={`closed-${index}`} className="shared-track shared-track-closed">
+              <span className="small" aria-hidden="true">{index + 1}</span>Запись недоступна
+            </li>;
             const active = player.current?.id === player.sharedId(path, item.id) && !!player.current;
             const playing = active && player.playing;
             return <li key={item.id} className="shared-track" aria-current={active || undefined}>
@@ -399,10 +466,10 @@ function SharedMedia({ path, saved, refreshLibrary }: { path: string; saved?: bo
               <span className={`item-art art-${index % 6}`} aria-hidden="true">
                 <ItemArtwork source={item.sources.find(source => source.thumbnail)} kind={item.kind} />
               </span>
-              <div className="share-link-target"><strong>{item.title}</strong><span className="small muted">{item.kind === "video" ? "Видео" : "Аудио"} · {formatDuration(item.duration)}</span></div>
-              {savedItems.has(item.id) ? <span className="share-saved-marker" role="status"><Check size={16} />Добавлено</span> :
+              <div className="share-link-target"><strong>{item.title}</strong><span className="small muted">{item.kind === "video" ? "Видео" : "Аудио"} · {formatDuration(item.duration)} · {item.shared?.sharedBy ?? data.sharedBy}</span></div>
+              {!item.shared?.delegated && (savedItems.has(item.id) ? <span className="share-saved-marker" role="status"><Check size={16} />Добавлено</span> :
                 <button type="button" className="button subtle" disabled={saving !== undefined} onClick={() => void save(item.id)}
-                  aria-label={`Добавить в медиатеку: ${item.title}`}><FilePlus2 size={16} />{saving === item.id ? "Добавляем…" : "Добавить"}</button>}
+                  aria-label={`Добавить в медиатеку: ${item.title}`}><FilePlus2 size={16} />{saving === item.id ? "Добавляем…" : "Добавить"}</button>)}
             </li>;
           })}
         </ol>

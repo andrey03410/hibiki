@@ -1,4 +1,4 @@
-import type { ShareKind, ShareLinkDto, ShareStatus } from "@hibiki/contracts";
+import type { ItemDto, ShareKind, ShareLinkDto, ShareStatus } from "@hibiki/contracts";
 import { api, ApiError } from "./api";
 
 export const shareStatusLabel: Record<ShareStatus, string> = {
@@ -23,6 +23,12 @@ export function issueShare(kind: ShareKind, targetId: string) {
   // The request can settle before the dialog's module finishes loading.
   void request.catch(() => {});
   return request;
+}
+
+export function orderedSharedItems(view: { items: ItemDto[]; positions?: (string | null)[] }) {
+  if (!view.positions) return view.items;
+  const available = new Map(view.items.map(item => [item.id, item]));
+  return view.positions.map(id => id === null ? null : available.get(id) ?? null);
 }
 
 export function formatShareExpiry(expiresAt: string | null) {

@@ -8,6 +8,7 @@ import { playbackFields } from "./media-playback";
 import type { Db } from "./db";
 import type { LibraryService } from "./library";
 import { HttpError, invariant } from "./errors";
+import { countInputs, upstreamAuthorIds, type ShareTarget, type UpstreamScope } from "./share-playlist-counts";
 import { centralAccess, checkItems, env, kanameEnabled, ownerAccess } from "./kaname";
 
 type Tx = Prisma.TransactionClient;
@@ -85,6 +86,11 @@ const originSelect = {
 } satisfies Prisma.ItemSelect;
 
 type Origin = Prisma.ItemGetPayload<{ select: typeof originSelect }>;
+type Counts = Pick<ShareLinkDto, "trackCount" | "totalCount" | "missingPermissionCount" | "unavailableCount">;
+const unknownCounts: Counts = { trackCount: null, totalCount: null, missingPermissionCount: null, unavailableCount: null };
+type Position =
+  | { access: "direct" | "delegated"; id: string; origin: Origin; sharedBy: string }
+  | { access: "missingPermission" | "unavailable" };
 type OriginSource = Origin["sources"][number];
 const includeGrants = { grants: { include: { link: true } } } as const;
 type ReceivedTrack = Prisma.SharedTrackGetPayload<{ include: typeof includeGrants }>;
@@ -98,7 +104,7 @@ function ownedSources(item: Origin) {
   );
 }
 
-function shareable(item: Origin | null, ownerId: string): item is Origin {
+function shareable(item: Origin | null, ownerId: string) {
   return item?.ownerId === ownerId && (!item.sharedTrack || ownedSources(item).length > 0);
 }
 
@@ -137,8 +143,9 @@ function projectedSources(item: Origin, ref: SharedMediaRef): SourceDto[] {
   });
 }
 
-function projectedItem(origin: Origin, ref: SharedMediaRef, sharedBy: string, sharedAt: string): ItemDto {
-  const { id, title, duration, preferredSourceId } = origin;
+function projectedItem(slot: Extract<Position, { origin: Origin }>, ref: SharedMediaRef, sharedAt: string): ItemDto {
+  const { id, origin, sharedBy } = slot;
+  const { title, duration, preferredSourceId } = origin;
   const sources = projectedSources(origin, ref);
   const sharedPreferred = preferredSourceId ? sourceKey(preferredSourceId) : undefined;
   return {
@@ -148,7 +155,7 @@ function projectedItem(origin: Origin, ref: SharedMediaRef, sharedBy: string, sh
     updatedAt: sharedAt,
     tags: [], sources,
     preferredSourceId: sources.find(source => source.id === sharedPreferred)?.id,
-    shared: { sharedBy, available: true },
+    shared: { sharedBy, available: true, ...(slot.access === "delegated" && { delegated: true }) },
   };
 }
 
@@ -177,7 +184,7 @@ class ShareLookup {
   private playlists = new Map<string, Promise<LinkTarget | null>>();
   private memberships = new Map<string, Promise<Set<string> | null>>();
   private links = new Map<string, Promise<ValidLink | null>>();
-  private counts = new Map<string, Promise<number | null>>();
+  private counts = new Map<string, Promise<Counts>>();
   readonly now = new Date(Date.now());
 
   private readonly proofs: Map<string, AuthorProof> | null;
@@ -306,49 +313,91 @@ class ShareLookup {
 
   async receivedOrigin(track: ReceivedTrack) {
     const origin = await this.origin(track.originItemId);
-    if (!shareable(origin, track.originOwnerId)) return;
-    const matches = await Promise.all(track.grants.map(async ({ link }) => {
-      const valid = await this.valid(link);
-      return valid && await this.includes(link, origin) ? valid : null;
-    }));
-    const valid = matches.find(entry => entry !== null);
-    if (valid) return { origin, sharedBy: valid.sharedBy };
+    if (!origin || !shareable(origin, track.originOwnerId)) return;
+    const active = track.grants.filter(({ link }) =>
+      linkStatus(link, this.now) === "active" && link.ownerId === track.originOwnerId);
+    if (!active.length) return;
+    const sharedBy = await this.author(track.originOwnerId);
+    if (!sharedBy) return;
+    const matches = await Promise.all(active.map(async ({ link }) =>
+      await this.includes(link, origin) ? link : null));
+    if (matches.some(link => link !== null)) return {
+      origin, sharedBy, allowReshare: matches.some(link => link?.allowReshare),
+    };
   }
 
-  publishedCount(link: ShareLink) {
-    if (link.kind === "item") return Promise.resolve(1);
+  private async delegatedPositions(ownerId: string, ids: string[]) {
+    const positions = new Map<string, Position>();
+    const received: ReceivedTrack[] = [];
+    for (let offset = 0; offset < ids.length; offset += queryBatchSize) {
+      received.push(...await this.tx.sharedTrack.findMany({
+        where: { recipientId: ownerId, recipientItemId: { in: ids.slice(offset, offset + queryBatchSize) } },
+        include: includeGrants,
+      }));
+    }
+    await this.loadOrigins(received.map(track => track.originItemId));
+    const authorIds = [...new Set(received.map(track => track.originOwnerId))].filter(id => !this.accounts.has(id));
+    for (let offset = 0; offset < authorIds.length; offset += queryBatchSize) {
+      const ids = authorIds.slice(offset, offset + queryBatchSize);
+      const accounts = await this.tx.user.findMany({
+        where: { id: { in: ids }, suspended: false }, select: { id: true, ...accountSelect },
+      });
+      const byId = new Map(accounts.map(account => [account.id, account]));
+      for (const id of ids) this.accounts.set(id, Promise.resolve(byId.get(id) ?? null));
+    }
+    await Promise.all(received.map(async track => {
+      const match = await this.receivedOrigin(track);
+      const id = track.recipientItemId;
+      positions.set(id, match?.allowReshare ? {
+        access: "delegated", id, origin: match.origin, sharedBy: match.sharedBy,
+      } : { access: match ? "missingPermission" : "unavailable" });
+    }));
+    return positions;
+  }
+
+  async positions(link: ShareLink, ids: string[], sharedBy: string): Promise<Position[]> {
+    await this.loadOrigins(ids);
+    const rows = await Promise.all(ids.map(id => this.origin(id)));
+    const borrowed = rows.flatMap(item => item && item.ownerId === link.ownerId && !shareable(item, link.ownerId) ? [item.id] : []);
+    const delegated = await this.delegatedPositions(link.ownerId, borrowed);
+    return rows.map((item, i) => item && shareable(item, link.ownerId)
+      ? { access: "direct", id: item.id, origin: item, sharedBy }
+      : delegated.get(ids[i]) ?? { access: "unavailable" });
+  }
+
+  publishedCounts(link: ShareLink, eager = false): Promise<Counts> {
+    if (link.kind === "item") return Promise.resolve({
+      trackCount: 1, totalCount: 1, missingPermissionCount: 0, unavailableCount: 0,
+    });
     let count = this.counts.get(link.targetId);
     if (!count) {
-      count = this.countPublishedPlaylist(link.ownerId, link.targetId);
+      count = this.countPublishedPlaylist(link, eager);
       this.counts.set(link.targetId, count);
     }
     return count;
   }
 
-  private async countPublishedPlaylist(ownerId: string, id: string) {
-    // An owner with a published queue and no borrowed tracks needs only its
-    // persisted count. Otherwise subtract borrowed-only members of that queue.
-    const rows = await this.tx.$queryRaw<{ count: bigint }[]>`
-      SELECT p.trackCount - (
-        SELECT count(*) FROM SharedTrack AS st
-        WHERE st.recipientId = p.ownerId
-          AND st.recipientItemId IN (SELECT value FROM json_each(p.queueIdsJson))
-          AND NOT EXISTS (
-            SELECT 1 FROM Source AS s
-            WHERE s.itemId = st.recipientItemId AND s.ownerId = p.ownerId AND (
-              (s.provider = 'youtube' AND s.fileId IS NULL) OR
-              (s.provider = 'local' AND EXISTS (
-                SELECT 1 FROM MediaFile AS f WHERE f.id = s.fileId AND f.ownerId = p.ownerId
-              ))
-            )
-          )
-      ) AS count
-      FROM Playlist AS p JOIN PlaylistCountWork AS w ON w.ownerId = p.ownerId
-      WHERE p.id = ${id} AND p.ownerId = ${ownerId}
-        AND w.version = w.publishedVersion AND (w.validUntil IS NULL OR w.validUntil > ${BigInt(+this.now)})
-        AND p.trackCount IS NOT NULL AND p.queueIdsJson IS NOT NULL
-    `;
-    return rows.length ? Number(rows[0].count) : null;
+  private async countPublishedPlaylist(link: ShareLink, eager: boolean): Promise<Counts> {
+    let { total, borrowed } = await countInputs(this.tx, link, this.now, eager);
+    if (total === null) {
+      if (!borrowed.length) return unknownCounts;
+      const members = await this.members(link);
+      if (!members) return unknownCounts;
+      total = members.size;
+      borrowed = borrowed.filter(id => members.has(id));
+    }
+    const positions = await this.delegatedPositions(link.ownerId, borrowed);
+    let missingPermissionCount = 0;
+    let unavailableCount = 0;
+    for (const id of borrowed) {
+      const access = positions.get(id)?.access;
+      if (access === "missingPermission") missingPermissionCount++;
+      else if (access !== "delegated") unavailableCount++;
+    }
+    return {
+      totalCount: total, trackCount: total - missingPermissionCount - unavailableCount,
+      missingPermissionCount, unavailableCount,
+    };
   }
 }
 
@@ -435,16 +484,33 @@ export class ShareService {
     await this.verifyAuthors(authors.map(author => author.ownerId), { cached: !fresh, bestEffort: true });
   }
 
-  private async authorizeLink(ref: { token: string } | { viewerId: string; id: string }) {
+  private async upstreamProofs(targets: ShareTarget[], scope?: UpstreamScope) {
     if (!kanameEnabled()) return [];
-    const select = { ownerId: true, revokedAt: true, expiresAt: true } as const;
+    const ids = await upstreamAuthorIds(this.db, targets, new Date(Date.now()), scope);
+    return this.verifyAuthors(ids, { bestEffort: true });
+  }
+
+  private async managedProofs(ownerId: string, id?: string) {
+    if (!kanameEnabled()) return [];
+    const playlists = await this.db.shareLink.findMany({
+      where: { ownerId, id, kind: "playlist" }, distinct: ["targetId"],
+      select: { ownerId: true, kind: true, targetId: true },
+    });
+    return this.upstreamProofs(playlists, { publishedOnly: id === undefined });
+  }
+
+  private async authorizeLink(ref: { token: string } | { viewerId: string; id: string }, delegation?: { itemId?: string }) {
+    if (!kanameEnabled()) return [];
+    const select = { ownerId: true, kind: true, targetId: true, revokedAt: true, expiresAt: true } as const;
     const link = "token" in ref
       ? await this.db.shareLink.findUnique({ where: { token: ref.token }, select })
       : (await this.db.savedSharedPlaylist.findFirst({
           where: { id: ref.id, recipientId: ref.viewerId }, select: { link: { select } },
         }))?.link;
-    return link && linkStatus(link, new Date(Date.now())) === "active"
-      ? this.verifyAuthors([link.ownerId]) : [];
+    if (!link || linkStatus(link, new Date(Date.now())) !== "active") return [];
+    const proofs = await this.verifyAuthors([link.ownerId]);
+    if (proofs.length && delegation) proofs.push(...await this.upstreamProofs([link], { ...delegation, requireReshare: true }));
+    return proofs;
   }
 
   async authorizeCopy(viewerId: string, itemId: string): Promise<AuthorProof | null> {
@@ -462,23 +528,23 @@ export class ShareService {
   }
 
   private async authorizeMedia(viewerId: string, ref: SharedMediaRef) {
-    if (ref.kind === "link") return this.authorizeLink({ token: ref.token });
-    if (ref.kind === "playlist") return this.authorizeLink({ viewerId, id: ref.id });
+    if (ref.kind === "link") return this.authorizeLink({ token: ref.token }, { itemId: ref.itemId });
+    if (ref.kind === "playlist") return this.authorizeLink({ viewerId, id: ref.id }, { itemId: ref.itemId });
     const proof = await this.authorizeCopy(viewerId, ref.id);
     return proof ? [proof] : [];
   }
 
-  async create(ownerId: string, kind: ShareKind, targetId: string, expiresAt?: string | Date | null) {
+  async create(ownerId: string, kind: ShareKind, targetId: string, expiresAt?: string | Date | null, allowReshare = false) {
     return this.withViewer(ownerId, async lookup => {
       const expiry = parseExpiry(expiresAt, lookup.now);
       const target = await lookup.target(kind, ownerId, targetId);
       invariant(target, 404, "share_target_not_found", "Объект не найден");
       const link = await lookup.tx.shareLink.create({ data: {
         id: randomUUID(), ownerId, kind, targetId, title: target.title,
-        token: randomBytes(32).toString("base64url"), expiresAt: expiry,
+        token: randomBytes(32).toString("base64url"), expiresAt: expiry, allowReshare,
       } });
-      return this.linkDto(lookup, link, target);
-    });
+      return this.linkDto(lookup, link, target, true);
+    }, await this.upstreamProofs([{ kind, ownerId, targetId }]));
   }
 
   async list(ownerId: string) {
@@ -489,26 +555,30 @@ export class ShareService {
       return Promise.all(links.map(async link => this.linkDto(
         lookup, link, await lookup.target(link.kind as ShareKind, ownerId, link.targetId),
       )));
-    });
+    }, await this.managedProofs(ownerId));
   }
 
   async get(ownerId: string, id: string) {
     return this.withViewer(ownerId, async lookup => {
       const link = await this.managedLink(lookup, ownerId, id);
-      return this.linkDto(lookup, link, await lookup.target(link.kind as ShareKind, ownerId, link.targetId));
-    });
+      return this.linkDto(lookup, link, await lookup.target(link.kind as ShareKind, ownerId, link.targetId), true);
+    }, await this.managedProofs(ownerId, id));
   }
 
-  async setExpiry(ownerId: string, id: string, expiresAt: string | Date | null) {
+  setExpiry(ownerId: string, id: string, expiresAt: string | Date | null) {
+    return this.updateLink(ownerId, id, { expiresAt });
+  }
+
+  async updateLink(ownerId: string, id: string, settings: { expiresAt?: string | Date | null; allowReshare?: boolean }) {
     return this.withViewer(ownerId, async lookup => {
       const link = await this.managedLink(lookup, ownerId, id);
       const target = await lookup.target(link.kind as ShareKind, ownerId, link.targetId);
       invariant(target && linkStatus(link, lookup.now) === "active",
-        409, "share_closed", "Закрытую ссылку нельзя продлить");
-      const expiry = parseExpiry(expiresAt, lookup.now);
-      const updated = await lookup.tx.shareLink.update({ where: { id }, data: { expiresAt: expiry } });
-      return this.linkDto(lookup, updated, target);
-    });
+        409, "share_closed", "Закрытую ссылку нельзя изменить");
+      const expiresAt = settings.expiresAt === undefined ? undefined : parseExpiry(settings.expiresAt, lookup.now);
+      const updated = await lookup.tx.shareLink.update({ where: { id }, data: { expiresAt, allowReshare: settings.allowReshare } });
+      return this.linkDto(lookup, updated, target, true);
+    }, await this.managedProofs(ownerId, id));
   }
 
   async revoke(ownerId: string, id: string) {
@@ -525,7 +595,7 @@ export class ShareService {
     return link;
   }
 
-  private async linkDto(lookup: ShareLookup, link: ShareLink, target: LinkTarget | null): Promise<ShareLinkDto> {
+  private async linkDto(lookup: ShareLookup, link: ShareLink, target: LinkTarget | null, eager = false): Promise<ShareLinkDto> {
     const status = linkStatus(link, lookup.now);
     const kind = link.kind as ShareKind;
     const base = process.env.KANAME_SITE_URL ?? process.env.PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 8790}`;
@@ -534,7 +604,8 @@ export class ShareService {
       createdAt: link.createdAt.toISOString(), expiresAt: link.expiresAt?.toISOString() ?? null,
       status: status === "active" && !target ? "unavailable" : status,
       url: status === "active" && target ? new URL(`/share/${link.token}`, base).href : undefined,
-      trackCount: target ? await lookup.publishedCount(link) : null,
+      allowReshare: link.allowReshare,
+      ...(target ? await lookup.publishedCounts(link, eager) : unknownCounts),
     };
   }
 
@@ -562,7 +633,7 @@ export class ShareService {
             select: { recipientItemId: true },
           }))?.recipientItemId;
       return this.view(lookup, valid, itemId => ({ kind: "link", token, itemId }), savedId);
-    }, await this.authorizeLink({ token }));
+    }, await this.authorizeLink({ token }, {}));
   }
 
   private async view(
@@ -571,11 +642,15 @@ export class ShareService {
     const { link, target, sharedBy } = valid;
     const kind = link.kind as ShareKind;
     const ids = kind === "item" ? [link.targetId] : [...requireShared(await lookup.members(link))];
-    await lookup.loadOrigins(ids);
-    const rows = await Promise.all(ids.map(id => lookup.origin(id)));
+    const slots = await lookup.positions(link, ids, sharedBy);
     const sharedAt = link.createdAt.toISOString();
-    const items = rows.flatMap(item => shareable(item, link.ownerId) ? [projectedItem(item, ref(item.id), sharedBy, sharedAt)] : []);
-    return { kind, title: target.title, sharedBy, items, trackCount: items.length, savedId };
+    const items: ItemDto[] = [];
+    const positions = slots.map(slot => {
+      if (!("origin" in slot)) return null;
+      items.push(projectedItem(slot, ref(slot.id), sharedAt));
+      return slot.id;
+    });
+    return { kind, title: target.title, sharedBy, items, positions, totalCount: positions.length, trackCount: items.length, savedId };
   }
 
   async save(viewerId: string, token: string, itemId?: string): Promise<SaveResult> {
@@ -627,9 +702,13 @@ export class ShareService {
       where: { recipientId: viewerId, link: {
         revokedAt: null, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date(Date.now()) } }],
       } },
-      select: { link: { select: { ownerId: true } } },
+      select: { link: { select: { ownerId: true, kind: true, targetId: true } } },
     }) : [];
-    const proofs = await this.verifyAuthors(links.flatMap(row => row.link?.ownerId ?? []), { cached: true, bestEffort: true });
+    const targets = links.flatMap(row => row.link ? [row.link] : []);
+    const upstream = await upstreamAuthorIds(this.db, targets, new Date(Date.now()), { publishedOnly: true });
+    const proofs = await this.verifyAuthors([...targets.map(row => row.ownerId), ...upstream], {
+      bestEffort: true, cached: upstream.length === 0,
+    });
     return this.withViewer(viewerId, async lookup => {
       const rows = await lookup.tx.savedSharedPlaylist.findMany({
         where: { recipientId: viewerId }, include: { link: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -637,10 +716,11 @@ export class ShareService {
       return Promise.all(rows.map(async ({ id, title, sharedBy, link }) => {
         const valid = await lookup.valid(link);
         const status = link ? linkStatus(link, lookup.now) : "unavailable";
+        const { trackCount, totalCount } = valid ? await lookup.publishedCounts(valid.link) : unknownCounts;
         return {
           id, title: valid?.target.title ?? title, sharedBy: valid?.sharedBy ?? sharedBy,
           status: !valid && status === "active" ? "unavailable" : status,
-          trackCount: valid ? await lookup.publishedCount(valid.link) : null,
+          trackCount, totalCount,
         };
       }));
     }, proofs);
@@ -651,7 +731,7 @@ export class ShareService {
       const { link } = await this.saved(lookup, viewerId, id);
       const valid = requireShared(await lookup.valid(link));
       return this.view(lookup, valid, itemId => ({ kind: "playlist", id, itemId }), id);
-    }, await this.authorizeLink({ viewerId, id }));
+    }, await this.authorizeLink({ viewerId, id }, {}));
   }
 
   async saveFromSaved(viewerId: string, id: string, itemId: string) {
@@ -679,11 +759,11 @@ export class ShareService {
 
   private async mediaOrigin(lookup: ShareLookup, viewerId: string, ref: SharedMediaRef) {
     if (ref.kind === "item") return this.received(lookup, viewerId, ref.id);
-    const { link } = ref.kind === "link" ? await this.byToken(lookup, ref.token)
+    const { link, sharedBy } = ref.kind === "link" ? await this.byToken(lookup, ref.token)
       : requireShared(await lookup.valid((await this.saved(lookup, viewerId, ref.id)).link));
-    const origin = requireShared(await lookup.origin(ref.itemId));
-    requireShared(await lookup.includes(link, origin));
-    return origin;
+    requireShared(link.kind === "item" ? link.targetId === ref.itemId : (await lookup.members(link))?.has(ref.itemId));
+    const [slot] = await lookup.positions(link, [ref.itemId], sharedBy);
+    return requireShared("origin" in slot && slot.origin);
   }
 
   async file(viewerId: string, ref: SharedMediaRef, key: string) {

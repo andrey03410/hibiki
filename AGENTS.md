@@ -41,6 +41,8 @@ watch layout с очередью справа, audio artwork, fullscreen overlay
 
 [16. Производительность прослушивания](.ai/features/16-playback-performance/README.md) — виртуальный звук MP4, непрерывная загрузка, фоновые запросы и работа с каталогом.
 
+[17. Смешанный плейлист по одной ссылке](.ai/features/17-mixed-playlist-sharing/README.md) — согласие автора на исходной ссылке, полный порядок с закрытыми местами и отзыв дальнейшего доступа.
+
 ## Стек и проверки
 
 TypeScript · Node.js >=22.16 · npm workspaces · Fastify 5 · SQLite + Prisma 7 ·

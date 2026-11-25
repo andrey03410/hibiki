@@ -349,6 +349,7 @@ model ShareLink {
   targetId String
   title String
   expiresAt DateTime?
+  allowReshare Boolean @default(false)
   revokedAt DateTime?
   createdAt DateTime @default(now())
   owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)

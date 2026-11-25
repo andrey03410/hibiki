@@ -81,6 +81,32 @@ describe("sharing through MCP and the copy worker", () => {
     expect(media.rawPayload.subarray(0, 4).toString()).toBe("RIFF");
   });
 
+  it("updates a link's playlist permission independently of its expiry through HTTP and MCP", async () => {
+    const author = await connect(context.userId);
+    const viewer = await connect(context.otherUserId);
+    const { item } = await context.library.upsertYoutube(context.userId, { externalId: "abcdefghijk" });
+    const expiresAt = new Date(Date.now() + 86_400_000).toISOString();
+    const { data: link } = await call<ShareLinkDto>(author, "share_create", { kind: "item", targetId: item.id, expiresAt });
+    expect(link).toMatchObject({ allowReshare: false, expiresAt });
+    const cookies = { hibiki_session: await app.auth.createSession(context.userId) };
+    const url = "/api/share-links/" + link.id;
+    const update = await app.inject({ method: "PATCH", url, cookies, payload: { allowReshare: true } });
+    expect(update.statusCode).toBe(200);
+    expect(update.json()).toMatchObject({ url: link.url, allowReshare: true, expiresAt });
+    expect((await call(viewer, "share_set_reshare", { id: link.id, allowReshare: false })).error).toBe(true);
+    expect((await call(author, "share_set_expiry", { id: link.id, expiresAt: null })).data)
+      .toMatchObject({ allowReshare: true, expiresAt: null });
+    expect((await call(author, "share_set_reshare", { id: link.id, allowReshare: false })).data)
+      .toMatchObject({ url: link.url, allowReshare: false, expiresAt: null });
+    expect((await app.inject({ method: "PATCH", url, cookies, payload: {} })).statusCode).toBe(400);
+    await call(author, "share_revoke", { id: link.id });
+    expect((await app.inject({ method: "PATCH", url, cookies, payload: { allowReshare: true } })).statusCode).toBe(409);
+    const { data: another } = await call<ShareLinkDto>(author, "share_create", {
+      kind: "item", targetId: item.id, allowReshare: true,
+    });
+    expect(another.allowReshare).toBe(true);
+  });
+
   it("rechecks queued copies against revoked links before creating a file", async () => {
     const path = join(context.root, "queued.wav");
     await writeFile(path, wav());
