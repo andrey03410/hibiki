@@ -474,7 +474,11 @@ export function PlayerProvider({
     // Keep the prepared prefix across the brief ended → next selection.
     if (native.current?.ended && playingRef.current) return;
     if (!audioRelayReady() || settings.repeat === "one") { void delivery.prepare(); return; }
-    if (!canPrepareNext) { delivery.suspendPreparation(); return; }
+    if (!canPrepareNext) {
+      // A native seek can report waiting while every byte of this track is already in memory.
+      if (!playing || !coverage?.complete) delivery.suspendPreparation();
+      return;
+    }
     void catalog.nextInQueue(() => live.current, 1, true, failed.current, () => active, () => libraryOrder.tail)
       .then(target => {
         if (!active || !target) return;

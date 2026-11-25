@@ -77,6 +77,8 @@ describe("tab-local audio delivery", () => {
     expect(transport.mock.calls[0][1].priority).toBe("high");
     expect(new Uint8Array(await delivery.response("a", "bytes=0-2")!.arrayBuffer())).toEqual(bytes.slice(0, 3));
     expect(server.ranges.filter(range => range === "bytes=0-99999")).toHaveLength(1);
+    await delivery.fill();
+    expect(transport.mock.calls[1][1].priority).toBe("low");
   });
   it("promotes an owned prefix without HEAD and discards all bytes on denied refill", async () => {
     const server = origin();
@@ -204,11 +206,11 @@ describe("tab-local audio delivery", () => {
     };
     const delivery=new AudioDelivery(transport);
     await delivery.prepare({ ...file("next"), mime: "audio/mp4" });
-    expect(reads).toEqual(["bytes=0-99999","bytes=1100000-1199999"]);
+    expect(reads).toEqual(["bytes=0-99999","bytes=1097728-1199999"]);
     delivery.select({ ...file("next"), mime: "audio/mp4" }, "next");
     expect(await delivery.response("next", "bytes=1100004-1100007")!.text()).toBe("moov");
     await delivery.fill();
-    expect(reads.filter(r=>r==="bytes=1100000-1199999")).toHaveLength(1);
+    expect(reads.filter(r=>r==="bytes=1097728-1199999")).toHaveLength(1);
   });
   it("budgets header plus ten seconds within 2 MiB and accepts local audio through 128 MiB", () => {
     const own = { id: "s", provider: "local" as const, status: "available" as const,
@@ -227,10 +229,10 @@ it("requests the indexed M4A tail immediately and fills the remaining gap once",
   const delivery = new AudioDelivery(transport);
   delivery.select({...file("m4a"), tailStart: 1_100_000, audioStart: 32, mime: "audio/mp4"}, "a");
   const ready = delivery.start();
-  expect(server.ranges).toEqual(expect.arrayContaining(["bytes=0-99999","bytes=1100000-1199999"]));
+  expect(server.ranges).toEqual(expect.arrayContaining(["bytes=0-99999","bytes=1097728-1199999"]));
   await ready;
   await delivery.fill();
-  expect(server.ranges.at(-1)).toBe("bytes=100000-1099999");
+  expect(server.ranges.at(-1)).toBe("bytes=100000-1097727");
 });
 
 it("retries a stalled body after 10 seconds, preserving the bytes already received", async () => {
@@ -277,7 +279,8 @@ it("downloads a 50 MiB file in one prefix and one continuation and preserves its
   await delivery.fill();
   const cached = new Uint8Array(await delivery.response("large", null)!.arrayBuffer());
   expect(hash(cached)).toBe(hash(data));
-  expect(ranges).toEqual([`bytes=0-${file.prefix-1}`, `bytes=${file.prefix}-`]);
+  const firstEnd = 300000 + Math.ceil(10*(file.size-300000)/480);
+  expect(ranges).toEqual([`bytes=300000-${firstEnd-1}`, `bytes=${firstEnd}-`, "bytes=0-299999"]);
 });
 
 it("prioritizes a decoder seek into a gap and fills the skipped interval without changing any bytes", async () => {
@@ -328,3 +331,28 @@ it.each([["audio_view_missing", "unsupported"], ["file_not_found", "denied"]])(
     expect(failure).toHaveBeenCalledWith(reason);
     expect(delivery.response("token",null)).toBeUndefined();
   });
+
+it("starts a tagged MP3 at its first MPEG frame and fills a byte-identical original for offline playback", async () => {
+  const raw = new Uint8Array(4 * 1024 * 1024);
+  for (let i=0; i<raw.length; i++) raw[i]=i%251;
+  const audioStart = 2_680_000;
+  const ranges: string[]=[];
+  const delivery = new AudioDelivery(async (_, init) => {
+    const range=new Headers(init.headers).get("Range")!;
+    const [lower,last]=range.slice(6).split("-");
+    const end=last?Number(last):raw.length-1;
+    ranges.push(range);
+    return new Response(raw.slice(+lower,end+1), {status:206, headers:{"Content-Range":`bytes ${lower}-${end}/${raw.length}`}});
+  });
+  const file=ownedAudioFile({id:"id3",provider:"local",status:"available",streamUrl:"/files/id3",bytes:raw.length,mime:"audio/mpeg", playbackHints:{audioStart}},90)!;
+  delivery.select(file,"token");
+  const reader=delivery.decoderResponse("token","bytes=0-3")!;
+  expect(reader.headers.get("Content-Range")).toBe(`bytes 0-3/${raw.length-audioStart}`);
+  expect(new Uint8Array(await reader.arrayBuffer())).toEqual(raw.slice(audioStart,audioStart+4));
+  const prefixEnd=audioStart+Math.ceil(10*(raw.length-audioStart)/90);
+  await delivery.fill();
+  expect(ranges).toEqual([`bytes=${audioStart}-${prefixEnd-1}`, `bytes=${prefixEnd}-`,`bytes=0-${audioStart-1}`]);
+  const {createHash}=await import("node:crypto");
+  const hash=(b:Uint8Array)=>createHash("sha256").update(b).digest("hex");
+  expect(hash(new Uint8Array(await delivery.response("token",null)!.arrayBuffer()))).toBe(hash(raw));
+});
