@@ -2,7 +2,7 @@
 id: 17
 title: Смешанный плейлист по одной ссылке
 track: product
-stage: tech
+stage: plan
 branch: codex/17-mixed-playlist-sharing
 pr:
 started: 2026-11-25
