@@ -238,6 +238,35 @@ describe("tab-local audio delivery", () => {
     await reader.cancel();
     delivery.clear();
   });
+  it.each([
+    { size:3_932_160, expectedTail:2_097_152 },  // both the 32 KiB page and the index fit
+    { size:3_948_544, expectedTail:2_113_536 },  // only the 16 KiB page and the index fit
+    { size:3_949_000, expectedTail:2_114_036 },  // only the index itself fits
+    { size:3_949_045, expectedTail:null },       // the header has left too little room for the index
+  ])("respects the already-read prefix when discovering a legacy M4A index ($size bytes)", async ({size, expectedTail}) => {
+    const tailStart = 2_114_036;
+    const data = new Uint8Array(size);
+    const header = new DataView(data.buffer);
+    header.setUint32(0, 16);
+    data.set(new TextEncoder().encode("ftyp"),4);
+    header.setUint32(16, tailStart - 16);
+    data.set(new TextEncoder().encode("mdat"),20);
+    header.setUint32(tailStart, size - tailStart);
+    data.set(new TextEncoder().encode("moov"),tailStart + 4);
+    const ranges: string[] = [];
+    const delivery = new AudioDelivery(async (_url, init) => {
+      const range = new Headers(init.headers).get("Range")!;
+      ranges.push(range);
+      const [from,to] = range.slice(6).split("-").map(Number);
+      return new Response(data.slice(from,to! + 1), {status:206, headers:{"Content-Range":`bytes ${from}-${to}/${size}`}});
+    });
+    const file = ownedAudioFile({id:"legacy",provider:"local",status:"available",streamUrl:"/files/legacy",mime:"audio/mp4",bytes:size})!;
+    await delivery.prepare(file);
+    const expected = ["bytes=0-262143"];
+    if (expectedTail !== null) expected.push(`bytes=${expectedTail}-${size-1}`);
+    expect(ranges).toEqual(expected);
+    delivery.clear();
+  });
   it("reserves the beginning and a fitting index when decoder alignment alone would exceed 2 MiB", async () => {
     const limit = 2 * 1024 ** 2;
     const size = 2 * limit + 16_380, tailStart = size - limit + 8192;
