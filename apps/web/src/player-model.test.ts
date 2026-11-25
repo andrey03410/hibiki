@@ -23,6 +23,7 @@ import {
   restoreCachedPlayback,
   playbackSettingsSignature,
   nativePlaybackReading,
+  NativePlaybackPosition,
   youtubePlaybackReading,
   prepareYoutubePlayback,
   nativeRestartHasProgress,
@@ -80,6 +81,28 @@ const lost = {
     },
   ],
 } as any;
+
+describe("native playback position across source changes", () => {
+  it("keeps a pending seek through a failed relay, then accepts positions from the direct source", () => {
+    const position = new NativePlaybackPosition();
+    const audio = {currentSrc:"blob:m4a", currentTime:162, readyState:4, seeking:false};
+    position.loaded(audio);
+    const requested = position.handoff(audio, 0);
+    expect(requested).toBe(162);
+    expect(position.read(audio)).toBeUndefined();
+    Object.assign(audio,{currentSrc:"/files/a?hibiki-audio=t",currentTime:0,readyState:0});
+    position.loaded(audio);
+    expect(position.handoff(audio, requested)).toBe(162);
+    Object.assign(audio,{currentSrc:"/files/a",readyState:1,seeking:true});
+    position.loaded(audio);
+    expect(position.read(audio)).toBeUndefined();
+    Object.assign(audio,{currentTime:162.3,readyState:4,seeking:false});
+    position.loaded(audio);
+    expect(position.read(audio)).toBe(162.3);
+    audio.currentSrc = "/files/other";
+    expect(position.read(audio)).toBeUndefined();
+  });
+});
 
 describe("activation of an individual item", () => {
   const state = { queue: [audio.id, video.id, lost.id], queueIndex: 1, mode: "audio" } as const;

@@ -75,6 +75,7 @@ import {
   PlayerCards,
   playbackSettingsPatch,
   nativePlaybackReading,
+  NativePlaybackPosition,
   youtubePlaybackReading,
   prepareYoutubePlayback,
   nativeRestartHasProgress,
@@ -383,7 +384,7 @@ export function PlayerProvider({
     failed = useRef(new Set<string>()),
     sourceCheck = useRef<{ key: string; token: number } | undefined>(undefined),
     nativeStarted = useRef(new WeakSet<HTMLMediaElement>()),
-    nativePositionReady = useRef(new WeakSet<HTMLMediaElement>()),
+    nativePosition = useRef(new NativePlaybackPosition()),
     nativeRestart = useRef<{ element: HTMLMediaElement; position: number } | null>(null),
     youtubeRestart = useRef<ReturnType<typeof createYoutubeRestartConfirmation> | null>(null),
     draggingId = useRef<string | undefined>(undefined),
@@ -440,9 +441,15 @@ export function PlayerProvider({
   const [rangeOnlyToken, setRangeOnlyToken] = useState<string>();
   const m4a = useRef<ReturnType<typeof attachM4aSource> | undefined>(undefined);
   const m4aEnabled = !!audioToken && rangeOnlyToken !== audioToken && canUseM4aSource(file);
+  function preserveAudioPosition() {
+    // Reusing the same element resets its clock to zero between media resources.
+    const position = nativePosition.current.handoff(native.current, seekOnLoad.current);
+    seekOnLoad.current = position;
+    if (live.current.position !== position) patch({position});
+  }
   function fallbackToAudioRange() {
     if (!m4aEnabled || !audioToken || deniedToken.current === audioToken) return false;
-    seekOnLoad.current = readPosition() ?? live.current.position;
+    preserveAudioPosition();
     setRangeOnlyToken(audioToken);
     return true;
   }
@@ -451,7 +458,7 @@ export function PlayerProvider({
   useLayoutEffect(() => {
     delivery.select(audioToken ? file : undefined, audioToken ?? "", reason => {
       const element = native.current;
-      seekOnLoad.current = readPosition() ?? live.current.position;
+      preserveAudioPosition();
       if (reason === "denied") {
         deniedToken.current = audioToken;
         element?.pause();
@@ -596,7 +603,8 @@ export function PlayerProvider({
   }
   function readPosition(): number | undefined {
     const element = native.current;
-    if (element && nativePositionReady.current.has(element)) return element.currentTime;
+    const position = nativePosition.current.read(element);
+    if (position !== undefined) return position;
     const iframe = youtube.current;
     const iframeState = iframe?.getPlayerState?.();
     if (iframeState === 1 || iframeState === 2) {
@@ -902,7 +910,7 @@ export function PlayerProvider({
   async function sourceError(accessDenied = false) {
     if (!currentMedia() || (!accessDenied && audioToken && deniedToken.current === audioToken)) return;
     if (!accessDenied && audioToken && native.current?.error) {
-      seekOnLoad.current = readPosition() ?? live.current.position;
+      preserveAudioPosition();
       setDirectAudioKey(audioToken);
       return;
     }
@@ -1021,8 +1029,8 @@ export function PlayerProvider({
   function nativeWaiting(event: SyntheticEvent<HTMLMediaElement>) {
     if (!currentNative(event.currentTarget) || !playingRef.current) return;
     feedback.wait();
-    if (nativePositionReady.current.has(event.currentTarget))
-      confirmPosition(event.currentTarget.currentTime, event.currentTarget.playbackRate);
+    const position = nativePosition.current.read(event.currentTarget);
+    if (position !== undefined) confirmPosition(position, event.currentTarget.playbackRate);
     attempt.paused();
   }
   const nativeEvents = {
@@ -1036,7 +1044,7 @@ export function PlayerProvider({
       if (!currentNative(event.currentTarget)) return;
       const element = event.currentTarget;
       if (seekOnLoad.current > 0) element.currentTime = seekOnLoad.current;
-      nativePositionReady.current.add(element);
+      nativePosition.current.loaded(element);
       updateNativeRanges(event);
       element.volume = live.current.volume;
       setDuration(Number.isFinite(element.duration) ? element.duration : 0);
@@ -1055,7 +1063,7 @@ export function PlayerProvider({
     },
     onTimeUpdate(event: SyntheticEvent<HTMLMediaElement>) {
       const element = event.currentTarget;
-      if (!currentNative(element) || element.seeking || scrub.current) return;
+      if (!currentNative(element) || element.seeking || scrub.current || nativePosition.current.read(element) === undefined) return;
       const reading = nativePlaybackReading(element);
       confirmPosition(reading[0], reading[2]);
       const restart = nativeRestart.current;
@@ -1088,6 +1096,7 @@ export function PlayerProvider({
     onSeeked(event: SyntheticEvent<HTMLMediaElement>) {
       const element = event.currentTarget;
       if (!currentNative(element)) return;
+      nativePosition.current.loaded(element);
       readNativeRanges(element);
       if (nativeRestart.current?.element === element) {
         nativeRestart.current.position = element.currentTime;
@@ -1103,8 +1112,8 @@ export function PlayerProvider({
     },
     onPause(event: SyntheticEvent<HTMLMediaElement>) {
       if (!currentNative(event.currentTarget) || !event.currentTarget.paused || event.currentTarget.ended) return;
-      if (nativePositionReady.current.has(event.currentTarget))
-        confirmPosition(event.currentTarget.currentTime, event.currentTarget.playbackRate);
+      const position = nativePosition.current.read(event.currentTarget);
+      if (position !== undefined) confirmPosition(position, event.currentTarget.playbackRate);
       measureProgress();
       attempt.paused();
       playIntent(false);
@@ -2031,7 +2040,7 @@ export function PlayerProvider({
       {children(player, miniPlayer)}
       {/* WebKit retains playback permission on this element when MSE falls back to Range. */}
       {source && presentationKind === "audio" && (
-        <audio key={audioToken ?? sourceKey} ref={attachNative}
+        <audio key={relayKey ?? sourceKey} ref={attachNative}
           data-audio-source={audioUrl} src={m4aEnabled ? undefined : audioUrl}
           preload={playing ? "auto" : "none"} {...nativeEvents} />
       )}

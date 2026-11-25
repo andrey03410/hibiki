@@ -36,6 +36,25 @@ export type PlaybackTrigger = "manual" | "advance" | "repeat";
 export type PlaybackFinish = "ended" | "manual" | "error" | "interrupted";
 export type PlaybackReading = [position: number, duration?: number, playbackRate?: number];
 
+type NativeResource = Pick<HTMLMediaElement, "currentSrc" | "currentTime" | "readyState" | "seeking">;
+
+export class NativePlaybackPosition {
+  private loadedSources = new WeakMap<NativeResource, string>();
+  loaded(element: NativeResource) {
+    if (element.readyState >= 1 && element.currentSrc && !element.seeking)
+      this.loadedSources.set(element, element.currentSrc);
+  }
+  read(element: NativeResource | null) {
+    if (element && element.readyState >= 1 && this.loadedSources.get(element) === element.currentSrc)
+      return element.currentTime;
+  }
+  handoff(element: NativeResource | null, requestedPosition: number) {
+    const position = this.read(element) ?? requestedPosition;
+    if (element) this.loadedSources.delete(element);
+    return position;
+  }
+}
+
 export function nativePlaybackReading(
   media: Pick<HTMLMediaElement, "currentTime" | "duration" | "playbackRate">,
   position = media.currentTime,
