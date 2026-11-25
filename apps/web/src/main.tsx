@@ -1,12 +1,10 @@
-import { KanameSettings } from "./KanameSettings";
+import {Button, DataContext, EmptyState, EMPTY, ErrorMessage, Modal, PageTop, useData} from "./WorkspaceUi";
 import React, {
   useEffect,
   useMemo,
   useSyncExternalStore,
   useRef,
   useState,
-  useContext,
-  createContext,
   type ReactNode,
 } from "react";
 import { createRoot } from "react-dom/client";
@@ -43,17 +41,14 @@ import {
   Check,
   ChevronRight,
   ArrowLeft,
-  Upload,
   Link2,
   LoaderCircle,
   CircleAlert,
   Trash2,
   Pencil,
   LogOut,
-  KeyRound,
   Copy,
   ExternalLink,
-  FolderOpen,
   Sparkles,
   CheckCircle2,
   ListPlus,
@@ -63,6 +58,7 @@ import {
 import type {
   ItemDto,
   LibraryDto,
+  CompactLibraryOverviewDto,
   LibraryCardOverviewDto,
   PlaylistDto,
   PlaylistDetailDto,
@@ -73,7 +69,7 @@ import type {
   UserDto,
 } from "@hibiki/contracts";
 import { api, ApiError, setWorkspaceOwner, formatDuration, humanDuration, mediaWord } from "./api.ts";
-import { ErrorBoundary } from "./ErrorBoundary";
+import { ErrorBoundary, lazyView } from "./ErrorBoundary";
 import { ItemArtwork } from "./ItemArtwork.tsx";
 import { PlaylistCard, PlaylistCover } from "./PlaylistCard";
 import { PlaylistDetails } from "./playlist-detail";
@@ -82,7 +78,6 @@ import { LibraryPages, LibraryCardReader, fetchItems, searchBody, validateOvervi
 import { PlayerProvider, usePlayerCommands, usePlayerCard, useHasPlayer, useQueueEditable } from "./player.tsx";
 import { missingClassification } from "@hibiki/contracts/classification";
 import { TagNavigation } from "./TagNavigation";
-import { ClassificationMigration } from "./ClassificationMigration";
 import { GroupSelect, TagPicker, PerformanceEditor } from "./ClassificationEditor";
 import { batchTagChanges, compositionDelta, groupKeys, groups, groupOf, itemPerformance, missingLabels, TagCatalog,
   type BatchMode, type Performance, type PerformanceFilter, type TagGroup, type Voice } from "./taxonomy";
@@ -92,130 +87,31 @@ import { resetLibraryFilters, librarySourceBadges, matchesSearch, sourceAvailabi
 import { LibrarySearchControls, useLibrarySearch } from "./LibrarySearchControls.tsx";
 import { NoteEditor, NoteIndicator, NotesContext, NotesLoadError, useNotes, useNotesController } from "./NoteEditor.tsx";
 import { noteFor } from "./note-model.ts";
-import { SourceReplacement } from "./SourceReplacement.tsx";
 import { SharedItemStatus, useSavedSharedPlaylists } from "./LibrarySharing";
 import { issueShare, kanameLoginHref } from "./sharing-model";
 import { overviewInterval, activeJobsInterval, pollWhileVisible } from "./use-sharing-request";
-import { YoutubeLinkedPlaylist, YoutubeLinkImport, YoutubeSyncNotifications, YoutubeSyncSettings } from "./YoutubeSync.tsx";
+import { YoutubeSyncNotifications } from "./YoutubeNotifications";
 import { useHistoryRevision } from "./history-events.ts";
 import { preferenceEvent, type HistoryPreference } from "./listening-client.ts";
 import "./styles.css";
 import "./library-view.css";
 import "./taxonomy.css";
 
-const RuleEditor = React.lazy(() => import("./RuleEditor"));
+const ImportModal = lazyView(() => import("./ImportModal"));
+const JobsPage = lazyView(() => import("./JobsPage"));
+const SettingsPage = lazyView(() => import("./SettingsPage"));
+const KanameSettings = lazyView(() => import("./KanameSettings").then(m => ({default:m.KanameSettings})));
+const YoutubeLinkedPlaylist = lazyView(() => import("./YoutubeSync").then(m => ({default:m.YoutubeLinkedPlaylist})));
+const ClassificationMigration = lazyView(() => import("./ClassificationMigration").then(m => ({default:m.ClassificationMigration})));
+const SourceReplacement = lazyView(() => import("./SourceReplacement").then(m => ({default:m.SourceReplacement})));
+const RuleEditor = lazyView(() => import("./RuleEditor"));
 const loadSharing = () => import("./Sharing");
-const HistorySettings = React.lazy(() => import("./HistorySettings").then(module => ({ default: module.HistorySettings })));
-const IssueShare = React.lazy(() => loadSharing().then(module => ({ default: module.IssueShare })));
-const ShareManager = React.lazy(() => loadSharing().then(module => ({ default: module.ShareManager })));
-const SharedMediaPage = React.lazy(() => loadSharing().then(module => ({ default: module.SharedMediaPage })));
-const SavedSharedPlaylistCard = React.lazy(() => loadSharing().then(module => ({ default: module.SavedSharedPlaylistCard })));
+const IssueShare = lazyView(() => loadSharing().then(module => ({ default: module.IssueShare })));
+const ShareManager = lazyView(() => loadSharing().then(module => ({ default: module.ShareManager })));
+const SharedMediaPage = lazyView(() => loadSharing().then(module => ({ default: module.SharedMediaPage })));
+const SavedSharedPlaylistCard = lazyView(() => loadSharing().then(module => ({ default: module.SavedSharedPlaylistCard })));
 
-const EMPTY: LibraryDto = { items: [], tags: [], playlists: [], jobs: [] };
 type Toast = { id: number; text: string; error?: boolean };
-const DataContext = createContext<{
-  library: LibraryDto;
-  overview: LibraryCardOverviewDto;
-  refresh: () => Promise<void>;
-  notify: (text: string, error?: boolean) => void;
-  openImport: () => void;
-}>({
-  library: EMPTY,
-  overview: {...EMPTY, playlists: [], total: 0, tagCounts: {}, revision: ""},
-  refresh: async () => {},
-  notify: () => {},
-  openImport: () => {},
-});
-const useData = () => useContext(DataContext);
-function Button({
-  children,
-  busy,
-  className = "",
-  ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & { busy?: boolean }) {
-  return (
-    <button
-      {...props}
-      disabled={props.disabled || busy}
-      className={`button ${className}`}
-    >
-      {busy ? <LoaderCircle size={16} className="spin" /> : null}
-      {children}
-    </button>
-  );
-}
-function ErrorMessage({ error }: { error?: string }) {
-  return error ? (
-    <div className="error-box" role="alert">
-      <CircleAlert size={17} />
-      <span>{error}</span>
-    </div>
-  ) : null;
-}
-function Modal({
-  title,
-  subtitle,
-  children,
-  close,
-  wide = false,
-}: {
-  title: string;
-  subtitle?: string;
-  children: ReactNode;
-  close: () => void;
-  wide?: boolean;
-}) {
-  const ref = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const dialog = ref.current!;
-    dialog.showModal();
-    return () => dialog.close();
-  }, []);
-  return (
-    <dialog
-      ref={ref}
-      className={`modal ${wide ? "wide" : ""}`}
-      onCancel={(event) => {
-        event.preventDefault();
-        close();
-      }}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) close();
-      }}
-    >
-      <div className="modal-heading">
-        <div>
-          <h2>{title}</h2>
-          {subtitle && <p>{subtitle}</p>}
-        </div>
-        <button className="icon-button" aria-label="Закрыть" onClick={close}>
-          <X size={20} />
-        </button>
-      </div>
-      {children}
-    </dialog>
-  );
-}
-function EmptyState({
-  title,
-  text,
-  action,
-  icon = <Music2 size={29} />,
-}: {
-  title: string;
-  text: string;
-  action?: ReactNode;
-  icon?: ReactNode;
-}) {
-  return (
-    <div className="empty-state">
-      <div className="empty-icon">{icon}</div>
-      <h3>{title}</h3>
-      <p>{text}</p>
-      {action}
-    </div>
-  );
-}
 
 function Auth({
   kaname,
@@ -440,12 +336,12 @@ function Workspace({
   }
   async function refresh() {
     const sequence = ++request.current;
-    const result = await api<LibraryCardOverviewDto | undefined>("/library/overview?playlists=summary&since=" + encodeURIComponent(overviewToken.current));
+    const result = await api<CompactLibraryOverviewDto | LibraryCardOverviewDto | undefined>("/library/overview?playlists=summary&format=compact&since=" + encodeURIComponent(overviewToken.current));
     if (sequence !== request.current) return;
     if (result === undefined) return;
-    validateOverview(result);
-    overviewToken.current = result.overviewToken!;
-    setOverview(result);
+    const decoded = validateOverview(result);
+    overviewToken.current = decoded.overviewToken!;
+    setOverview(decoded);
   }
   async function load() {
     try {
@@ -695,7 +591,9 @@ function Workspace({
             <ErrorBoundary label="Не удалось показать плеер.">{miniPlayer}</ErrorBoundary>
           </main>
         </div>
-        {importOpen && <ImportModal close={() => setImportOpen(false)} />}{" "}
+        {importOpen && <ErrorBoundary label="Не удалось открыть добавление медиа."><React.Suspense fallback={<div className="loading-inline" role="status">Загружаем…</div>}>
+          <ImportModal close={() => setImportOpen(false)} />
+        </React.Suspense></ErrorBoundary>}{" "}
         {createOpen && (
           <PlaylistEditor
             close={() => setCreateOpen(false)}
@@ -726,18 +624,6 @@ function Workspace({
       </PlayerProvider>
     </DataContext.Provider>
     </NotesContext.Provider>
-  );
-}
-function PageTop({ label, children }: { label: string; children?: ReactNode }) {
-  return (
-    <div className="page-top">
-      <div className="breadcrumb">
-        <span>Ваше пространство</span>
-        <ChevronRight size={13} />
-        <span>{label}</span>
-      </div>
-      {children}
-    </div>
   );
 }
 function LibraryNavigation(props: Omit<React.ComponentProps<typeof TagNavigation>, "hasPlayer">) {
@@ -1334,15 +1220,6 @@ function EditItem({ item, close, focusSource }: { item: ItemDto; close: () => vo
   const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
   const borrowedOnly = !!item.shared && item.sources.every(source => source.shared);
   const missing = missingClassification(tagIds.flatMap(id => catalog.byId.get(id) ?? []),performance,voices);
-  const replacement = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!focusSource) return;
-    const frame = requestAnimationFrame(() => {
-      replacement.current?.scrollIntoView({ block: "start" });
-      replacement.current?.querySelector("input")?.focus({ preventScroll: true });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [focusSource]);
   return (
     <Modal
       title="Детали записи"
@@ -1423,7 +1300,9 @@ function EditItem({ item, close, focusSource }: { item: ItemDto; close: () => vo
           ))}
         </section>
       )}
-      <div ref={replacement}><SourceReplacement item={item} reload={refresh} localOnly={borrowedOnly} /></div>
+      <React.Suspense fallback={<div role="status">Загружаем источники…</div>}>
+        <SourceReplacement item={item} reload={refresh} localOnly={borrowedOnly} focusSource={focusSource} />
+      </React.Suspense>
       <ItemListeningSummary itemId={item.id} />
     </Modal>
   );
@@ -1875,6 +1754,7 @@ function PlaylistPage({ id, onBrowseTag }: { id: string; onBrowseTag: (id: strin
       </section>
       <NoteEditor key={playlist.id} kind="playlist" id={playlist.id} />
       {playlist.youtubeLinked && !edit && (
+        <React.Suspense fallback={<div role="status">Загружаем данные YouTube…</div>}>
         <YoutubeLinkedPlaylist
           key={playlist.id}
           playlist={playlist}
@@ -1886,6 +1766,7 @@ function PlaylistPage({ id, onBrowseTag }: { id: string; onBrowseTag: (id: strin
             await resolve();
           }}
         />
+        </React.Suspense>
       )}
       {automatic && !playlist.youtubeLinked && (
         <div className="rule-summary">
@@ -2361,7 +2242,9 @@ function TagsPage({ query, onQuery, onBrowse }: {
           />
         </label>
       </div>
-      <ClassificationMigration reload={refresh}/>
+      <React.Suspense fallback={<div role="status">Загружаем настройки классификации…</div>}>
+        <ClassificationMigration reload={refresh}/>
+      </React.Suspense>
       <NotesLoadError />
       <div className="tag-grid tag-directory">
         {tags.map((tag) => {
@@ -2535,778 +2418,6 @@ function TagsPage({ query, onQuery, onBrowse }: {
     </>
   );
 }
-function ImportModal({ close }: { close: () => void }) {
-  const { refresh, notify } = useData(),
-    [tab, setTab] = useState("files"),
-    [url, setUrl] = useState(""),
-    [files, setFiles] = useState<File[]>([]),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState(""),
-    [drag, setDrag] = useState(false);
-  const navigate = useNavigate();
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      if (tab === "youtube") {
-        await api("/jobs", "POST", { kind: "youtube-import", input: { url } });
-        notify("Импорт YouTube начат. Прогресс — в заданиях.");
-      } else {
-        const body = new FormData();
-        files.forEach((file) =>
-          body.append(tab === "archive" ? "file" : "files", file),
-        );
-        await api(
-          tab === "archive" ? "/imports/upload" : "/items/upload",
-          "POST",
-          body,
-        );
-        notify(
-          tab === "archive"
-            ? "Архив отправлен на проверку. Посмотрите отчёт перед применением."
-            : `Добавлено файлов: ${files.length}`,
-        );
-      }
-      await refresh();
-      close();
-      if (tab !== "files") navigate("/jobs");
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <Modal
-      title="Добавить в медиатеку"
-      subtitle="Файлы, ссылки и подборки — всё на своём месте."
-      close={close}
-    >
-      <div className="import-tabs">
-        {[
-          ["files", "Файлы", <Upload size={16} />],
-          ["youtube", "YouTube", <Youtube size={17} />],
-          ["archive", "Архив Hibiki", <FolderOpen size={16} />],
-        ].map(([id, label, icon]) => (
-          <button
-            key={id as string}
-            className={tab === id ? "active" : ""}
-            onClick={() => {
-              setTab(id as string);
-              setFiles([]);
-              setError("");
-            }}
-          >
-            {icon}
-            {label}
-          </button>
-        ))}
-      </div>
-      <form onSubmit={submit}>
-        {tab === "youtube" ? (
-          <>
-            <label>
-              Ссылка на видео или плейлист
-              <div className="input-icon">
-                <Link2 size={17} />
-                <input
-                  type="url"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  placeholder="https://www.youtube.com/watch?v=…"
-                  required
-                />
-              </div>
-            </label>
-            <div className="import-info">
-              <Youtube size={21} />
-              <p>
-                Каждое видео появится отдельной записью. Импорт сохраняет ссылки
-                и названия. Скачивание можно запустить отдельно в меню записи.
-              </p>
-            </div>
-            <YoutubeLinkImport url={url} onCreated={async (playlist) => {
-              await refresh();
-              close();
-              navigate(`/playlists/${playlist.id}`);
-            }} />
-          </>
-        ) : (
-          <>
-            <label
-              className={`dropzone ${drag ? "dragging" : ""}`}
-              onDragOver={(e) => {
-                e.preventDefault();
-                setDrag(true);
-              }}
-              onDragLeave={() => setDrag(false)}
-              onDrop={(e) => {
-                e.preventDefault();
-                setDrag(false);
-                setFiles(
-                  Array.from(e.dataTransfer.files).slice(
-                    0,
-                    tab === "archive" ? 1 : undefined,
-                  ),
-                );
-              }}
-            >
-              <input
-                type="file"
-                multiple={tab === "files"}
-                accept={
-                  tab === "archive"
-                    ? ".zip,application/zip"
-                    : "audio/*,video/*,.flac,.m4a,.ogg,.mkv"
-                }
-                onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
-              />
-              <span className="drop-icon">
-                <Upload size={26} />
-              </span>
-              <strong>
-                {files.length
-                  ? `Выбрано файлов: ${files.length}`
-                  : "Перетащите файлы сюда"}
-              </strong>
-              <span>
-                или <u>выберите на устройстве</u>
-              </span>
-              <small>
-                {tab === "archive"
-                  ? "ZIP-архив, экспортированный из Hibiki"
-                  : "Аудио и видео · MP3, FLAC, WAV, MP4, WebM и другие"}
-              </small>
-            </label>
-            {files.length > 0 && (
-              <div className="upload-file-list">
-                {files.map((f, index) => (
-                  <div key={`${f.name}-${index}`}>
-                    <span className="truncate">{f.name}</span>
-                    <small>{(f.size / 1024 / 1024).toFixed(1)} МБ</small>
-                    <button
-                      type="button"
-                      className="icon-button"
-                      aria-label={`Убрать ${f.name}`}
-                      onClick={() =>
-                        setFiles((old) => old.filter((_, i) => i !== index))
-                      }
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            {tab === "archive" && (
-              <p className="muted small">
-                Сначала Hibiki проверит содержимое архива и покажет отчёт в
-                заданиях. Вы сможете применить импорт после проверки.
-              </p>
-            )}
-          </>
-        )}
-        <ErrorMessage error={error} />
-        <div className="modal-actions">
-          <Button
-            type="button"
-            className="subtle"
-            onClick={close}
-            disabled={busy}
-          >
-            Отмена
-          </Button>
-          <Button
-            type="submit"
-            className="primary"
-            busy={busy}
-            disabled={tab === "youtube" ? !url : !files.length}
-          >
-            {tab === "files"
-              ? "Добавить файлы"
-              : tab === "youtube"
-                ? "Импортировать"
-                : "Проверить архив"}
-            <ArrowUpRight size={16} />
-          </Button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-const JOB_NAMES: Record<string, string> = {
-  "youtube-import": "Импорт из YouTube",
-  "youtube-download": "Скачивание YouTube",
-  "youtube-refresh": "Проверка источника",
-  "shared-copy": "Создание локальной копии",
-  export: "Экспорт медиатеки",
-  import: "Импорт архива",
-  "import-preview": "Проверка архива",
-  "import-apply": "Применение архива",
-};
-const STATE_NAMES: Record<string, string> = {
-  queued: "В очереди",
-  running: "Выполняется",
-  done: "Завершено",
-  failed: "Ошибка",
-  cancelled: "Отменено",
-};
-function JobReport({ result }: { result: any }) {
-  const report = result.preview ?? result,
-    counts = report.counts,
-    duplicates = report.duplicates;
-  const metrics: [string, unknown][] = counts
-    ? [
-        ["Записей", counts.items],
-        ["Тегов", counts.tags],
-        ["Плейлистов", counts.playlists],
-        ["Файлов", counts.files],
-      ]
-    : [
-        ["Добавлено", report.added],
-        ["Уже в библиотеке", report.existing ?? report.reused],
-        ["Недоступно", report.unavailable],
-        ["Ошибок", report.errors],
-      ];
-  const notices = [...(report.issues ?? []), ...(report.warnings ?? [])];
-  return (
-    <div className="job-report">
-      {metrics.some(([, n]) => typeof n === "number") && (
-        <div className="report-counts">
-          {metrics
-            .filter(([, n]) => typeof n === "number")
-            .map(([label, n]) => (
-              <span key={label}>
-                <strong>{String(n)}</strong>
-                {label}
-              </span>
-            ))}
-        </div>
-      )}
-      {duplicates && (
-        <p className="small muted">
-          Совпадения: {duplicates.items} записей, {duplicates.tags} тегов,{" "}
-          {duplicates.playlists} плейлистов. Существующие названия сохранятся.
-        </p>
-      )}
-      {!!report.missingFiles?.length && (
-        <p className="report-warning">
-          Локальных файлов вне архива: {report.missingFiles.length}. Их
-          источники могут быть недоступны после переноса.
-        </p>
-      )}
-      {notices.map((notice: string, index: number) => (
-        <p className="report-warning" key={index}>
-          {notice}
-        </p>
-      ))}
-      {result.preview && (
-        <p className={`report-verdict ${report.canApply ? "" : "danger-text"}`}>
-          {report.canApply
-            ? "Архив проверен. Можно применить импорт."
-            : "Импорт заблокирован. Исправьте ошибки архива."}
-        </p>
-      )}
-      {result.itemId && (
-        <p className="small muted">
-          Локальный источник добавлен к существующей записи.
-        </p>
-      )}
-      <details className="job-result">
-        <summary>Технические подробности</summary>
-        <pre>{JSON.stringify(result, null, 2)}</pre>
-      </details>
-    </div>
-  );
-}
-function JobsPage() {
-  const { library, refresh, notify, openImport } = useData(),
-    [filter, setFilter] = useState("all"),
-    [pending, setPending] = useState("");
-  const jobs = [...library.jobs]
-    .filter(
-      (j) =>
-        filter === "all" ||
-        (filter === "active" &&
-          (j.state === "running" || j.state === "queued")) ||
-        (filter === "failed" && j.state === "failed"),
-    )
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  async function action(id: string, name: string) {
-    setPending(`${id}:${name}`);
-    try {
-      await api(
-        name === "apply" ? `/imports/${id}/apply` : `/jobs/${id}/${name}`,
-        "POST",
-      );
-      await refresh();
-      notify(
-        name === "cancel"
-          ? "Задание отменено"
-          : name === "retry"
-            ? "Задание добавлено на повтор"
-            : "Импорт запущен",
-      );
-    } catch (e) {
-      notify((e as Error).message, true);
-    } finally {
-      setPending("");
-    }
-  }
-  return (
-    <>
-      <PageTop label="Задания">
-        <span className="status-pill">
-          <span className="online-dot" />
-          Обновляется автоматически
-        </span>
-      </PageTop>
-      <div className="title-row">
-        <div>
-          <span className="eyebrow">ПУСТЬ HIBIKI ЗАЙМЁТСЯ ЭТИМ</span>
-          <h1>
-            Задания<span className="heading-dot">.</span>
-          </h1>
-          <p className="muted">
-            Импорт, скачивание и перенос продолжаются, пока вы слушаете.
-          </p>
-        </div>
-        <Button className="primary" onClick={openImport}>
-          <Plus size={17} />
-          Добавить медиа
-        </Button>
-      </div>
-      <div className="segmented jobs-filter">
-        {[
-          ["all", "Все задания"],
-          ["active", "В работе"],
-          ["failed", "С ошибками"],
-        ].map(([id, label]) => (
-          <button
-            key={id}
-            className={filter === id ? "active" : ""}
-            onClick={() => setFilter(id!)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-      <div className="jobs-list">
-        {jobs.map((job) => {
-          const active = job.state === "running" || job.state === "queued",
-            result = job.result as any;
-          const isPreview =
-            job.kind === "import" &&
-            job.state === "done" &&
-            result?.preview?.canApply === true;
-          const percent = Math.min(100, Math.round(job.progress * 100));
-          return (
-            <article className="job-card" key={job.id}>
-              <div className={`job-icon ${job.state}`}>
-                {active ? (
-                  <LoaderCircle size={23} className="spin" />
-                ) : job.state === "done" ? (
-                  <CheckCircle2 size={23} />
-                ) : job.state === "failed" ? (
-                  <CircleAlert size={23} />
-                ) : (
-                  <Download size={23} />
-                )}
-              </div>
-              <div className="job-body">
-                <div className="job-title-row">
-                  <h3>{JOB_NAMES[job.kind] ?? job.kind}</h3>
-                  <span className={`state-badge ${job.state}`}>
-                    {STATE_NAMES[job.state]}
-                  </span>
-                </div>
-                <p className="small muted">
-                  {new Date(job.createdAt).toLocaleString("ru-RU", {
-                    day: "numeric",
-                    month: "long",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                  {job.attempt > 1 ? ` · Попытка ${job.attempt}` : ""}
-                </p>
-                {active && (
-                  <>
-                    <div className="progress-track">
-                      <span style={{ width: `${percent}%` }} />
-                    </div>
-                    <div className="progress-meta">
-                      <span>
-                        {job.state === "queued"
-                          ? "Ожидает свободного обработчика"
-                          : `${job.completed} из ${job.total || "…"}`}
-                      </span>
-                      <span>{percent}%</span>
-                    </div>
-                  </>
-                )}
-                {job.error && <ErrorMessage error={job.error} />}{" "}
-                {result && <JobReport result={result} />}
-              </div>
-              <div className="job-actions">
-                {active && (
-                  <Button
-                    className="subtle compact"
-                    busy={pending === `${job.id}:cancel`}
-                    onClick={() => action(job.id, "cancel")}
-                  >
-                    Отменить
-                  </Button>
-                )}
-                {(job.state === "failed" || job.state === "cancelled") && (
-                  <Button
-                    className="subtle compact"
-                    busy={pending === `${job.id}:retry`}
-                    onClick={() => action(job.id, "retry")}
-                  >
-                    <RefreshCw size={14} />
-                    Повторить
-                  </Button>
-                )}
-                {job.kind === "export" && job.state === "done" && (
-                  <a
-                    href={`/api/jobs/${job.id}/download`}
-                    className="button primary compact"
-                    download
-                  >
-                    <Download size={14} />
-                    Скачать архив
-                  </a>
-                )}
-                {isPreview && (
-                  <Button
-                    className="primary compact"
-                    busy={pending === `${job.id}:apply`}
-                    onClick={() => action(job.id, "apply")}
-                  >
-                    Применить импорт
-                  </Button>
-                )}
-              </div>
-            </article>
-          );
-        })}
-      </div>
-      {!jobs.length && (
-        <EmptyState
-          title={
-            filter === "all"
-              ? "Всё спокойно"
-              : filter === "active"
-                ? "Нет активных заданий"
-                : "Ошибок нет"
-          }
-          text={
-            filter === "all"
-              ? "Здесь появится прогресс импорта, скачивания и экспорта вашей медиатеки."
-              : "Новые задания появятся здесь автоматически."
-          }
-          icon={<CheckCircle2 size={29} />}
-        />
-      )}
-    </>
-  );
-}
-function SettingsPage({ user, kaname }: { user: UserDto; kaname: boolean }) {
-  const { overview, notify, refresh, openImport } = useData(),
-    [tokens, setTokens] = useState<
-      { id: string; name: string; createdAt: string }[]
-    >([]),
-    [name, setName] = useState(""),
-    [newToken, setNewToken] = useState(""),
-    [busy, setBusy] = useState(false),
-    [includeFiles, setIncludeFiles] = useState(true),
-    [includeNotes, setIncludeNotes] = useState(false),
-    [includeHistorySummary, setIncludeHistorySummary] = useState(false),
-    [exportBusy, setExportBusy] = useState(false),
-    [error, setError] = useState("");
-  const navigate = useNavigate();
-  async function loadTokens() {
-    try {
-      const data = await api("/tokens");
-      setTokens(data.tokens);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  }
-  useEffect(() => {
-    void loadTokens();
-  }, []);
-  const mcpUrl = `${location.origin}/mcp`;
-  async function copy(value: string, success: string) {
-    try {
-      await navigator.clipboard.writeText(value);
-      notify(success);
-    } catch {
-      notify(
-        "Не удалось скопировать. Выделите и скопируйте текст вручную.",
-        true,
-      );
-    }
-  }
-  return (
-    <>
-      <PageTop label="Настройки" />
-      <div className="title-row">
-        <div>
-          <span className="eyebrow">ВАШЕ ПРОСТРАНСТВО ПОД КОНТРОЛЕМ</span>
-          <h1>
-            Настройки<span className="heading-dot">.</span>
-          </h1>
-          <p className="muted">
-            Подключайте агента и берите медиатеку с собой.
-          </p>
-        </div>
-      </div>
-      <div className="settings-layout">
-        {kaname && <KanameSettings userId={user.id} />}
-        <YoutubeSyncSettings />
-        <HistorySettings playlists={overview.playlists} revision={overview.revision} />
-        <section className="settings-card">
-          <div className="settings-card-heading">
-            <span className="settings-icon">
-              <KeyRound size={22} />
-            </span>
-            <div>
-              <h2>Подключение ИИ-агента</h2>
-              <p>
-                Пусть ваш агент помогает собирать и настраивать медиатеку через
-                MCP.
-              </p>
-            </div>
-          </div>
-          <label>
-            Адрес MCP-сервера
-            <div className="copy-field">
-              <input value={mcpUrl} readOnly />
-              <button
-                className="icon-button"
-                aria-label="Скопировать адрес MCP"
-                onClick={() => copy(mcpUrl, "Адрес MCP скопирован")}
-              >
-                <Copy size={16} />
-              </button>
-            </div>
-          </label>
-          <p className="small muted">
-            Добавьте этот адрес в MCP-клиент агента и передайте личный токен как{" "}
-            <code>Authorization: Bearer …</code>. Агент получает доступ только к
-            вашей библиотеке.
-          </p>
-          <div className="section-heading token-heading">
-            <h3>Личные токены</h3>
-            <span className="small muted">{tokens.length} активно</span>
-          </div>
-          <ErrorMessage error={error} />
-          <div className="token-list">
-            {tokens.map((token) => (
-              <div key={token.id}>
-                <span className="token-dot">
-                  <KeyRound size={15} />
-                </span>
-                <div>
-                  <strong>{token.name}</strong>
-                  <small>
-                    Создан{" "}
-                    {new Date(token.createdAt).toLocaleDateString("ru-RU")}
-                  </small>
-                </div>
-                <Button
-                  className="subtle compact"
-                  onClick={async () => {
-                    try {
-                      await api(`/tokens/${token.id}`, "DELETE");
-                      await loadTokens();
-                      notify(
-                        "Токен отозван. Агент больше не сможет его использовать.",
-                      );
-                    } catch (e) {
-                      notify((e as Error).message, true);
-                    }
-                  }}
-                >
-                  Отозвать
-                </Button>
-              </div>
-            ))}
-            {!tokens.length && (
-              <p className="muted small">
-                Пока нет токенов. Создайте отдельный для каждого агента.
-              </p>
-            )}
-          </div>
-          <form
-            className="create-token-form"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              setBusy(true);
-              try {
-                const data = await api("/tokens", "POST", { name });
-                setNewToken(data.token);
-                setName("");
-                await loadTokens();
-              } catch (e) {
-                setError((e as Error).message);
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            <input
-              aria-label="Название токена"
-              placeholder="Название, например Codex"
-              value={name}
-              maxLength={100}
-              onChange={(e) => setName(e.target.value)}
-              required
-            />
-            <Button
-              className="primary"
-              type="submit"
-              busy={busy}
-              disabled={!name.trim()}
-            >
-              <Plus size={16} />
-              Создать токен
-            </Button>
-          </form>
-        </section>
-        <section className="settings-card">
-          <div className="settings-card-heading">
-            <span className="settings-icon warm">
-              <FolderOpen size={22} />
-            </span>
-            <div>
-              <h2>Ваша медиатека — с вами</h2>
-              <p>
-                Переносите записи, теги, плейлисты и настройки в другую
-                установку или аккаунт.
-              </p>
-            </div>
-          </div>
-          <div className="export-block">
-            <h3>Экспортировать библиотеку</h3>
-            <p className="small muted">
-              Архив сохраняет названия и связи между записями. Пароли, сессии и
-              токены в него не входят.
-            </p>
-            <label className="check-row">
-              <input
-                type="checkbox"
-                checked={includeFiles}
-                onChange={(e) => setIncludeFiles(e.target.checked)}
-              />
-              <span>
-                Включить локальные медиафайлы
-                <small>
-                  Без файлов сохранятся метаданные и ссылки на источники.
-                </small>
-              </span>
-            </label>
-            <label className="check-row">
-              <input type="checkbox" checked={includeNotes} onChange={(event) => setIncludeNotes(event.target.checked)} />
-              <span>Включить личные заметки</span>
-            </label>
-            <label className="check-row">
-              <input type="checkbox" checked={includeHistorySummary} onChange={(event) => setIncludeHistorySummary(event.target.checked)} />
-              <span>Включить сводку прослушиваний<small>Счётчики для правил плейлистов.</small></span>
-            </label>
-            <Button
-              className="subtle"
-              busy={exportBusy}
-              onClick={async () => {
-                setExportBusy(true);
-                try {
-                  await api("/jobs", "POST", {
-                    kind: "export",
-                    input: { includeFiles, includeNotes, includeHistorySummary },
-                  });
-                  await refresh();
-                  notify(
-                    "Экспорт запущен. Ссылка на архив появится в заданиях.",
-                  );
-                  navigate("/jobs");
-                } catch (e) {
-                  notify((e as Error).message, true);
-                } finally {
-                  setExportBusy(false);
-                }
-              }}
-            >
-              <Download size={16} />
-              Создать архив
-            </Button>
-          </div>
-          <div className="import-block">
-            <h3>Импортировать архив</h3>
-            <p className="small muted">
-              Hibiki проверит файлы и связи перед применением. Текущая
-              библиотека сохранится.
-            </p>
-            <Button className="subtle" onClick={openImport}>
-              <Upload size={16} />
-              Выбрать архив
-            </Button>
-          </div>
-        </section>
-        <section className="settings-card account-settings">
-          <div className="settings-card-heading">
-            <span className="avatar">
-              {user.login.slice(0, 1).toUpperCase()}
-            </span>
-            <div>
-              <h2>{user.login}</h2>
-              <p>Личный аккаунт в вашей установке Hibiki</p>
-            </div>
-            <span className="status-pill">
-              <span className="online-dot" />
-              Подключён
-            </span>
-          </div>
-          <p className="muted small">
-            Положение в очереди, громкость, перемешивание и повтор сохраняются
-            автоматически. После перезагрузки нажмите «Воспроизвести», чтобы
-            продолжить.
-          </p>
-        </section>
-      </div>
-      {newToken && (
-        <Modal
-          title="Токен готов"
-          subtitle="Скопируйте его сейчас — полностью он показывается один раз."
-          close={() => setNewToken("")}
-        >
-          <div className="token-secret">
-            <code>{newToken}</code>
-            <button
-              className="icon-button"
-              aria-label="Скопировать токен"
-              onClick={() => copy(newToken, "Токен скопирован")}
-            >
-              <Copy size={18} />
-            </button>
-          </div>
-          <p className="muted small">
-            Сохраните токен в настройках вашего агента. При необходимости его
-            можно отозвать на этой странице.
-          </p>
-          <div className="modal-actions">
-            <Button className="primary" onClick={() => setNewToken("")}>
-              Готово
-              <Check size={16} />
-            </Button>
-          </div>
-        </Modal>
-      )}
-    </>
-  );
-}
-
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <BrowserRouter>

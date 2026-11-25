@@ -79,21 +79,32 @@ function prefix(type: string, size: number) {
   return result;
 }
 function box(type: string, parts: Buffer[]) {
-  return Buffer.concat([prefix(type, parts.reduce((size, b) => size + b.length, 0)), ...parts]);
+  return Buffer.concat(boxParts(type, parts));
 }
-function replace(boxes: Box[], type: string, content: Buffer) {
-  return boxes.map(b => b.type === type ? content : b.raw);
+function boxParts(type: string, parts: Buffer[]) {
+  return [prefix(type, parts.reduce((size, part) => size + part.length, 0)), ...parts];
 }
-export function chunkOffsetBox(offsets: number[]) {
-  const wide = offsets.some(offset => offset > 0xffffffff);
-  const width = wide ? 8 : 4;
-  const values = Buffer.alloc(8 + width * offsets.length);
-  values.writeUInt32BE(offsets.length, 4);
-  for (let i = 0; i < offsets.length; i++) {
-    if (wide) values.writeBigUInt64BE(BigInt(offsets[i]), 8 + i * width);
-    else values.writeUInt32BE(offsets[i], 8 + i * width);
+function replace(boxes: Box[], type: string, contents: Buffer[]) {
+  const index = boxes.findIndex(b => b.type === type);
+  check(index >= 0 && index === boxes.findLastIndex(b => b.type === type));
+  const parts = boxes.map(b => b.raw);
+  parts.splice(index, 1, ...contents);
+  return parts;
+}
+function offsetTable(count: number, wide: boolean) {
+  const table = Buffer.alloc(16 + count * (wide ? 8 : 4));
+  table.writeUInt32BE(table.length, 0);
+  table.write(wide ? "co64" : "stco", 4);
+  table.writeUInt32BE(count, 12);
+  return table;
+}
+function writeOffsets(table: Buffer, offsets: ArrayLike<number>, base: number) {
+  const data = new DataView(table.buffer, table.byteOffset, table.byteLength);
+  if (table.length === 16 + offsets.length * 4) {
+    for (let i = 0; i < offsets.length; i++) data.setUint32(16 + i * 4, offsets[i] + base);
+  } else {
+    for (let i = 0; i < offsets.length; i++) data.setBigUint64(16 + i * 8, BigInt(offsets[i] + base));
   }
-  return box(wide ? "co64" : "stco", [values]);
 }
 type Slice = { virtual: number; source: number; length: number };
 export type AudioView = { header: Buffer; slices: Slice[]; bytes: number };
@@ -113,6 +124,21 @@ function movieDuration(mvhd: Buffer, tkhd: Buffer) {
   else throw new InvalidMp4();
   return box("mvhd", [movie]);
 }
+// Only the offset width can change the layout. Resolve it before filling the table or copying file bytes.
+export function buildHeader(chunkStarts: Float64Array, layout: (table: Buffer) => Buffer[]) {
+  const last = chunkStarts[chunkStarts.length - 1];
+  const wide = last > 0xffffffff;
+  let table = offsetTable(chunkStarts.length, wide);
+  let parts = layout(table);
+  let base = parts.reduce((sum, part) => sum + part.length, 0);
+  if (!wide && base + last > 0xffffffff) {
+    table = offsetTable(chunkStarts.length, true);
+    parts = layout(table);
+    base = parts.reduce((sum, part) => sum + part.length, 0);
+  }
+  writeOffsets(table, chunkStarts, base);
+  return { head: Buffer.concat(parts, base), base };
+}
 function parseMoov(data: Buffer, mdats: BoxHeader[]): AudioView {
   const movie = children(data);
   check(!movie.some(b => b.type === "mvex"));
@@ -130,7 +156,9 @@ function parseMoov(data: Buffer, mdats: BoxHeader[]): AudioView {
   const dref = child(children(child(minf, "dinf").body), "dref").body;
   const ref = children(dref.subarray(8))[0];
   check(ref?.type === "url " && (ref.body.readUInt32BE(0) & 1));
-  const offsets = child(stbl, stbl.some(b => b.type === "co64") ? "co64" : "stco");
+  const offsetBoxes = stbl.filter(b => b.type === "stco" || b.type === "co64");
+  check(offsetBoxes.length === 1);
+  const offsets = offsetBoxes[0];
   const width = offsets.type === "co64" ? 8 : 4;
   const count = offsets.body.readUInt32BE(4);
   check(count > 0 && count <= maxChunks && offsets.body.length === 8 + count * width);
@@ -142,45 +170,49 @@ function parseMoov(data: Buffer, mdats: BoxHeader[]): AudioView {
   const samples = stsz.readUInt32BE(8);
   check(samples > 0 && stsz.length === 12 + (fixed ? 0 : samples * 4));
 
-  let sample = 0, row = 0, payload = 0, mdat = 0;
-  const chunkStarts: number[] = [];
+  let sample = 0, payload = 0, mdat = 0;
+  const chunkStarts = new Float64Array(count);
   const slices: Slice[] = [];
-  for (let i = 0; i < count; i++) {
-    if (row + 1 < rows && stsc.readUInt32BE(8 + (row + 1) * 12) === i + 1) row++;
+  const sizes = new DataView(stsz.buffer, stsz.byteOffset, stsz.byteLength);
+  const positions = new DataView(offsets.body.buffer, offsets.body.byteOffset, offsets.body.byteLength);
+  for (let row = 0; row < rows; row++) {
+    const first = stsc.readUInt32BE(8 + row * 12) - 1;
+    const end = row + 1 < rows ? stsc.readUInt32BE(8 + (row + 1) * 12) - 1 : count;
     const n = stsc.readUInt32BE(12 + row * 12);
     const description = stsc.readUInt32BE(16 + row * 12);
-    check(n > 0 && sample + n <= samples && description >= 1 && description <= descriptions.length);
-    let length = n * fixed;
-    if (!fixed) for (let s = sample; s < sample + n; s++) length += stsz.readUInt32BE(12 + s * 4);
-    sample += n;
-    const source = width === 8 ? Number(offsets.body.readBigUInt64BE(8 + i * 8)) : offsets.body.readUInt32BE(8 + i * 4);
-    while (mdat < mdats.length && source >= mdats[mdat].end) mdat++;
-    check(Number.isSafeInteger(source + length) && mdat < mdats.length &&
-      source >= mdats[mdat].body && source + length <= mdats[mdat].end && length > 0);
-    chunkStarts.push(payload);
-    const prev = slices.at(-1);
-    check(!prev || source >= prev.source + prev.length);
-    if (prev && source === prev.source + prev.length) prev.length += length;
-    else slices.push({ virtual: payload, source, length });
-    payload += length;
+    check(first >= 0 && end > first && end <= count && n > 0 && n * (end - first) <= samples - sample &&
+      description >= 1 && description <= descriptions.length);
+    for (let i = first; i < end; i++) {
+      let length = n * fixed;
+      if (!fixed) {
+        for (let s = sample; s < sample + n; s++) length += sizes.getUint32(12 + s * 4);
+      }
+      sample += n;
+      const source = width === 4 ? positions.getUint32(8 + i * 4) : Number(positions.getBigUint64(8 + i * 8));
+      while (mdat < mdats.length && source >= mdats[mdat].end) mdat++;
+      check(Number.isSafeInteger(source + length) && mdat < mdats.length &&
+        source >= mdats[mdat].body && source + length <= mdats[mdat].end && length > 0);
+      chunkStarts[i] = payload;
+      const prev = slices[slices.length - 1];
+      check(!prev || source >= prev.source + prev.length);
+      if (prev && source === prev.source + prev.length) prev.length += length;
+      else slices.push({ virtual: payload, source, length });
+      payload += length;
+    }
   }
-  check(sample === samples && row === rows - 1);
+  check(sample === samples);
   const mvhd = movieDuration(child(movie, "mvhd").body, tkhd);
   const ftyp = box("ftyp", [Buffer.from("M4A \0\0\0\0M4A isommp42", "latin1")]);
   const mdatHeader = prefix("mdat", payload);
-  function makeHeader(base: number) {
-    const co = chunkOffsetBox(chunkStarts.map(offset => offset + base));
-    const table = box("stbl", replace(stbl, offsets.type, co));
-    const mediaInfo = box("minf", replace(minf, "stbl", table));
-    const media = box("mdia", replace(mdia, "minf", mediaInfo));
-    const audio = box("trak", replace(track.filter(b => b.type !== "tref"), "mdia", media));
-    const moov = box("moov", [mvhd, audio, ...movie.filter(b => b.type === "udta").map(b => b.raw)]);
-    return Buffer.concat([ftyp, moov, mdatHeader]);
+  function layout(co: Buffer) {
+    const table = boxParts("stbl", replace(stbl, offsets.type, [co]));
+    const mediaInfo = boxParts("minf", replace(minf, "stbl", table));
+    const media = boxParts("mdia", replace(mdia, "minf", mediaInfo));
+    const audio = boxParts("trak", replace(track.filter(b => b.type !== "tref"), "mdia", media));
+    const moov = boxParts("moov", [mvhd, ...audio, ...movie.filter(b => b.type === "udta").map(b => b.raw)]);
+    return [ftyp, ...moov, mdatHeader];
   }
-  let head = makeHeader(0);
-  let base = head.length;
-  head = makeHeader(base);
-  if (head.length !== base) { base = head.length; head = makeHeader(base); }
+  const { head, base } = buildHeader(chunkStarts, layout);
   for (const span of slices) span.virtual += base;
   return { header: head, slices, bytes: base + payload };
 }

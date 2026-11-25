@@ -167,6 +167,14 @@ export interface LibraryCardOverviewDto extends Omit<LibraryOverviewDto, "playli
   overviewToken?: string;
   countsKey?: string;
 }
+/** Rows follow the same order as the active tag directory used by compact cards. */
+export type LibraryDirectoryRow = [
+  id: string, name: string, color: string, group: TagGroup, count: number,
+  aliases?: string[] | null, parents?: (number | string)[] | null, legacyFlat?: true,
+];
+export interface CompactLibraryOverviewDto extends Omit<LibraryCardOverviewDto, "tags" | "tagCounts"> {
+  directory: LibraryDirectoryRow[];
+}
 export interface LibraryPageDto {
   items: ItemDto[];
   total: number;
@@ -183,6 +191,7 @@ export interface LibraryCardDto extends Omit<ItemDto, "tags" | "originalTitle" |
   updatedAt?: string;
 }
 export interface LibraryCardPageDto extends Omit<LibraryPageDto, "items"> {
+  countsByIndex?: number[];
   items: LibraryCardDto[];
   tags: TagDto[];
 }

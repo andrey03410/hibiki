@@ -2,9 +2,10 @@
 id: 16
 title: Производительность прослушивания и основных сценариев
 track: product
-stage: build
-branch: codex/16-playback-performance
-pr: https://github.com/andrey03410/hibiki/pull/18
+stage: review
+branch: codex/16-production-tuning
+pr: https://github.com/andrey03410/hibiki/pull/22
+initial_pr: https://github.com/andrey03410/hibiki/pull/18
 started: 2026-11-25
 merged:
 ---
@@ -21,6 +22,10 @@ merged:
 Звук видео извлекается на лету, без копии на диске.
 
 25 ноября владелец разрешил полную реализацию и выкладку: «Действуй автономно вплоть до деплоя».
+
+Первая реализация вышла в [PR №18](https://github.com/andrey03410/hibiki/pull/18).
+Во [второй итерации](https://github.com/andrey03410/hibiki/pull/22) учтены замеры
+на рабочем аккаунте, стабильность MCP при выкладке и скорости видеорежима.
 
 ## Стадии
 

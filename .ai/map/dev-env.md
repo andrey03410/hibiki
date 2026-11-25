@@ -81,3 +81,7 @@ Linux-сборка может завершить muxing до аудио. Под�
 Образ включает режим `PROVISIONED_ACCOUNTS_ONLY=1`. Новые аккаунты создаёт администратор через `scripts/provision-account.ts`. Пароль передаётся через stdin.
 
 Caddy на порту 8443 сжимает JSON, JavaScript и CSS через zstd или gzip. Шаблон конфигурации и порядок обновления приведены в [deploy](../../.claude/skills/deploy/SKILL.md). Файлы Vite в /assets/ кешируются на год, HTML и служебный скрипт плеера проверяются при открытии.
+
+
+Отдельный маршрут MCP ждёт доступности backend до 20 секунд во время выкладки.
+Параметры Caddy и проверка POST описаны в [инструкции деплоя](../../.claude/skills/deploy/SKILL.md).

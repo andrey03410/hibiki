@@ -5,7 +5,7 @@ import { open, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ffmpeg from "ffmpeg-static";
-import { buildAudioView, chunkOffsetBox, readAudioRange } from "./mp4-audio";
+import { buildAudioView, buildHeader, readAudioRange } from "./mp4-audio";
 
 const run = (args: string[]) => promisify(execFile)(String(ffmpeg), ["-hide_banner", "-loglevel", "error", ...args]);
 describe("virtual M4A", () => {
@@ -66,9 +66,11 @@ describe("virtual M4A", () => {
     try { expect(await buildAudioView(handle, (await handle.stat()).size)).toBeNull(); }
     finally { await handle.close(); }
   });
-  it("promotes chunk offsets above 4 GiB", () => {
-    const box = chunkOffsetBox([0xffffffff, 0x100000000]);
-    expect(box.toString("ascii", 4, 8)).toBe("co64");
-    expect(box.readBigUInt64BE(24)).toBe(0x100000000n);
+  it("promotes offsets when adding the header places a chunk beyond 4 GiB", () => {
+    const starts = new Float64Array([0, 0xffffffff - 16]);
+    const { head, base } = buildHeader(starts, table => [Buffer.alloc(12), table]);
+    expect(head.toString("ascii", 16, 20)).toBe("co64");
+    expect(head.readBigUInt64BE(28)).toBe(BigInt(base));
+    expect(head.readBigUInt64BE(36)).toBe(BigInt(base + starts[1]));
   });
 });

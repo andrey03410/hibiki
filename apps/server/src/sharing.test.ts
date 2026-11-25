@@ -109,7 +109,7 @@ describe("media sharing", () => {
     expect(head.rawPayload).toHaveLength(0);
 
     expect((await app.inject({ method: "DELETE", url: "/api/share-links/" + link.id, cookies: alice })).statusCode).toBe(200);
-    expect((await asBob({ url: source.streamUrl!, headers: { range: "bytes=44-45" } })).statusCode).toBe(404);
+    expect((await asBob({ url: source.streamUrl!, headers: { range: "bytes=44-45", "x-hibiki-audio-rate": "65536" } })).statusCode).toBe(404);
   });
 
   it("serves virtual M4A ranges through owned and revocable shared URLs", async () => {
@@ -136,7 +136,7 @@ describe("media sharing", () => {
     expect(head.headers["content-length"]).toBe(String(source.audioBytes));
     expect(head.rawPayload).toHaveLength(0);
     const offset = source.audioViewStart! - 10;
-    const range = await asBob({ url: sharedUrl, headers: { range: `bytes=${offset}-${offset + 99}` } });
+    const range = await asBob({ url: sharedUrl, headers: { range: `bytes=${offset}-${offset + 99}`, "x-hibiki-audio-rate": "65536" } });
     expect(range.statusCode).toBe(206);
     expect(range.rawPayload).toEqual(full.rawPayload.subarray(offset, offset + 100));
     const unsat = await asBob({ url: sharedUrl, headers: { range: `bytes=${source.audioBytes}-` } });

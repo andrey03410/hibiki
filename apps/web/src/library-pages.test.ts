@@ -150,3 +150,25 @@ it("recovers the full queue from a new first page when its original snapshot exp
   expect(ids.mock.calls).toEqual([["expired"], ["fresh"]]);
   expect(pages.snapshot()).toMatchObject({ selectionId: "fresh", items: rows(400, 100) });
 });
+
+it("dispatches a pasted or replaced search immediately", () => {
+  const read = vi.fn().mockResolvedValue(first);
+  new LibraryPages(read).open({...defaultLibrarySearch,query:"Название записи"}, {...defaultLibrarySearch,query:"Другая запись"});
+  expect(read).toHaveBeenCalledTimes(1);
+});
+
+it("debounces single-character insertions and deletions at any position", async () => {
+  vi.useFakeTimers();
+  try {
+    const read = vi.fn().mockResolvedValue(first);
+    const pages = new LibraryPages(read);
+    const steps = ["трек", "тАрек", "тБАрек", "БАрек", "Арек", "Ар🎵ек", "Арек"];
+    for (let i = 1; i < steps.length; i++) {
+      pages.open({...defaultLibrarySearch,query:steps[i]!}, {...defaultLibrarySearch,query:steps[i-1]!});
+      await vi.advanceTimersByTimeAsync(100);
+      expect(read).not.toHaveBeenCalled();
+    }
+    await vi.advanceTimersByTimeAsync(50);
+    expect(read).toHaveBeenCalledOnce();
+  } finally { vi.useRealTimers(); }
+});
