@@ -1,6 +1,7 @@
 import type { FileHandle } from "node:fs/promises";
 
-export const audioViewVersion = 1;
+export const audioViewVersion = 2;
+const supportedEntries = new Set(["mp4a", "Opus", "fLaC"]);
 const maxMoovBytes = 32 * 1024 ** 2;
 const maxChunks = 500_000;
 const readSize = 256 * 1024;
@@ -124,7 +125,7 @@ function parseMoov(data: Buffer, mdats: BoxHeader[]): AudioView {
   const stsd = child(stbl, "stsd").body;
   const descriptions = children(stsd.subarray(8));
   check(descriptions.length === stsd.readUInt32BE(4) && descriptions.length > 0 &&
-    descriptions.every(d => d.type === "mp4a" && d.body.readUInt16BE(6) === 1));
+    descriptions.every(d => supportedEntries.has(d.type) && d.body.readUInt16BE(6) === 1));
   // Keep only tracks whose samples refer to the current file.
   const dref = child(children(child(minf, "dinf").body), "dref").body;
   const ref = children(dref.subarray(8))[0];

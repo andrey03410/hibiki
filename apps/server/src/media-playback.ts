@@ -64,7 +64,8 @@ export function playbackFields(file: StoredPlayback, streamUrl: string) {
     ...(file.hintsVersion === hintsVersion && file.audioStart !== null && {
       playbackHints: { audioStart: Number(file.audioStart), ...(file.tailStart !== null && { tailStart: Number(file.tailStart) }) },
     }),
-    ...(file.audioViewVersion === audioViewVersion && file.audioViewBytes && {
+    // The v1 AAC representation is byte-identical while the worker checks older files for Opus and FLAC.
+    ...(file.audioViewVersion > 0 && file.audioViewVersion <= audioViewVersion && file.audioViewBytes && {
       audioStreamUrl: streamUrl + "/audio", audioMime: "audio/mp4",
       audioBytes: Number(file.audioViewBytes), audioViewStart: Number(file.audioViewStart),
     }),
