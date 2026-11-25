@@ -55,6 +55,7 @@ export interface MediaInspection {
   compatibleVideoCodec: boolean;
   compatibleAudioCodec: boolean;
   audioBits?: number;
+  float32Audio?: boolean;
 }
 export async function hashFile(path: string, signal?: AbortSignal) {
   signal?.throwIfAborted();
@@ -152,10 +153,12 @@ export async function inspectFile(
   const compatibleAudioCodec = Boolean(audio && mp4CompatibleAudio(audio.codec, audio.details));
   const audioBits = audio ? Number(/\((\d+) bit\)/.exec(audio.details)?.[1] ??
     /\b(?:u|s)(8|16|24|32|64)p?\b/.exec(audio.details)?.[1] ?? (/\bdblp?\b/.test(audio.details) ? 64 : 32)) : undefined;
+  const float32Audio = !!audio && /\bfltp?\b/.test(audio.details);
   const mp4Audio = !audio || compatibleAudioCodec;
   const browserCompatible =
     kind === "video"
-      ? ([".mp4", ".m4v"].includes(ext) && compatibleVideoCodec && mp4Audio) ||
+      ? (ext === ".mov" && compatibleVideoCodec && audio?.codec === "pcm_f32le") ||
+        ([".mp4", ".m4v"].includes(ext) && compatibleVideoCodec && mp4Audio) ||
         (ext === ".webm" &&
           ["vp8", "vp9", "av1"].includes(video!.codec) &&
           (!audio || ["opus", "vorbis"].includes(audio.codec)))
@@ -196,7 +199,7 @@ export async function inspectFile(
     playback: await inspectPlaybackMetadata(path, mime),
     compatibleVideoCodec,
     compatibleAudioCodec,
-    audioBits,
+    audioBits, float32Audio,
   };
 }
 
@@ -218,7 +221,9 @@ export async function preparePlayback(
   await mkdir(workDir, { recursive: true });
   const copyAudio = media.compatibleAudioCodec || (media.kind === "audio" && ["mp3", "vorbis"].includes(media.audioCodec ?? ""));
   const audioExt: Record<string, string> = { aac: ".m4a", opus: ".ogg", vorbis: ".ogg", mp3: ".mp3", flac: ".flac" };
-  const ext = media.kind === "video" ? ".mp4" : copyAudio ? audioExt[media.audioCodec!] : ".flac";
+  const preserveFloat = !copyAudio && media.float32Audio;
+  const ext = media.kind === "video" ? (preserveFloat ? ".mov" : ".mp4")
+    : copyAudio ? audioExt[media.audioCodec!] : preserveFloat ? ".wav" : ".flac";
   const target = resolve(workDir, randomUUID() + ext);
   const args = [
     "-hide_banner",
@@ -249,6 +254,7 @@ export async function preparePlayback(
   if (media.audioStream) {
     args.push("-map", media.audioStream);
     if (copyAudio) args.push("-c:a", "copy");
+    else if (preserveFloat) args.push("-c:a", "pcm_f32le");
     else {
       invariant(media.audioBits && media.audioBits <= 32, 415, "unsupported_precision",
         "Разрядность звука превышает возможности подготовки в FLAC");
@@ -258,7 +264,7 @@ export async function preparePlayback(
     }
   }
   args.push("-map_metadata", "0");
-  if (ext === ".mp4" || ext === ".m4a") args.push("-strict", "experimental", "-movflags", "+faststart");
+  if (ext === ".mp4" || ext === ".m4a" || ext === ".mov") args.push("-strict", "experimental", "-movflags", "+faststart");
   args.push(target);
   try {
     await new Promise<void>((resolveProcess, rejectProcess) => {

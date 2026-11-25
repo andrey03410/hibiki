@@ -44,6 +44,17 @@ describe("local playback compatibility", () => {
     expect(meta.audioStart).toBe(data.indexOf("mdat") + 4);
     expect(meta.tailStart).toBe(fast ? null : data.indexOf("moov") - 4);
   });
+  it.each(["audio", "video"])("preserves floating point samples outside the integer PCM range for %s", async kind => {
+    const file = join(root, "float.mkv");
+    const video = kind === "video" ? ["-f", "lavfi", "-i", "color=s=32x32:d=0.25"] : [];
+    await generate(file, [...video, "-f", "lavfi", "-i", "aevalsrc=1.25*sin(2*PI*440*t)+0.0000000001:d=0.25",
+      "-c:a", "pcm_f32le", ...(video.length ? ["-c:v", "libx264"] : [])]);
+    const result = await preparePlayback(file, await inspectFile(file), root);
+    expect(result?.media).toMatchObject({ browserCompatible: true, audioCodec: "pcm_f32le", kind });
+    const samples = async (input: string) => (await run(String(ffmpeg), ["-loglevel", "error", "-i", input,
+      "-map", "0:a:0", "-c:a", "pcm_f32le", "-f", "f32le", "-"], {encoding: "buffer"})).stdout;
+    expect(await samples(result!.path)).toEqual(await samples(file));
+  });
   it("preserves 24-bit PCM samples and channels in the lossless preparation", async () => {
     const file = join(root, "precision.aiff");
     await generate(file, ["-f", "lavfi", "-i", "anoisesrc=r=96000:d=0.1", "-ac", "2", "-c:a", "pcm_s24be"]);
