@@ -69,7 +69,7 @@ import type {
   UserDto,
 } from "@hibiki/contracts";
 import { api, ApiError, setWorkspaceOwner, formatDuration, humanDuration, mediaWord } from "./api.ts";
-import { ErrorBoundary } from "./ErrorBoundary";
+import { ErrorBoundary, lazyView } from "./ErrorBoundary";
 import { ItemArtwork } from "./ItemArtwork.tsx";
 import { PlaylistCard, PlaylistCover } from "./PlaylistCard";
 import { PlaylistDetails } from "./playlist-detail";
@@ -97,19 +97,19 @@ import "./styles.css";
 import "./library-view.css";
 import "./taxonomy.css";
 
-const ImportModal = React.lazy(() => import("./ImportModal"));
-const JobsPage = React.lazy(() => import("./JobsPage"));
-const SettingsPage = React.lazy(() => import("./SettingsPage"));
-const KanameSettings = React.lazy(() => import("./KanameSettings").then(m => ({default:m.KanameSettings})));
-const YoutubeLinkedPlaylist = React.lazy(() => import("./YoutubeSync").then(m => ({default:m.YoutubeLinkedPlaylist})));
-const ClassificationMigration = React.lazy(() => import("./ClassificationMigration").then(m => ({default:m.ClassificationMigration})));
-const SourceReplacement = React.lazy(() => import("./SourceReplacement").then(m => ({default:m.SourceReplacement})));
-const RuleEditor = React.lazy(() => import("./RuleEditor"));
+const ImportModal = lazyView(() => import("./ImportModal"));
+const JobsPage = lazyView(() => import("./JobsPage"));
+const SettingsPage = lazyView(() => import("./SettingsPage"));
+const KanameSettings = lazyView(() => import("./KanameSettings").then(m => ({default:m.KanameSettings})));
+const YoutubeLinkedPlaylist = lazyView(() => import("./YoutubeSync").then(m => ({default:m.YoutubeLinkedPlaylist})));
+const ClassificationMigration = lazyView(() => import("./ClassificationMigration").then(m => ({default:m.ClassificationMigration})));
+const SourceReplacement = lazyView(() => import("./SourceReplacement").then(m => ({default:m.SourceReplacement})));
+const RuleEditor = lazyView(() => import("./RuleEditor"));
 const loadSharing = () => import("./Sharing");
-const IssueShare = React.lazy(() => loadSharing().then(module => ({ default: module.IssueShare })));
-const ShareManager = React.lazy(() => loadSharing().then(module => ({ default: module.ShareManager })));
-const SharedMediaPage = React.lazy(() => loadSharing().then(module => ({ default: module.SharedMediaPage })));
-const SavedSharedPlaylistCard = React.lazy(() => loadSharing().then(module => ({ default: module.SavedSharedPlaylistCard })));
+const IssueShare = lazyView(() => loadSharing().then(module => ({ default: module.IssueShare })));
+const ShareManager = lazyView(() => loadSharing().then(module => ({ default: module.ShareManager })));
+const SharedMediaPage = lazyView(() => loadSharing().then(module => ({ default: module.SharedMediaPage })));
+const SavedSharedPlaylistCard = lazyView(() => loadSharing().then(module => ({ default: module.SavedSharedPlaylistCard })));
 
 type Toast = { id: number; text: string; error?: boolean };
 

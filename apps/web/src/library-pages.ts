@@ -74,6 +74,14 @@ export async function fetchItems(ids: string[], verifyShared = false): Promise<I
   return items;
 }
 
+function singleCharacterEdit(oldText: string, newText: string) {
+  const oldChars = Array.from(oldText), newChars = Array.from(newText);
+  const [shorter, longer] = oldChars.length < newChars.length ? [oldChars, newChars] : [newChars, oldChars];
+  if (longer.length !== shorter.length + 1) return false;
+  const first = shorter.findIndex((char, index) => char !== longer[index]);
+  return first < 0 || shorter.slice(first).every((char, index) => char === longer[first + index + 1]);
+}
+
 export class LibraryPages {
   private state = {...emptyPage, loading: true, error: ""};
   private listeners = new Set<() => void>();
@@ -97,9 +105,7 @@ export class LibraryPages {
   };
   open(filters: LibrarySearch, previous?: LibrarySearch) {
     // Debounce typing. A paste, full-title replacement or clear is ready to submit.
-    const singleEdit = previous && (filters.query.length === previous.query.length + 1 && filters.query.startsWith(previous.query)
-      || previous.query.length === filters.query.length + 1 && previous.query.startsWith(filters.query));
-    if (singleEdit && filters.query.trim()) {
+    if (previous && filters.query.trim() && singleCharacterEdit(previous.query, filters.query)) {
       this.cancel();
       this.timer = setTimeout(() => void this.refresh(), 150);
     } else if (this.state.selectionId) {
