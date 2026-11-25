@@ -1,3 +1,5 @@
+import { updateSourceBuffer } from "./media-source-buffer";
+import { playAudioFragments } from "./audio-fragments";
 import type { AudioDelivery, AudioFile } from "./audio-delivery";
 
 type Mp4Box = { type: string; body: number; end: number };
@@ -64,10 +66,13 @@ export function prepareM4aHeader(ftyp: Uint8Array, tail: Uint8Array, tailStart: 
 }
 
 export function canUseM4aSource(file?: AudioFile) {
-  return !!file && /^(audio\/mp4|audio\/x-m4a)$/.test(file.mime) &&
-    file.audioStart !== undefined && (!file.tailStart || file.size - file.tailStart <= 2 * 1024 * 1024) &&
-    navigator.vendor === "Apple Computer, Inc." && typeof MediaSource !== "undefined" &&
+  if (!file || !/^(audio\/mp4|audio\/x-m4a)$/.test(file.mime) ||
+      file.audioStart === undefined || typeof MediaSource === "undefined") return false;
+  if (navigator.vendor === "Apple Computer, Inc.") return (!file.tailStart || file.size - file.tailStart <= 2 * 1024 * 1024) &&
     MediaSource.isTypeSupported("audio/mp4");
+  return navigator.vendor === "Google Inc." && !file.tailStart && file.size > 32 * 1024 ** 2 &&
+    file.audioStart >= 256 * 1024 && file.audioStart <= 2 * 1024 ** 2 &&
+    MediaSource.isTypeSupported('audio/mp4; codecs="mp4a.40.2"');
 }
 
 export function attachM4aSource(
@@ -88,26 +93,16 @@ export function attachM4aSource(
     if (!started || reading || source.readyState !== "open") return;
     reading = true;
     try {
+      if (navigator.vendor === "Google Inc.") {
+        await playAudioFragments(element, source, file, read, signal);
+        return;
+      }
       let start = 0;
       const end = file.tailStart ?? file.size;
       const buffer = source.addSourceBuffer("audio/mp4");
       if (file.duration && Number.isFinite(file.duration)) source.duration = file.duration;
-      async function append(data: Uint8Array<ArrayBuffer>) {
-        signal.throwIfAborted();
-        await new Promise<void>((resolve, reject) => {
-          const cleanup = () => {
-            buffer.removeEventListener("updateend", finish);
-            buffer.removeEventListener("error", fail);
-            signal.removeEventListener("abort", fail);
-          };
-          const finish = () => { cleanup(); resolve(); };
-          const fail = () => { cleanup(); reject(new Error("Audio parser stopped")); };
-          buffer.addEventListener("updateend", finish, {once:true});
-          buffer.addEventListener("error", fail, {once:true});
-          signal.addEventListener("abort", fail, {once:true});
-          try { buffer.appendBuffer(data); } catch (error) { cleanup(); reject(error); }
-        });
-      }
+      const append = (data: Uint8Array<ArrayBuffer>) =>
+        updateSourceBuffer(buffer, signal, () => buffer.appendBuffer(data));
       if (file.tailStart) {
         const prefix = new Uint8Array(await read("bytes=0-15").arrayBuffer());
         const first = readBox(prefix, 0, file.size);

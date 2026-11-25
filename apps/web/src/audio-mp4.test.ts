@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { prepareM4aHeader } from "./audio-mp4";
+import { describe, expect, it, vi } from "vitest";
+import { canUseM4aSource, prepareM4aHeader } from "./audio-mp4";
 
 function box(name: string, ...parts: Uint8Array[]) {
   const length = 8 + parts.reduce((sum, part) => sum + part.length, 0);
@@ -39,4 +39,17 @@ describe("progressive WebKit M4A header", () => {
     expect(prepareM4aHeader(type,moov,500)).toBeUndefined();
     expect(prepareM4aHeader(type,moov.subarray(0,moov.length-1),1000)).toBeUndefined();
   });
+});
+
+it("enables Chromium fragment delivery only for a large fast-start M4A with a substantial known index", () => {
+  vi.stubGlobal("navigator", { vendor: "Google Inc." });
+  vi.stubGlobal("MediaSource", { isTypeSupported: (mime: string) => mime.includes("mp4a.40.2") });
+  const large = { url: "/files/large", size: 55_704_700, mime: "audio/mp4", prefix: 776194, audioStart: 616194 };
+  try {
+    expect(canUseM4aSource(large)).toBe(true);
+    expect(canUseM4aSource({...large, size: 8_000_000})).toBe(false);
+    expect(canUseM4aSource({...large, audioStart: 16_000})).toBe(false);
+    expect(canUseM4aSource({...large, tailStart: 55_000_000})).toBe(false);
+    expect(canUseM4aSource({...large, mime: "audio/mpeg"})).toBe(false);
+  } finally { vi.unstubAllGlobals(); }
 });
