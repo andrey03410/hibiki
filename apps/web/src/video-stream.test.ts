@@ -106,7 +106,9 @@ it("delivers both original encoded tracks byte-exactly and rechecks a completed 
       }});
     });
     vi.stubGlobal("fetch", fetchRange);
-    const video = Object.assign(new EventTarget(), {currentTime: 0, buffered: {length: 0}, paused: false, getAttribute: () => null});
+    // Chromium can report a short buffered span while a paused seek still awaits its decoded frame.
+    const video = Object.assign(new EventTarget(), {currentTime: 0, readyState: 1, seeking: true, paused: true,
+      buffered: {length: 1, start: () => 0, end: () => .15}, getAttribute: () => null});
     closed = attachVideoStream(video as unknown as HTMLVideoElement,
       { url: "/api/shared-items/i/sources/k", shared:true, size:data.length, duration:4, prefix:32 * 1024 }, value => {
         reportDenied(value); if (!value) failed(new Error("Video stream failed"));
@@ -121,6 +123,11 @@ it("delivers both original encoded tracks byte-exactly and rechecks a completed 
       expect(chunks[track].length).toBeGreaterThan(1);
       expect(digest(path, track)).toBe(digest(input, track));
     }
+    expect(fetchRange.mock.calls.length).toBeGreaterThan(1);
+    video.readyState = 4;
+    video.seeking = false;
+    video.dispatchEvent(new Event("seeked"));
+    video.paused = false;
     vi.spyOn(Date, "now").mockReturnValue(Date.now() + 11000);
     video.dispatchEvent(new Event("timeupdate"));
     expect(await denied).toBe(true);

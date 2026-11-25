@@ -93,7 +93,7 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
   let transfer: AbortController | undefined;
   let at = 0, busy = false, requested = false, finished = false, ready = false;
   let indexedBytes = 0, held = 0;
-  let jump: number | undefined;
+  let jump: number | undefined, seekEnd: number | undefined;
   let lastTrim = -1, pausedSeek = element.paused, holding = false;
   let fatal = false, lastAuthorized = 0, bulkRate = 0;
   let permission: AbortController | undefined;
@@ -129,8 +129,14 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
     });
   }
   function pause() { pausedSeek = false; requested = false; transfer?.abort(); permission?.abort(); }
+  function previewReady() {
+    return !element.seeking && element.readyState >= 2 && headroom(element.buffered, element.currentTime) > 0;
+  }
+  function finishPreview() {
+    if (pausedSeek && element.paused && previewReady()) pause();
+  }
   function seek() {
-    if (!ready || headroom(element.buffered, element.currentTime) > .05) return;
+    if (!ready || headroom(element.buffered, element.currentTime) >= 1) return;
     holding = false;
     jump = element.currentTime;
     pausedSeek = element.paused;
@@ -171,6 +177,8 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
         for (const track of movie.tracks) {
           const mime = `${track.type}/mp4; codecs="${track.codec}"`;
           if (!MediaSource.isTypeSupported(mime)) throw new Error("Unsupported video codec");
+          if (iso.getTrackSamplesInfo(track.id).some(sample => sample.size > 12 * MiB))
+            throw new Error("Video sample exceeds playback window");
           const buffer = media.addSourceBuffer(mime);
           tracks.set(track.id, { buffer, pending: [], spans: [] });
           iso.setSegmentOptions(track.id, null, { nbSamples: 4, rapAlignement: false });
@@ -196,6 +204,17 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
         const position = jump;
         jump = undefined;
         at = parser.seek(position, true).offset;
+        // Fetch just the packets needed to decode the requested frame and a short audio preroll.
+        // The first response can finish before an ordinary background range competes with the seek.
+        seekEnd = at;
+        for (const id of tracks.keys()) {
+          const track = parser.getTrackById(id);
+          for (let i = track.nextSample; i < track.samples.length; i++) {
+            const sample = track.samples[i]!;
+            seekEnd = Math.max(seekEnd, sample.offset + sample.size);
+            if (sample.dts / sample.timescale >= position + .2) break;
+          }
+        }
         await trim(Infinity);
         lastTrim = position - 10;
       }
@@ -203,7 +222,7 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
       const now = element.currentTime;
       if (now > lastTrim + 16) { await trim(now - 10); lastTrim = now - 10; }
       const ahead = headroom(element.buffered, now);
-      if (pausedSeek && ahead > .1) { pausedSeek = false; if (element.paused) return; }
+      if (pausedSeek && previewReady()) { pausedSeek = false; if (element.paused) return; }
       if (held >= windowBytes - MiB && ahead < 2) {
         // A burst of high-bitrate frames can exhaust the byte budget before the ordinary trim.
         await trim(Math.max(0, now - 1));
@@ -216,8 +235,11 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
         holding = true;
         return;
       }
-      const block = at === 0 ? file.prefix : ready ? videoRangeSize(file, ahead, held) : 256 * 1024;
-      const end = Math.min(file.size, at + block);
+      let block = at === 0 ? file.prefix : ready ? videoRangeSize(file, ahead, held) : 256 * 1024;
+      if (pausedSeek && element.paused && ahead > 0) block = Math.min(block, 128 * 1024);
+      const seeking = seekEnd !== undefined && seekEnd > at;
+      const end = Math.min(file.size, at + block, seeking ? seekEnd! : Infinity);
+      if (seekEnd !== undefined && end >= seekEnd) seekEnd = undefined;
       if (end <= at) {
         parser.flush();
         await flush();
@@ -241,7 +263,7 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
         throw new Error("Invalid video range");
       }
       lastAuthorized = Date.now();
-      const pageSize = !ready ? end - at : Math.min(ahead < 2 ? 128 * 1024 : 512 * 1024, videoRangeSize(file, ahead, held));
+      const pageSize = !ready ? end - at : Math.min(seeking ? 32 * 1024 : ahead < 2 ? 128 * 1024 : 512 * 1024, videoRangeSize(file, ahead, held));
       await readVideoPages(response, at, end, pageSize, active.signal, async (page, position) => {
         if (!ready) {
           indexedBytes += page.byteLength;
@@ -255,12 +277,27 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
         if (parser!.getAllocatedSampleDataSize() > 12 * MiB) throw new Error("Video sample exceeds playback window");
         await flush();
         if (held >= windowBytes - MiB || headroom(element.buffered, element.currentTime) >= videoWindow(file)) return -1;
-        if (pausedSeek && headroom(element.buffered, element.currentTime) > .1) {
+        if (pausedSeek && previewReady()) {
           pausedSeek = false;
           if (element.paused) return -1;
         }
         return at;
       });
+      if (active.signal.aborted) return;
+      if (pausedSeek && element.paused && headroom(element.buffered, element.currentTime) > .1 && !previewReady()) {
+        // A local range can fill much faster than the asynchronous decoder paints its first frame.
+        await new Promise<void>(resolve => {
+          const finish = () => {
+            clearTimeout(timer);
+            element.removeEventListener("seeked", finish);
+            active.signal.removeEventListener("abort", finish);
+            resolve();
+          };
+          const timer = setTimeout(finish, 120);
+          element.addEventListener("seeked", finish, { once: true });
+          active.signal.addEventListener("abort", finish, { once: true });
+        });
+      }
       if (active.signal.aborted) return;
       transfer = undefined;
       if (!paced && at === end && end - start >= 256 * 1024) {
@@ -275,6 +312,8 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
   element.addEventListener("play", schedule, { signal });
   element.addEventListener("timeupdate", schedule, { signal });
   element.addEventListener("seeking", seek, { signal });
+  element.addEventListener("seeked", finishPreview, { signal });
+  element.addEventListener("loadeddata", finishPreview, { signal });
   element.addEventListener("pause", pause, { signal });
   element.src = objectUrl;
   return () => {
