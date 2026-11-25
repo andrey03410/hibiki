@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import type { Prisma, ShareLink } from "@prisma/client";
+import { Prisma, type ShareLink } from "@prisma/client";
 import type {
   ItemDto, SavedSharedPlaylistDto, ShareKind, ShareLinkDto, ShareStatus,
   SharedViewDto, SourceDto,
@@ -423,14 +423,14 @@ export class ShareService {
   async prefetchForViewer(viewerId: string, itemIds?: string[], fresh = false) {
     if (!kanameEnabled() || itemIds?.length === 0) return;
     const now = new Date(Date.now()).toISOString();
-    const wanted = itemIds ? JSON.stringify(itemIds) : null;
+    const wanted = itemIds ? Prisma.sql`AND t.recipientItemId IN (SELECT value FROM json_each(${JSON.stringify(itemIds)}))` : Prisma.empty;
     const authors = await this.db.$queryRaw<{ ownerId: string }[]>`
       SELECT DISTINCT t.originOwnerId AS ownerId
       FROM SharedTrack AS t
       JOIN SharedTrackGrant AS g ON g.recipientItemId = t.recipientItemId
       JOIN ShareLink AS l ON l.id = g.shareLinkId AND l.ownerId = t.originOwnerId
       WHERE t.recipientId = ${viewerId} AND l.revokedAt IS NULL AND (l.expiresAt IS NULL OR l.expiresAt > ${now})
-        AND (${wanted} IS NULL OR t.recipientItemId IN (SELECT value FROM json_each(${wanted})))
+        ${wanted}
     `;
     await this.verifyAuthors(authors.map(author => author.ownerId), { cached: !fresh, bestEffort: true });
   }

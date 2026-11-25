@@ -296,6 +296,57 @@ export async function searchLibraryIds(tx: Tx, ownerId: string, search: LibraryS
   return orderedIds(tx, ownerId, where, search.sort);
 }
 
+// MCP cursors identify the last visible item. Cheap date/duration orders can
+// seek straight to it. Locale-aware text matches and natural title ordering
+// are calculated in JS and reused only within the same owner and library revision.
+export class McpMediaPages {
+  private readonly orders = new Map<string, string[]>();
+
+  async read(tx: Tx, ownerId: string, search: LibrarySearch, library: LibraryService, limit: number, cursor?: string) {
+    const borrowed = await borrowedStatus(tx, ownerId, search, library);
+    const where = itemFilter(ownerId, search, search.timeZone, borrowed);
+    if (search.query.trim() || search.sort.startsWith("title")) {
+      // Borrowed source availability can change without a recipient library edit.
+      const key = search.availability ? undefined : createHash("sha256")
+        .update(JSON.stringify([ownerId, await revision(tx, ownerId), search])).digest("hex");
+      let ids = key ? this.orders.get(key) : undefined;
+      if (!ids) {
+        ids = await matchingKeys(tx, ownerId, where, search, false);
+        if (key && ids.length <= 50_000) {
+          if (this.orders.size >= 8) this.orders.delete(this.orders.keys().next().value!);
+          this.orders.set(key, ids);
+        }
+      }
+      const index = cursor ? ids.indexOf(cursor) : -1;
+      invariant(!cursor || index >= 0, 400, "cursor", "Курсор не найден");
+      return ids.slice(index + 1, index + limit + 2);
+    }
+
+    let after = Prisma.empty;
+    if (cursor) {
+      const duration = search.sort.startsWith("duration");
+      const column = duration ? Prisma.sql`i.duration` : Prisma.sql`i.createdAt`;
+      // Preserve the exact stored SQLite timestamp (including its precision).
+      const anchor = duration ? column : Prisma.sql`CAST(i.createdAt AS TEXT)`;
+      const [row] = await tx.$queryRaw<{value: string | number | null}[]>(Prisma.sql`
+        ${catalogCte(ownerId)} SELECT ${anchor} AS value FROM Item i WHERE ${where} AND i.id = ${cursor}
+      `);
+      invariant(row, 400, "cursor", "Курсор не найден");
+      const direction = search.sort.endsWith("desc") ? Prisma.sql`<` : Prisma.sql`>`;
+      if (row.value === null) after = Prisma.sql` AND i.duration IS NULL AND i.id > ${cursor}`;
+      else after = Prisma.sql` AND (${column} ${direction} ${row.value}
+        OR (${column} = ${row.value} AND i.id > ${cursor}) ${duration ? Prisma.sql`OR i.duration IS NULL` : Prisma.empty})`;
+    }
+    return orderedIds(tx, ownerId, Prisma.sql`${where}${after}`, search.sort, Prisma.sql`LIMIT ${limit + 1}`);
+  }
+}
+
+export async function itemSummaries(tx: Tx, ownerId: string, ids: string[]) {
+  const rows = await tx.item.findMany({where:{ownerId,id:{in:ids}}, select:{id:true, title:true, kind:true, duration:true}});
+  const byId = new Map(rows.map(row => [row.id, row]));
+  return ids.flatMap(id => byId.get(id) ?? []);
+}
+
 async function facetCounts(tx: Tx, ownerId: string, where: Prisma.Sql) {
   const rows = await tx.$queryRaw<{ id: string; total: bigint }[]>(Prisma.sql`
     ${catalogCte(ownerId)}, counts AS (
@@ -397,9 +448,7 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
       const prefix = selectionId ? "s." + selectionId : key + "." + current;
       const nextCursor = end < total ? prefix + "." + end : null;
       if (input.picker) {
-        const rows = await tx.item.findMany({where: { ownerId, id: { in: ids } }, select: { id:true, title:true, kind:true, duration:true }});
-        const byId = new Map(rows.map(row => [row.id, row]));
-        return { items: ids.flatMap(id => byId.get(id) ?? []), total, nextCursor };
+        return {items: await itemSummaries(tx, ownerId, ids), total, nextCursor};
       }
       // Recent selections freeze history separately from library mutations.
       const token = search.sort === "recent" ? countsKey + "." + selectionId : countsKey;

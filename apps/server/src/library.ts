@@ -92,15 +92,37 @@ export function itemDto(row: IncludedItem): ItemDto {
     })),
   };
 }
+// A large playlist repeats the same tag directory on many tracks. Read and
+// decode each owned tag once instead of materializing one joined row per use.
+async function batchItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[]) {
+  const [rows, groups] = await Promise.all([
+    tx.item.findMany({where:{ownerId,id:{in:ids}}, include:{sources:ownedItemInclude(ownerId).sources}}),
+    tx.$queryRaw<{itemId:string; assigned:string}[]>`
+      SELECT itemId, json_group_array(tagId ORDER BY tagId) AS assigned FROM ItemTag
+      WHERE itemId IN (SELECT value FROM json_each(${JSON.stringify(ids)}))
+      GROUP BY itemId`,
+  ]);
+  const assignments = new Map(groups.map(row => [row.itemId, JSON.parse(row.assigned) as string[]]));
+  const tagIds = new Set<string>();
+  for (const row of rows) for (const id of assignments.get(row.id) ?? []) tagIds.add(id);
+  const tags = tagIds.size ? await tx.tag.findMany({where:{ownerId,id:{in:[...tagIds]}}}) : [];
+  const directory = new Map(tags.map(tag => [tag.id, tagDto(tag)]));
+  return rows.map(row => {
+    const item = itemDto({...row, tags:[]});
+    item.tags = (assignments.get(row.id) ?? []).flatMap(id => directory.get(id) ?? []);
+    return item;
+  });
+}
+
 export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: false): Promise<ItemDto[]>;
 export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: true, library: LibraryService): Promise<ItemDto[]>;
 export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: boolean, library?: LibraryService) {
   if (!ids.length) return [];
-  const rows = await tx.item.findMany({
+  const owned = ids.length >= 24 ? await batchItems(tx, ownerId, ids) : (await tx.item.findMany({
     where: { ownerId, id: { in: ids } },
     include: ownedItemInclude(ownerId),
-  });
-  const byId = new Map(rows.map(row => [row.id, itemDto(row)]));
+  })).map(itemDto);
+  const byId = new Map(owned.map(item => [item.id, item]));
   const items = ids.flatMap(id => byId.get(id) ?? []);
   return includeShared && library ? decorateSharedItems(tx, ownerId, items, library) : items;
 }
