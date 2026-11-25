@@ -13,11 +13,10 @@
 | [13. Записи и плейлисты по ссылке](13-media-sharing/README.md) | `merged` | [PR #15](https://github.com/andrey03410/hibiki/pull/15), живые подборки, отзыв ссылок и копирование по явному действию |
 | [14. Личная выдача медиатеки и загрузка треков](14-library-listening-feedback/README.md) | `merged` | [PR №16](https://github.com/andrey03410/hibiki/pull/16), личные режимы, поиск и воспроизведение |
 | [15. Карточки плейлистов и быстрые действия](15-playlist-experience/README.md) | `merged` | [PR №17](https://github.com/andrey03410/hibiki/pull/17), явная ссылка, редактор с обложки, быстрый просмотр состава и создание |
+| [16. Производительность прослушивания](16-playback-performance/README.md) | `merged` | Быстрый старт треков, буфер оригинального видео, фоновые запросы, ускорение MCP и замена источника карточки. [Продовые замеры](16-playback-performance/verify.md) |
 | [17. Смешанный плейлист по одной ссылке](17-mixed-playlist-sharing/README.md) | `merged` | [PR №21](https://github.com/andrey03410/hibiki/pull/21), Доступ к полученным записям с разрешения владельца исходной ссылки |
 | [18. Освобождение места после импорта медиатеки](18-import-storage/README.md) | `merged` | [Учёт квоты и очистка входных ZIP с сайта и через MCP](18-import-storage/verify.md) |
 
 Процесс — [feature](../../.claude/skills/feature/SKILL.md).
 
 [10. Интеграция с Kaname](10-kaname/README.md) — SSO, роли площадки, квоты, отчёты и локальное администрирование.
-
-[16. Производительность прослушивания](16-playback-performance/README.md) — аудит прода, 18 проблем с решениями и план: загрузка трека, звук видео на лету, фон, плейлисты, обложки, качество (ход работ в карточке задачи).
