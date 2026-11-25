@@ -3,6 +3,7 @@ import type { SourceDto } from "@hibiki/contracts";
 const MAX_FILE = 128 * 1024 * 1024;
 const MAX_PREFIX = 2 * 1024 * 1024;
 const PAGE = 64 * 1024;
+const DECODER_PAGE = 32 * 1024;
 type ReadFile = (url: string, init: RequestInit) => Promise<Response>;
 export type AudioFile = {
   url: string; size: number; mime: string; prefix: number; duration?: number | null;
@@ -102,8 +103,11 @@ class AudioBytes {
     this.inspected = file.audioStart !== undefined;
   }
   private alignedTail(offset: number) {
-    // Chrome and WebKit ask for the page containing moov, including bytes preceding the box.
-    return Math.max(0, Math.floor(offset / (16 * 1024)) * (16 * 1024)) || offset;
+    // Chrome requests the 32 KiB page containing moov. It also covers WebKit's 16 KiB page.
+    const aligned = Math.floor(offset / DECODER_PAGE) * DECODER_PAGE;
+    // Keep the index itself when adding alignment bytes would consume the entire preparation budget.
+    if (this.file.size - aligned >= MAX_PREFIX && this.file.size - offset < MAX_PREFIX) return offset;
+    return aligned || offset;
   }
   get complete() { return this.ranges[0]?.[0] === 0 && this.ranges[0][1] === this.file.size; }
   coverage(): AudioCoverage {
