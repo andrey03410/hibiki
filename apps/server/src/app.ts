@@ -391,13 +391,15 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
   app.get("/api/playlists", async (request) => ({
     playlists: await library.listPlaylists(request.user!.id),
   }));
-  app.post("/api/playlists/preview", (request) => {
+  app.post("/api/playlists/preview", (request, reply) => {
     const input = z
       .object({
         definition: playlistDefinitionSchema,
         playlistId: z.string().optional(),
+        cards: z.boolean().optional(),
       })
       .parse(request.body);
+    if (input.cards) return library.previewCards(browserOwner(request, reply), input.definition, input.playlistId);
     return library.preview(
       request.user!.id,
       input.definition,
@@ -446,9 +448,9 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
     await library.deletePlaylist(request.user!.id, idOf(request));
     return { ok: true };
   });
-  app.get("/api/jobs", async (request, reply) => {
+  app.get<{ Querystring: {active?: string} }>("/api/jobs", async (request, reply) => {
     reply.header("Cache-Control", "private, no-store");
-    return { jobs: await jobs.list(request.user!.id, browserAccess(request)) };
+    return { jobs: await jobs.list(request.user!.id, browserAccess(request), request.query.active === "1") };
   });
   app.post("/api/jobs", (request) => {
     const input = z

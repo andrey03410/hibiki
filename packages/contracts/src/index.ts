@@ -152,6 +152,8 @@ export interface LibraryOverviewDto extends Omit<LibraryDto, "items"> {
 }
 export interface LibraryCardOverviewDto extends Omit<LibraryOverviewDto, "playlists"> {
   playlists: PlaylistSummaryDto[];
+  overviewToken?: string;
+  countsKey?: string;
 }
 export interface LibraryPageDto {
   items: ItemDto[];
@@ -159,6 +161,18 @@ export interface LibraryPageDto {
   nextCursor: string | null;
   tagCounts?: Record<string, number>;
   selectionId?: string;
+  countsKey?: string;
+  countsUnchanged?: boolean;
+}
+export interface LibraryCardDto extends Omit<ItemDto, "tags" | "originalTitle" | "updatedAt"> {
+  /** Numeric references address the requested overview tag directory. */
+  tagRefs: (number | string)[];
+  originalTitle?: string;
+  updatedAt?: string;
+}
+export interface LibraryCardPageDto extends Omit<LibraryPageDto, "items"> {
+  items: LibraryCardDto[];
+  tags: TagDto[];
 }
 
 const librarySort = z.enum(["title-asc", "title-desc", "duration-asc", "duration-desc", "added-asc", "added-desc"]);

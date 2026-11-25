@@ -11,6 +11,7 @@ model User {
   login String @unique
   passwordHash String
   libraryRevision Int @default(0)
+  overviewRevision Int @default(0)
   createdAt DateTime @default(now())
   kanameIssuer String?
   kanameSubject String?

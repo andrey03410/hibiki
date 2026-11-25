@@ -58,7 +58,7 @@ type Draft = {
 };
 
 const checkpointMs = 15_000;
-const preferenceEvent = "hibiki:history-preference";
+export const preferenceEvent = "hibiki:history-preference";
 const pageWarmupBuffer = 64;
 
 function randomId() {
@@ -270,18 +270,21 @@ export function useListeningAttempt(userId: string) {
   useEffect(() => {
     let live = true;
     let request = 0;
+    let needsRetry = true;
     function refresh() {
+      needsRetry = false;
       const sequence = ++request;
       void api<HistoryPreference>("/history/preference")
         .then(data => {
           if (live && request === sequence) tracker.setPreference(data);
         })
-        .catch(() => {});
+        .catch(() => { if (live && request === sequence) needsRetry = true; });
     }
+    const retry = () => { if (needsRetry) refresh(); };
     const leave = (event: PageTransitionEvent) => tracker.leave(event.persisted);
     function visibility() {
       if (document.hidden) tracker.checkpoint();
-      else refresh();
+      else retry();
     }
     function storage(event: StorageEvent) {
       if (event.key === preferenceEvent) refresh();
@@ -289,14 +292,14 @@ export function useListeningAttempt(userId: string) {
     refresh();
     window.addEventListener(preferenceEvent, refresh);
     window.addEventListener("storage", storage);
-    window.addEventListener("online", refresh);
+    window.addEventListener("online", retry);
     window.addEventListener("pagehide", leave);
     document.addEventListener("visibilitychange", visibility);
     return () => {
       live = false;
       window.removeEventListener(preferenceEvent, refresh);
       window.removeEventListener("storage", storage);
-      window.removeEventListener("online", refresh);
+      window.removeEventListener("online", retry);
       window.removeEventListener("pagehide", leave);
       document.removeEventListener("visibilitychange", visibility);
       tracker.leave(false);

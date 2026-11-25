@@ -1,3 +1,4 @@
+import { ItemSelect } from "./ItemPicker";
 import { Clock3, Download } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import { useLocation } from "react-router";
@@ -92,7 +93,7 @@ function historyUrl(path: string, filters: Record<string, string | undefined> = 
   return "/history/" + path + (search.size ? "?" + search.toString() : "");
 }
 
-export function HistorySettings({ items = [], playlists = [] }: { items?: Named[]; playlists?: Named[] }) {
+export function HistorySettings({ items = [], playlists = [], revision }: { items?: Named[]; playlists?: Named[]; revision?:string }) {
   const { search, hash } = useLocation();
   const linkedItemId = new URLSearchParams(search).get("historyItem") ?? "";
   const id = useId();
@@ -245,11 +246,8 @@ export function HistorySettings({ items = [], playlists = [] }: { items?: Named[
         <div className="history-filters">
           <label>С даты <input type="date" value={from} onChange={e => { setFrom(e.target.value); firstPage(); }} /></label>
           <label>По дату <input type="date" value={through} onChange={e => { setThrough(e.target.value); firstPage(); }} /></label>
-          <label>Запись <select value={itemId} onChange={e => { setItemId(e.target.value); firstPage(); }}>
-            <option value="">Все записи</option>
-            {itemId && !items.some(item => item.id === itemId) && <option value={itemId}>Выбранная запись</option>}
-            {items.map(item => <option key={item.id} value={item.id}>{item.title}</option>)}
-          </select></label>
+          <ItemSelect label="Запись" empty="Все записи" value={itemId} known={items} revision={revision}
+            onChange={id => { setItemId(id); firstPage(); }} />
           <label>Плейлист <select value={playlistId} onChange={e => { setPlaylistId(e.target.value); firstPage(); }}>
             <option value="">Все плейлисты</option>
             {playlistId && !playlists.some(p => p.id === playlistId) && <option value={playlistId}>Выбранный плейлист</option>}

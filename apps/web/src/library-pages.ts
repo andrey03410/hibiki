@@ -1,4 +1,4 @@
-import type { ItemDto, LibraryPageDto } from "@hibiki/contracts";
+import type { ItemDto, LibraryCardPageDto, LibraryPageDto, LibraryCardOverviewDto } from "@hibiki/contracts";
 import { api, ApiError } from "./api";
 import type { LibrarySearch } from "./library-search";
 
@@ -6,6 +6,35 @@ const emptyPage: LibraryPageDto = {items: [], total: 0, nextCursor: null};
 
 export function searchBody({ previousSort, ...filters }: LibrarySearch, selectionId?: string) {
   return {filters, selectionId, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone};
+}
+
+// The overview supplies the first set of counts. Keep the last filtered set as
+// well, so changing only selected tags can reuse it across search instances.
+export class LibraryCardReader {
+  private last?: { key: string; counts: Record<string, number> };
+
+  async page(filters: LibrarySearch, overview: LibraryCardOverviewDto, cursor: string | undefined, signal: AbortSignal, selectionId?: string): Promise<LibraryPageDto> {
+    const previous = this.last ?? { key: overview.countsKey, counts: overview.tagCounts };
+    const page = await api<LibraryCardPageDto>("/library/page", "POST", {
+      ...searchBody(filters, selectionId), cursor, cards: true, tagRevision: overview.revision, countsKey: previous.key,
+    }, undefined, signal);
+    const tags = new Map([...overview.tags, ...page.tags].map(tag => [tag.id, tag]));
+    const items = page.items.map(({tagRefs, ...card}) => ({ ...card, updatedAt: card.updatedAt ?? card.createdAt,
+      originalTitle: card.originalTitle ?? card.title, tags: tagRefs.map(ref => typeof ref === "number" ? overview.tags[ref]! : tags.get(ref)!) }));
+    const counts = page.countsUnchanged ? previous.counts : page.tagCounts;
+    if (counts && page.countsKey) this.last = {key: page.countsKey, counts};
+    return {...page, items, tagCounts: counts};
+  }
+}
+
+export function validateOverview(value: LibraryCardOverviewDto): LibraryCardOverviewDto {
+  if (!value || typeof value.revision !== "string" || typeof value.overviewToken !== "string"
+    || !Number.isSafeInteger(value.total) || !value.tagCounts || Array.isArray(value.tagCounts) || typeof value.tagCounts !== "object"
+    || !Array.isArray(value.tags) || !value.tags.every(tag => tag && typeof tag.id === "string" && typeof tag.name === "string")
+    || !Array.isArray(value.playlists) || !value.playlists.every(card => card && typeof card.id === "string" && typeof card.title === "string")
+    || !Array.isArray(value.jobs) || !value.jobs.every(job => job && typeof job.id === "string" && typeof job.state === "string"))
+    throw new ApiError("BAD_RESPONSE", "Не удалось прочитать сводку медиатеки.");
+  return value;
 }
 
 export async function fetchItems(ids: string[], verifyShared = false): Promise<ItemDto[]> {

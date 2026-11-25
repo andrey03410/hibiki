@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { shuffle } from "@hibiki/core";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
-import { browserLibrarySearchSchema, playlistDefinitionSchema, type BrowserLibrarySearch, type LibrarySearch, type LibraryCardOverviewDto, type LibraryPageDto } from "@hibiki/contracts";
+import { browserLibrarySearchSchema, playlistDefinitionSchema, type BrowserLibrarySearch, type LibrarySearch, type LibraryCardOverviewDto, type ItemDto, type LibraryCardDto } from "@hibiki/contracts";
 import type { Db } from "./db";
 import { invariant } from "./errors";
 import { hydrateLibraryItems, jobDto, type LibraryService } from "./library";
@@ -19,7 +19,8 @@ const searchInput = z.object({
   filters: browserLibrarySearchSchema, timeZone: browserLibrarySearchSchema.shape.timeZone,
   selectionId: z.string().min(1).max(100).optional(),
 });
-const pageInput = searchInput.extend({ cursor: z.string().max(100).optional() });
+const pageInput = searchInput.extend({ cursor: z.string().max(100).optional(), countsKey: z.string().max(100).optional(),
+  cards: z.boolean().optional(), picker: z.boolean().optional(), tagRevision: z.string().max(100).optional() });
 type SearchInput = z.infer<typeof pageInput>;
 type Tx = Prisma.TransactionClient;
 
@@ -35,9 +36,17 @@ function publishedCoverUrls(json: string): string[] {
     .replace(/^(https:\/\/i\.ytimg\.com\/vi\/[\w-]{11}\/)(?:mqdefault|default)\.jpg$/, "$1sddefault.jpg"));
 }
 
-async function overview(tx: Tx, ownerId: string, cardsOnly: boolean): Promise<LibraryCardOverviewDto> {
+function facetToken(ownerId: string, revision: string, search: BrowserLibrarySearch, zone?: string) {
+  const scope = [ownerId, revision, search.query.trim(), search.kind, search.provider, search.availability, search.favoriteOnly,
+    search.minDuration, search.maxDuration, search.addedFrom, search.addedThrough,
+    search.addedFrom || search.addedThrough ? zone : "", search.performanceFilter || "", !!search.needsClassification,
+    search.missingGroup || "", search.sort === "recent"];
+  return createHash("sha256").update(JSON.stringify(scope)).digest("hex").slice(0, 24);
+}
+
+async function overview(tx: Tx, ownerId: string, cardsOnly: boolean, current: string, overviewToken: string): Promise<LibraryCardOverviewDto> {
   const where = { ownerId };
-  const [total, tags, counts, playlists, jobs, current] = await Promise.all([
+  const [total, tags, counts, playlists, jobs] = await Promise.all([
     tx.item.count({ where }),
     listTags(tx, ownerId, true),
     facetCounts(tx, ownerId, Prisma.sql`i.ownerId = ${ownerId}`),
@@ -47,7 +56,6 @@ async function overview(tx: Tx, ownerId: string, cardsOnly: boolean): Promise<Li
       createdAt: true, updatedAt: true, youtubeLink: { select: { playlistId: true } },
     }, orderBy: { createdAt: "asc" } }),
     tx.job.findMany({ where, orderBy: { createdAt: "desc" }, take: 50 }),
-    revision(tx, ownerId),
   ]);
   return {
     tags: tags.filter(tag => !tag.archived),
@@ -59,7 +67,7 @@ async function overview(tx: Tx, ownerId: string, cardsOnly: boolean): Promise<Li
       ...(cardsOnly ? {} : { definition: playlistDefinitionSchema.parse(JSON.parse(definitionJson)) }),
     })), jobs: jobs.map(jobDto), total,
     tagCounts: counts,
-    revision: current,
+    revision: current, overviewToken, countsKey: facetToken(ownerId, current, browserLibrarySearchSchema.parse({})),
   };
 }
 
@@ -359,6 +367,7 @@ async function whileConnected<T>(reply: FastifyReply, run: (signal: AbortSignal)
 
 export function registerLibraryPages(app: FastifyInstance, db: Db, library: LibraryService) {
   const selections = new Map<string, string[]>();
+  const tagDirectories = new Map<string, { revision: string; indexes: Map<string, number> }>();
   const countsCache = new Map<string, Record<string, number>>();
   const snapshots = new LibrarySelections();
   app.addHook("onClose", async () => snapshots.close());
@@ -382,11 +391,37 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
       offset = cursorOffset(input.cursor, key, current);
     }
 
+    const countsKey = facetToken(ownerId, current, search, zone);
     async function page(ids: string[], total: number, tagCounts?: Record<string, number>) {
       const end = offset + ids.length;
       const prefix = selectionId ? "s." + selectionId : key + "." + current;
+      const nextCursor = end < total ? prefix + "." + end : null;
+      if (input.picker) {
+        const rows = await tx.item.findMany({where: { ownerId, id: { in: ids } }, select: { id:true, title:true, kind:true, duration:true }});
+        const byId = new Map(rows.map(row => [row.id, row]));
+        return { items: ids.flatMap(id => byId.get(id) ?? []), total, nextCursor };
+      }
+      // Recent selections freeze history separately from library mutations.
+      const token = search.sort === "recent" ? countsKey + "." + selectionId : countsKey;
+      const counts = offset > 0 ? {} : token === input.countsKey
+        ? { countsKey: token, countsUnchanged: true } : { countsKey: token, tagCounts };
       const items = await hydrateLibraryItems(tx, ownerId, ids, true, library);
-      return { items, total, tagCounts, selectionId, nextCursor: end < total ? prefix + "." + end : null } satisfies LibraryPageDto;
+      const pageInfo = { total, ...counts, selectionId, nextCursor };
+      if (!input.cards) return { ...pageInfo, items };
+      const tags = new Map<string, ItemDto["tags"][number]>();
+      const directory = tagDirectories.get(ownerId);
+      const indexes = directory?.revision === current && input.tagRevision === current ? directory.indexes : undefined;
+      const cards: LibraryCardDto[] = items.map(({tags: assigned, originalTitle, updatedAt, ...item}) => {
+        for (const tag of assigned) {
+          if (tag.archived || input.tagRevision !== current) tags.set(tag.id, tag);
+        }
+        return { ...item, tagRefs: assigned.map(tag => indexes?.get(tag.id) ?? tag.id),
+          // The browser plays the authorized stream URL and requests artwork
+          // by its versioned URL. Storage identity is only needed by exports.
+          sources: item.sources.map(({hash, fileId, ...source}) => source),
+          ...(originalTitle !== item.title && { originalTitle }), ...(updatedAt !== item.createdAt && { updatedAt }) };
+      });
+      return { ...pageInfo, items: cards, tags: [...tags.values()] };
     }
     if (selectionId || (frozen && idsOnly)) {
       const selection = snapshots.get(selectionId, key, current);
@@ -399,12 +434,12 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
     const text = Boolean(search.query.trim());
     const facets = { ...search, tagIds: [], tagMode: undefined, randomSeed: undefined,
       sort: search.sort === "recent" ? "recent" as const : "added-desc" as const };
-    const facetKey = JSON.stringify([ownerId, current, facets, zone]);
+    const facetKey = countsKey;
     // New recent snapshots must include starts since the previous first page.
     let tagCounts = !idsOnly && offset === 0 && search.sort !== "recent" ? countsCache.get(facetKey) : undefined;
     let all = frozen ? undefined : selections.get(cacheKey);
     let textMatches: string[] | undefined;
-    if (!idsOnly && offset === 0 && !tagCounts) {
+    if (!idsOnly && (!input.picker || frozen) && offset === 0 && !tagCounts && (frozen || countsKey !== input.countsKey)) {
       let eligible = itemFilter(ownerId, facets, zone, borrowed);
       if (text) {
         // Facets ignore the selected tags. One pass over these broader matches
@@ -441,9 +476,21 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
     return page(ids, Number(count.total), tagCounts);
   }
 
-  app.get<{ Querystring: { playlists?: string } }>("/api/library/overview", (request, reply) => {
+  app.get<{ Querystring: { playlists?: string; since?: string } }>("/api/library/overview", async (request, reply) => {
     const ownerId = browserOwner(request, reply);
-    return db.$transaction((tx) => overview(tx, ownerId, request.query.playlists === "summary"));
+    const cardsOnly = request.query.playlists === "summary";
+    const result = await db.$transaction(async tx => {
+      const state = await tx.user.findUniqueOrThrow({ where: { id: ownerId }, select: { libraryRevision: true, overviewRevision: true } });
+      const token = createHash("sha256").update(JSON.stringify([ownerId, cardsOnly, state.libraryRevision, state.overviewRevision])).digest("hex").slice(0, 32);
+      if (request.query.since === token) return null;
+      return overview(tx, ownerId, cardsOnly, String(state.libraryRevision), token);
+    });
+    if (!result) return reply.code(204).send();
+    if (tagDirectories.get(ownerId)?.revision !== result.revision) {
+      if (tagDirectories.size >= 8) tagDirectories.delete(tagDirectories.keys().next().value!);
+      tagDirectories.set(ownerId, {revision: result.revision, indexes: new Map(result.tags.map((tag, index) => [tag.id, index]))});
+    }
+    return result;
   });
   app.post("/api/library/page", (request, reply) => {
     const ownerId = browserOwner(request, reply);
@@ -457,7 +504,12 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
   });
   app.post("/api/library/items", async (request, reply) => {
     const ownerId = browserOwner(request, reply);
-    const { ids, verifyShared } = z.object({ ids: z.array(id).max(pageSize), verifyShared: z.boolean().optional() }).parse(request.body);
+    const { ids, verifyShared, picker } = z.object({ ids: z.array(id).max(pageSize), verifyShared: z.boolean().optional(), picker: z.boolean().optional() }).parse(request.body);
+    if (picker) {
+      const rows = await db.item.findMany({where: {ownerId, id: {in: ids}}, select: {id: true, title: true}});
+      const byId = new Map(rows.map(row => [row.id, row]));
+      return {items: ids.flatMap(id => byId.get(id) ?? [])};
+    }
     await app.sharing.prefetchForViewer(ownerId, ids, verifyShared);
     return db.$transaction(async tx => ({ items: await hydrateLibraryItems(tx, ownerId, ids, true, library) }));
   });

@@ -161,10 +161,10 @@ export class JobsService {
       throw error;
     }
   }
-  async list(ownerId: string, browser = false): Promise<JobDto[]> {
+  async list(ownerId: string, browser = false, activeOnly = false): Promise<JobDto[]> {
     return (
       await this.db.job.findMany({
-        where: { ownerId, ...(browser ? {} : { browserOnly: false }) },
+        where: { ownerId, ...(browser ? {} : { browserOnly: false }), ...(activeOnly && { state: { in: ["queued", "running"] } }) },
         orderBy: { createdAt: "desc" },
         take: 100,
       })

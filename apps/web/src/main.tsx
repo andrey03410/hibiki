@@ -18,6 +18,7 @@ import {
   Link,
   useNavigate,
   useParams,
+  useLocation,
   useSearchParams,
 } from "react-router";
 import {
@@ -72,11 +73,13 @@ import type {
   UserDto,
 } from "@hibiki/contracts";
 import { api, ApiError, setWorkspaceOwner, formatDuration, humanDuration, mediaWord } from "./api.ts";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { ItemArtwork } from "./ItemArtwork.tsx";
 import { PlaylistCard, PlaylistCover } from "./PlaylistCard";
-import { ruleDescription, usesListeningHistory } from "./playlist-rules";
-import { LibraryPages, fetchItems, searchBody } from "./library-pages";
-import { PlayerProvider, usePlayer } from "./player.tsx";
+import { PlaylistDetails } from "./playlist-detail";
+import { ruleDescription } from "./playlist-rules";
+import { LibraryPages, LibraryCardReader, fetchItems, searchBody, validateOverview } from "./library-pages";
+import { PlayerProvider, usePlayerCommands, usePlayerCard, useHasPlayer, useQueueEditable } from "./player.tsx";
 import { missingClassification } from "@hibiki/contracts/classification";
 import { TagNavigation } from "./TagNavigation";
 import { ClassificationMigration } from "./ClassificationMigration";
@@ -92,10 +95,10 @@ import { noteFor } from "./note-model.ts";
 import { SourceReplacement } from "./SourceReplacement.tsx";
 import { SharedItemStatus, useSavedSharedPlaylists } from "./LibrarySharing";
 import { issueShare, kanameLoginHref } from "./sharing-model";
-import { pollWhileVisible } from "./use-sharing-request";
-import { YoutubeLocalAdditions, YoutubeLinkedPlaylist, YoutubeLinkImport, YoutubeSyncNotifications, YoutubeSyncSettings } from "./YoutubeSync.tsx";
+import { overviewInterval, activeJobsInterval, pollWhileVisible } from "./use-sharing-request";
+import { YoutubeLinkedPlaylist, YoutubeLinkImport, YoutubeSyncNotifications, YoutubeSyncSettings } from "./YoutubeSync.tsx";
 import { useHistoryRevision } from "./history-events.ts";
-import type { HistoryPreference } from "./listening-client.ts";
+import { preferenceEvent, type HistoryPreference } from "./listening-client.ts";
 import "./styles.css";
 import "./library-view.css";
 import "./taxonomy.css";
@@ -419,7 +422,8 @@ function Workspace({
     [tagQuery, setTagQuery] = useState("");
   const library: LibraryDto = useMemo(() => ({items: [], playlists: [], tags: overview.tags, jobs: overview.jobs}), [overview.tags, overview.jobs]);
   const request = useRef(0);
-  const overviewSignature = useRef("");
+  const overviewToken = useRef("");
+  const location = useLocation();
   const notes = useNotesController();
   const librarySearch = useLibrarySearch(user.id);
   const seenImports = useRef<Set<string> | null>(null);
@@ -436,13 +440,12 @@ function Workspace({
   }
   async function refresh() {
     const sequence = ++request.current;
-    const result = await api<LibraryCardOverviewDto>("/library/overview?playlists=summary");
+    const result = await api<LibraryCardOverviewDto | undefined>("/library/overview?playlists=summary&since=" + encodeURIComponent(overviewToken.current));
     if (sequence !== request.current) return;
-    const signature = JSON.stringify(result);
-    if (signature !== overviewSignature.current) {
-      overviewSignature.current = signature;
-      setOverview(result);
-    }
+    if (result === undefined) return;
+    validateOverview(result);
+    overviewToken.current = result.overviewToken!;
+    setOverview(result);
   }
   async function load() {
     try {
@@ -458,17 +461,30 @@ function Workspace({
     void load();
     return () => {request.current++;};
   }, []);
+  const watchedJobs = library.jobs.filter(job => job.state === "running" || job.state === "queued").map(job => job.id).sort().join(",");
   useEffect(() => {
     if (!ready) return;
-    let running = false;
-    const interval = setInterval(async () => {
-      if (running) return;
-      running = true;
-      try { await refresh(); } catch { /* The next polling tick retries. */ }
-      finally { running = false; }
-    }, 3000);
-    return () => clearInterval(interval);
+    return pollWhileVisible(async () => {
+      try { await refresh(); setError(""); }
+      catch (failure) { setError((failure as Error).message); }
+    }, overviewInterval);
   }, [ready]);
+  useEffect(() => {
+    if (!ready || !watchedJobs) return;
+    let live = true;
+    const stop = pollWhileVisible(async () => {
+      const generation = request.current;
+      const {jobs} = await api<Pick<LibraryDto,"jobs">>("/jobs?active=1", "GET", undefined, "low");
+      if (!live || request.current !== generation || !Array.isArray(jobs)) return;
+      if (jobs.map(job => job.id).sort().join(",") !== watchedJobs) {
+        await refresh();
+      } else {
+        const active = new Map(jobs.map(job => [job.id, job]));
+        setOverview(old => ({...old, jobs: old.jobs.map(job => active.get(job.id) ?? job)}));
+      }
+    }, activeJobsInterval);
+    return () => { live = false; stop(); };
+  }, [ready, watchedJobs]);
   useEffect(() => {
     if (!ready) return;
     const completed = library.jobs.filter(
@@ -640,9 +656,11 @@ function Workspace({
           </aside>
           <main className="main-content">
             <div id="browse-content" className="browse-content">
+            {error && <p className="notes-error" role="status">{error}</p>}
+            <ErrorBoundary key={location.pathname} label="Не удалось открыть страницу.">
             <React.Suspense fallback={<div className="loading-inline" role="status"><LoaderCircle size={18} className="spin" />Загружаем…</div>}>
             <Routes>
-              <Route path="/player" element={watchPlayer} />
+              <Route path="/player" element={<ErrorBoundary label="Не удалось показать плеер.">{watchPlayer}</ErrorBoundary>} />
               <Route path="/" element={<LibraryPage userId={user.id} search={librarySearch} />} />
               <Route
                 path="/playlists"
@@ -655,7 +673,7 @@ function Workspace({
               <Route path="/share-links" element={<ShareManager />} />
               <Route path="/share/:token" element={<SharedMediaPage refreshLibrary={refresh} />} />
               <Route path="/shared-playlists/:id" element={<SharedMediaPage saved refreshLibrary={refresh} />} />
-              <Route path="/settings" element={<WithCatalog><SettingsPage user={user} kaname={kaname} /></WithCatalog>} />
+              <Route path="/settings" element={<SettingsPage user={user} kaname={kaname} />} />
               <Route
                 path="*"
                 element={
@@ -672,8 +690,9 @@ function Workspace({
               />
             </Routes>
             </React.Suspense>
+            </ErrorBoundary>
             </div>
-            {miniPlayer}
+            <ErrorBoundary label="Не удалось показать плеер.">{miniPlayer}</ErrorBoundary>
           </main>
         </div>
         {importOpen && <ImportModal close={() => setImportOpen(false)} />}{" "}
@@ -721,37 +740,13 @@ function PageTop({ label, children }: { label: string; children?: ReactNode }) {
     </div>
   );
 }
-function useCatalog(enabled = true) {
-  const { overview } = useData();
-  const [catalog, setCatalog] = useState<Pick<LibraryDto, "items" | "playlists">>();
-  const [error, setError] = useState("");
-  const [retry, setRetry] = useState(0);
-  const playlistVersion = useMemo(() => enabled
-    ? JSON.stringify(overview.playlists.map(p => [p.id, p.revision, p.youtubeLinked]))
-    : undefined, [enabled, overview.playlists]);
-  useEffect(() => {
-    if (!enabled) return;
-    const controller = new AbortController();
-    setError("");
-    api<LibraryDto>("/library", "GET", undefined, undefined, controller.signal)
-      .then(({ items, playlists }) => { if (!controller.signal.aborted) setCatalog({ items, playlists }); })
-      .catch(e => { if (!controller.signal.aborted) setError(e.message); });
-    return () => controller.abort();
-  }, [enabled, overview.revision, playlistVersion, retry]);
-  return { catalog, error, retry: () => setRetry(n => n + 1) };
-}
-
-function WithCatalog({children}: {children: ReactNode}) {
-  const context = useData();
-  const { catalog, error, retry } = useCatalog();
-  if (error) return <div role="alert"><ErrorMessage error={error} /><Button onClick={retry}>Повторить</Button></div>;
-  if (!catalog) return <div role="status" className="loading-inline">Загружаем каталог…</div>;
-  return <DataContext.Provider value={{...context, library: {...context.library, ...catalog}}}>{children}</DataContext.Provider>;
+function LibraryNavigation(props: Omit<React.ComponentProps<typeof TagNavigation>, "hasPlayer">) {
+  return <TagNavigation {...props} hasPlayer={useHasPlayer()} />;
 }
 
 const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId: string; search: ReturnType<typeof useLibrarySearch> }) {
   const { library, overview, notify, openImport } = useData(),
-    player = usePlayer();
+    player = usePlayerCommands();
   const [filters, setFilters] = search;
   const [selected, setSelected] = useState<string[]>([]),
     [batchOpen, setBatchOpen] = useState(false);
@@ -763,8 +758,11 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
       return "list";
     }
   });
+  const reader = useMemo(() => new LibraryCardReader(), []);
+  const latestOverview = useRef(overview);
+  latestOverview.current = overview;
   const pages = useMemo(() => new LibraryPages((cursor, signal, selectionId) =>
-    api("/library/page", "POST", { ...searchBody(filters, selectionId), cursor }, undefined, signal)), [filters]);
+    reader.page(filters, latestOverview.current, cursor, signal, selectionId)), [filters, reader]);
   const previousFilters = useRef<typeof filters>(undefined);
   const {items, loading, error, nextCursor, total, tagCounts, selectionId} = useSyncExternalStore(pages.subscribe, pages.snapshot);
   const sentinel = useRef<HTMLDivElement>(null);
@@ -851,8 +849,8 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   }
 
   return (
-    <TagNavigation catalog={catalog} archivedTagNames={overview.archivedTagNames} counts={tagCounts ?? (restrictsFacets ? undefined : overview.tagCounts)}
-      search={filters} onChange={setFilters} userId={userId} hasPlayer={!!player.current}>
+    <LibraryNavigation catalog={catalog} archivedTagNames={overview.archivedTagNames} counts={tagCounts ?? (restrictsFacets ? undefined : overview.tagCounts)}
+      search={filters} onChange={setFilters} userId={userId}>
       <div className="title-row library-title-row">
         <h1>Медиатека</h1>
         <Button className="primary" onClick={openImport} aria-label="Добавить медиа" title="Добавить медиа">
@@ -930,7 +928,7 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
       {batchOpen && (
         <BatchTags ids={selected} close={() => setBatchOpen(false)} />
       )}
-    </TagNavigation>
+    </LibraryNavigation>
   );
 });
 function CreateSelectionPlaylist({ ids, onSaved }: { ids: string[]; onSaved: () => void }) {
@@ -943,19 +941,7 @@ function CreateSelectionPlaylist({ ids, onSaved }: { ids: string[]; onSaved: () 
   </>;
 }
 
-function ItemTable({
-  items,
-  playlistOrder,
-  reasons,
-  selected,
-  onSelected,
-  onActivate,
-  onTag,
-  selectedTags, showMissing, onPerformance,
-  reorder,
-  playlistId,
-  view,
-}: {
+type ItemTableProps = {
   items: ItemDto[];
   playlistOrder?: string[];
   reasons?: Record<string, string[]>;
@@ -969,245 +955,45 @@ function ItemTable({
   reorder?: (id: string, direction: number) => void;
   playlistId?: string;
   view?: LibraryView;
-}) {
-  const player = usePlayer(),
+};
+type EditTarget = {id: string; focusSource?: boolean};
+type ShareTarget = {id: string; issued: Promise<ShareLinkDto>};
+function ItemTable({
+  items,
+  playlistOrder,
+  reasons,
+  selected,
+  onSelected,
+  onActivate,
+  onTag,
+  selectedTags, showMissing, onPerformance,
+  reorder,
+  playlistId,
+  view,
+}: ItemTableProps) {
+  const player = usePlayerCommands(),
     { library, refresh, notify } = useData();
   const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
-  const { notes } = useNotes();
-  const [editTarget, setEditTarget] = useState<{ id: string; focusSource?: boolean }>(),
+  const [editTarget, setEditTarget] = useState<EditTarget>(),
     [remove, setRemove] = useState<ItemDto | null>(null),
-    [shareTarget, setShareTarget] = useState<{ id: string; issued: Promise<ShareLinkDto> }>(),
-    [copying, setCopying] = useState<string[]>([]),
+    [shareTarget, setShareTarget] = useState<ShareTarget>(),
     [busy, setBusy] = useState(false);
   const currentItems = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
   const edit = editTarget ? currentItems.get(editTarget.id) : undefined;
   const inLibrary = view !== undefined;
   const selectedIds = new Set(selected);
-  async function job(kind: string, itemId: string, mode?: string) {
-    try {
-      await api("/jobs", "POST", { kind, input: { itemId, mode } });
-      notify("Задание добавлено в очередь");
-      await refresh();
-    } catch (e) {
-      notify((e as Error).message, true);
-    }
+  function activate(item: ItemDto, index: number) {
+    if (onActivate) onActivate(item);
+    else player.activateItem(items, index, playlistId, { fromLibrary: inLibrary, queueIds: playlistOrder });
   }
-
-  async function createLocalCopy(itemId: string) {
-    setCopying(previous => [...previous, itemId]);
-    try {
-      await api(`/items/${encodeURIComponent(itemId)}/shared-copy`, "POST", {});
-      notify("Задание на создание локальной копии добавлено в очередь");
-      void refresh().catch(() => {});
-    } catch (e) {
-      notify((e as Error).message, true);
-    } finally {
-      setCopying(previous => previous.filter(id => id !== itemId));
-    }
+  function select(id: string, checked: boolean) {
+    if (selected) onSelected?.(checked ? [...selected, id] : selected.filter(other => other !== id));
   }
-
-  const results = items.map((item, index) => {
-    const ownSources = item.sources.filter(source => !source.shared);
-    const borrowedOnly = !!item.shared && !ownSources.length;
-    const canCopy = item.shared?.available && item.sources.some(source => source.shared && source.status !== "unavailable");
-    const streamUrl = ownSources.find((source) => source.streamUrl)?.streamUrl;
-    const externalUrl = ownSources.find((source) => source.url)?.url;
-    const artworkSource = item.sources.find((source) => source.thumbnail);
-    const available = playbackSources(item).length > 0;
-    const active = player.current?.id === item.id;
-    const playing = active && player.playing;
-    const status = sourceAvailability(item);
-    const hasItemNote = !!noteFor(notes, "item", item.id);
-    const hasSourceNote = ownSources.some((source) => noteFor(notes, "source", source.id));
-    const video = item.kind === "video";
-    const yt = ownSources.some((source) => source.provider === "youtube");
-    const kindLabel = video ? "Видео" : "Аудио";
-    const playLabel = playing ? "Приостановить"
-      : !inLibrary && video && (!active || player.waitingForVideo || player.mode === "original") ? "Смотреть"
-      : "Воспроизвести";
-    const itemLoading = active && player.loadingLabel;
-    const coverLabel = `${playLabel} ${item.title}`;
-    const activate = () => onActivate ? onActivate(item) : player.activateItem(items, index, playlistId, { fromLibrary: inLibrary, queueIds: playlistOrder });
-    const artwork = <ItemArtwork source={artworkSource} kind={item.kind} />;
-    const cover = inLibrary ? (
-      <button type="button" className={`item-art entry-cover art-${index % 6}`}
-        aria-label={video ? `${coverLabel} · обложка` : coverLabel} title={available ? coverLabel : "Нет рабочего источника"}
-        disabled={!available} onClick={activate}>
-        {artwork}
-        {available && (
-          <span className="entry-cover-control" aria-hidden="true">
-            {itemLoading ? <span className="cover-loading" /> : playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
-          </span>
-        )}
-      </button>
-    ) : <span className={`item-art art-${index % 6}`}>{artwork}</span>;
-    const itemTitle = (
-      <>
-        <button className="item-title" title={item.title} onClick={() => setEditTarget({ id: item.id })}>{item.title}</button>
-        {(hasItemNote || hasSourceNote) && (
-          <NoteIndicator label={hasItemNote ? "Есть заметка у записи" : "Есть заметка у источника"} />
-        )}
-      </>
-    );
-    const favorite = <FavoriteButton item={currentItems.get(item.id) ?? item} />;
-    const selection = inLibrary && selected && (
-      <input
-        type="checkbox"
-        aria-label={`Выбрать ${item.title}`}
-        checked={selectedIds.has(item.id)}
-        onChange={(event) => onSelected?.(
-          event.target.checked ? [...selected, item.id] : selected.filter((id) => id !== item.id),
-        )}
-      />
-    );
-    const menu = (
-      <details className="row-menu" name={inLibrary ? "library-item-actions" : undefined}
-        onKeyDown={(event) => {
-          if (event.key !== "Escape" || !event.currentTarget.open) return;
-          event.currentTarget.open = false;
-          event.currentTarget.querySelector("summary")?.focus();
-        }}
-      >
-        <summary aria-label={`Действия с ${item.title}`}>
-          <MoreHorizontal size={19} />
-        </summary>
-        <div className="dropdown" onClick={(event) => {
-          if (event.target instanceof Element && event.target.closest("button:not(:disabled), a")) {
-            const details = event.currentTarget.parentElement;
-            if (details instanceof HTMLDetailsElement) {
-              details.open = false;
-              details.querySelector("summary")?.focus();
-            }
-          }
-        }}>
-          <button onClick={() => setEditTarget({ id: item.id })}>
-            <Pencil size={14} />
-            Детали записи
-          </button>
-          {!borrowedOnly && <button onFocus={() => void loadSharing()} onPointerEnter={() => void loadSharing()}
-            onClick={() => setShareTarget({ id: item.id, issued: issueShare("item", item.id) })}>
-            <Link2 size={14} />
-            Поделиться
-          </button>}
-          {canCopy && <button disabled={copying.includes(item.id)} onClick={() => void createLocalCopy(item.id)}>
-            <Copy size={14} />
-            Создать локальную копию
-          </button>}
-          {!borrowedOnly && status === "unavailable" && (
-            <button onClick={() => setEditTarget({ id: item.id, focusSource: true })}>
-              <RefreshCw size={14} />
-              Заменить источник
-            </button>
-          )}
-          <button
-            disabled={active || !player.queueEditable}
-            onClick={() => {
-              player.playNext(item, playlistId);
-              notify("Запись будет играть следующей");
-            }}
-          >
-            <ListPlus size={14} />
-            Играть следующей
-          </button>
-          <button
-            disabled={!player.queueEditable}
-            onClick={() => {
-              player.enqueue(item, playlistId);
-              notify("Добавлено в очередь");
-            }}
-          >
-            <ListPlus size={14} />
-            Добавить в очередь
-          </button>
-          {reorder && (
-            <>
-              <button disabled={index === 0} onClick={() => reorder(item.id, -1)}>
-                ↑ Переместить выше
-              </button>
-              <button disabled={index === (playlistOrder?.length ?? items.length) - 1} onClick={() => reorder(item.id, 1)}>
-                ↓ Переместить ниже
-              </button>
-            </>
-          )}
-          {yt && (
-            <>
-              <button onClick={() => job("youtube-download", item.id, "audio")}>
-                <Download size={14} />
-                Скачать аудио
-              </button>
-              <button onClick={() => job("youtube-download", item.id, "video")}>
-                <Video size={14} />
-                Скачать видео
-              </button>
-              <button onClick={() => job("youtube-refresh", item.id)}>
-                <RefreshCw size={14} />
-                Проверить источник
-              </button>
-            </>
-          )}
-          {streamUrl && (
-            <a href={streamUrl} download={item.title}>
-              <Download size={14} />
-              Сохранить файл
-            </a>
-          )}
-          {externalUrl && (
-            <a href={externalUrl} target="_blank" rel="noreferrer">
-              <ExternalLink size={14} />
-              Открыть источник
-            </a>
-          )}
-          <button className="danger-text" onClick={() => setRemove(item)}>
-            <Trash2 size={14} />
-            Удалить из медиатеки
-          </button>
-        </div>
-      </details>
-    );
-
-    const badges = librarySourceBadges(item);
-    return (
-      <article className={`collection-entry ${active ? "current" : ""}`}
-        key={item.id} aria-current={active || undefined}>
-        <div className="entry-select">{inLibrary ? selection : (
-          <button className="icon-button playlist-track-play" type="button" disabled={!available} onClick={activate}
-            aria-label={coverLabel} title={coverLabel}>
-            {playing ? <Pause size={15} /> : <Play size={15} />}
-          </button>
-        )}</div>
-        <div className="entry-identity">
-          {cover}
-          <div className="entry-description">
-            <div className="item-name-actions">{itemTitle}</div>
-            <SharedItemStatus item={item} />
-            <ItemTagList tags={item.tags} catalog={catalog} selected={selectedTags} performance={item.performance}
-              voices={item.voices} onTag={onTag} onPerformance={onPerformance}/>
-            {showMissing && <small className="missing-reasons">Не указано · {missingClassification(item.tags,item.performance,item.voices).map(k => missingLabels[k]).join(", ")}</small>}
-            <div className="entry-meta">
-              <span>{itemLoading || kindLabel} · {formatDuration(item.duration)}</span>
-              {badges.map(({ provider, status, label }) => {
-                const Icon = provider === "youtube" ? Youtube : provider === "local" ? HardDrive : provider === "shared" ? Link2 : CircleAlert;
-                return (
-                  <span key={provider} className="entry-source" data-provider={provider} data-status={status}
-                    role="img" aria-label={label} title={label}>
-                    <Icon size={13} aria-hidden="true" />
-                  </span>
-                );
-              })}
-              {!available && item.shared?.available !== false && <span>Нет рабочего источника</span>}
-            </div>
-            {reasons?.[item.id] && (
-              <details className="reason-details">
-                <summary>Почему в плейлисте</summary>
-                <p>{reasons[item.id]!.join(" · ")}</p>
-              </details>
-            )}
-          </div>
-        </div>
-        <div className="entry-tools">{favorite}{menu}</div>
-      </article>
-    );
-  });
+  const results = items.map((item, index) => <ItemRow key={item.id} item={item} index={index}
+    catalog={catalog} checked={selected && selectedIds.has(item.id)} onSelect={select} activateItem={activate}
+    inLibrary={inLibrary} last={index === (playlistOrder?.length ?? items.length) - 1} playlistId={playlistId}
+    reasons={reasons} selectedTags={selectedTags} showMissing={showMissing} onTag={onTag} onPerformance={onPerformance}
+    reorder={reorder} setEditTarget={setEditTarget} setShareTarget={setShareTarget} setRemove={setRemove} />);
 
   return (
     <>
@@ -1262,6 +1048,252 @@ function ItemTable({
     </>
   );
 }
+function QueueActions({item, active, playlistId}: {item:ItemDto; active:boolean; playlistId?:string}) {
+  const editable = useQueueEditable();
+  const player = usePlayerCommands();
+  const { notify } = useData();
+  return <>
+    <button
+      disabled={active || !editable}
+      onClick={() => {
+        player.playNext(item, playlistId);
+        notify("Запись будет играть следующей");
+      }}
+    >
+      <ListPlus size={14} />
+      Играть следующей
+    </button>
+    <button
+      disabled={!editable}
+      onClick={() => {
+        player.enqueue(item, playlistId);
+        notify("Добавлено в очередь");
+      }}
+    >
+      <ListPlus size={14} />
+      Добавить в очередь
+    </button>
+  </>;
+}
+
+type ItemRowProps = Pick<ItemTableProps, "selectedTags" | "showMissing" | "onPerformance" | "reorder" | "onTag" | "playlistId" | "reasons"> & {
+  item: ItemDto; index: number; catalog: TagCatalog; checked?: boolean; last: boolean; inLibrary: boolean;
+  onSelect: (id: string, checked: boolean) => void;
+  activateItem: (item: ItemDto, index: number) => void;
+  setEditTarget: (target: EditTarget) => void;
+  setShareTarget: (target: ShareTarget) => void;
+  setRemove: (item: ItemDto) => void;
+};
+const ItemRow = React.memo(function ItemRow({ item, index, catalog, checked, last, inLibrary, selectedTags, showMissing,
+  reasons, reorder, onTag, onPerformance, onSelect, playlistId, activateItem, setEditTarget, setShareTarget, setRemove }: ItemRowProps) {
+  const { notes } = useNotes();
+  const { notify, refresh } = useData();
+  const [copying, setCopying] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  async function job(kind: string, itemId: string, mode?: string) {
+    try {
+      await api("/jobs", "POST", { kind, input: { itemId, mode } });
+      notify("Задание добавлено в очередь");
+      await refresh();
+    } catch (e) {
+      notify((e as Error).message, true);
+    }
+  }
+
+  async function createLocalCopy(itemId: string) {
+    setCopying(true);
+    try {
+      await api(`/items/${encodeURIComponent(itemId)}/shared-copy`, "POST", {});
+      notify("Задание на создание локальной копии добавлено в очередь");
+      void refresh().catch(() => {});
+    } catch (e) {
+      notify((e as Error).message, true);
+    } finally {
+      setCopying(false);
+    }
+  }
+
+
+  const ownSources = item.sources.filter(source => !source.shared);
+  const borrowedOnly = !!item.shared && !ownSources.length;
+  const canCopy = item.shared?.available && item.sources.some(source => source.shared && source.status !== "unavailable");
+  const streamUrl = ownSources.find((source) => source.streamUrl)?.streamUrl;
+  const externalUrl = ownSources.find((source) => source.url)?.url;
+  const artworkSource = item.sources.find((source) => source.thumbnail);
+  const available = playbackSources(item).length > 0;
+  const { active, playing, mode, waitingForVideo, loadingLabel } = usePlayerCard(item.id);
+  const status = sourceAvailability(item);
+  const hasItemNote = !!noteFor(notes, "item", item.id);
+  const hasSourceNote = ownSources.some((source) => noteFor(notes, "source", source.id));
+  const video = item.kind === "video";
+  const yt = ownSources.some((source) => source.provider === "youtube");
+  const kindLabel = video ? "Видео" : "Аудио";
+  const playLabel = playing ? "Приостановить"
+    : !inLibrary && video && (!active || waitingForVideo || mode === "original") ? "Смотреть"
+    : "Воспроизвести";
+  const itemLoading = active && loadingLabel;
+  const coverLabel = `${playLabel} ${item.title}`;
+  const activate = () => activateItem(item, index);
+  const artwork = <ItemArtwork source={artworkSource} kind={item.kind} />;
+  const cover = inLibrary ? (
+    <button type="button" className={`item-art entry-cover art-${index % 6}`}
+      aria-label={video ? `${coverLabel} · обложка` : coverLabel} title={available ? coverLabel : "Нет рабочего источника"}
+      disabled={!available} onClick={activate}>
+      {artwork}
+      {available && (
+        <span className="entry-cover-control" aria-hidden="true">
+          {itemLoading ? <span className="cover-loading" /> : playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
+        </span>
+      )}
+    </button>
+  ) : <span className={`item-art art-${index % 6}`}>{artwork}</span>;
+  const itemTitle = (
+    <>
+      <button className="item-title" title={item.title} onClick={() => setEditTarget({ id: item.id })}>{item.title}</button>
+      {(hasItemNote || hasSourceNote) && (
+        <NoteIndicator label={hasItemNote ? "Есть заметка у записи" : "Есть заметка у источника"} />
+      )}
+    </>
+  );
+  const favorite = <FavoriteButton item={item} />;
+  const selection = inLibrary && checked !== undefined && (
+    <input
+      type="checkbox"
+      aria-label={`Выбрать ${item.title}`}
+      checked={checked}
+      onChange={event => onSelect(item.id, event.target.checked)}
+    />
+  );
+  const menu = (
+    <details onToggle={event => setMenuOpen(event.currentTarget.open)} className="row-menu" name={inLibrary ? "library-item-actions" : undefined}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !event.currentTarget.open) return;
+        event.currentTarget.open = false;
+        event.currentTarget.querySelector("summary")?.focus();
+      }}
+    >
+      <summary aria-label={`Действия с ${item.title}`}>
+        <MoreHorizontal size={19} />
+      </summary>
+      {menuOpen && <div className="dropdown" onClick={(event) => {
+        if (event.target instanceof Element && event.target.closest("button:not(:disabled), a")) {
+          const details = event.currentTarget.parentElement;
+          if (details instanceof HTMLDetailsElement) {
+            details.open = false;
+            details.querySelector("summary")?.focus();
+          }
+        }
+      }}>
+        <button onClick={() => setEditTarget({ id: item.id })}>
+          <Pencil size={14} />
+          Детали записи
+        </button>
+        {!borrowedOnly && <button onFocus={() => void loadSharing()} onPointerEnter={() => void loadSharing()}
+          onClick={() => setShareTarget({ id: item.id, issued: issueShare("item", item.id) })}>
+          <Link2 size={14} />
+          Поделиться
+        </button>}
+        {canCopy && <button disabled={copying} onClick={() => void createLocalCopy(item.id)}>
+          <Copy size={14} />
+          Создать локальную копию
+        </button>}
+        {!borrowedOnly && status === "unavailable" && (
+          <button onClick={() => setEditTarget({ id: item.id, focusSource: true })}>
+            <RefreshCw size={14} />
+            Заменить источник
+          </button>
+        )}
+        <QueueActions item={item} active={active} playlistId={playlistId} />
+        {reorder && (
+          <>
+            <button disabled={index === 0} onClick={() => reorder(item.id, -1)}>
+              ↑ Переместить выше
+            </button>
+            <button disabled={last} onClick={() => reorder(item.id, 1)}>
+              ↓ Переместить ниже
+            </button>
+          </>
+        )}
+        {yt && (
+          <>
+            <button onClick={() => job("youtube-download", item.id, "audio")}>
+              <Download size={14} />
+              Скачать аудио
+            </button>
+            <button onClick={() => job("youtube-download", item.id, "video")}>
+              <Video size={14} />
+              Скачать видео
+            </button>
+            <button onClick={() => job("youtube-refresh", item.id)}>
+              <RefreshCw size={14} />
+              Проверить источник
+            </button>
+          </>
+        )}
+        {streamUrl && (
+          <a href={streamUrl} download={item.title}>
+            <Download size={14} />
+            Сохранить файл
+          </a>
+        )}
+        {externalUrl && (
+          <a href={externalUrl} target="_blank" rel="noreferrer">
+            <ExternalLink size={14} />
+            Открыть источник
+          </a>
+        )}
+        <button className="danger-text" onClick={() => setRemove(item)}>
+          <Trash2 size={14} />
+          Удалить из медиатеки
+        </button>
+      </div>}
+    </details>
+  );
+
+  const badges = librarySourceBadges(item);
+  return (
+    <article className={`collection-entry ${active ? "current" : ""}`}
+      key={item.id} aria-current={active || undefined}>
+      <div className="entry-select">{inLibrary ? selection : (
+        <button className="icon-button playlist-track-play" type="button" disabled={!available} onClick={activate}
+          aria-label={coverLabel} title={coverLabel}>
+          {playing ? <Pause size={15} /> : <Play size={15} />}
+        </button>
+      )}</div>
+      <div className="entry-identity">
+        {cover}
+        <div className="entry-description">
+          <div className="item-name-actions">{itemTitle}</div>
+          <SharedItemStatus item={item} />
+          <ItemTagList tags={item.tags} catalog={catalog} selected={selectedTags} performance={item.performance}
+            voices={item.voices} onTag={onTag} onPerformance={onPerformance}/>
+          {showMissing && <small className="missing-reasons">Не указано · {missingClassification(item.tags,item.performance,item.voices).map(k => missingLabels[k]).join(", ")}</small>}
+          <div className="entry-meta">
+            <span>{itemLoading || kindLabel} · {formatDuration(item.duration)}</span>
+            {badges.map(({ provider, status, label }) => {
+              const Icon = provider === "youtube" ? Youtube : provider === "local" ? HardDrive : provider === "shared" ? Link2 : CircleAlert;
+              return (
+                <span key={provider} className="entry-source" data-provider={provider} data-status={status}
+                  role="img" aria-label={label} title={label}>
+                  <Icon size={13} aria-hidden="true" />
+                </span>
+              );
+            })}
+            {!available && item.shared?.available !== false && <span>Нет рабочего источника</span>}
+          </div>
+          {reasons?.[item.id] && (
+            <details className="reason-details">
+              <summary>Почему в плейлисте</summary>
+              <p>{reasons[item.id]!.join(" · ")}</p>
+            </details>
+          )}
+        </div>
+      </div>
+      <div className="entry-tools">{favorite}{menu}</div>
+    </article>
+  );
+});
+
 function FavoriteButton({ item, withLabel = false }: { item: ItemDto; withLabel?: boolean }) {
   const { refresh, notify } = useData();
   const [busy, setBusy] = useState(false);
@@ -1575,12 +1607,6 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
     </>
   );
 }
-function LinkedPlaylistCatalog(props: Omit<React.ComponentProps<typeof YoutubeLocalAdditions>, "items">) {
-  const { catalog, error, retry } = useCatalog();
-  if (error) return <><ErrorMessage error={error} /><Button onClick={retry}>Повторить загрузку</Button></>;
-  if (!catalog) return <div role="status" className="loading-inline">Загружаем записи медиатеки…</div>;
-  return <YoutubeLocalAdditions {...props} items={catalog.items} />;
-}
 function PlaylistRoute({ onBrowseTag }: { onBrowseTag: (id: string) => void }) {
   const { id } = useParams();
   return id && <PlaylistPage key={id} id={id} onBrowseTag={onBrowseTag} />;
@@ -1617,7 +1643,7 @@ function PlaylistExclusions({ id, count, version }: { id: string; count: number;
 }
 function PlaylistPage({ id, onBrowseTag }: { id: string; onBrowseTag: (id: string) => void }) {
   const { library, overview, refresh, notify } = useData(),
-    player = usePlayer(),
+    player = usePlayerCommands(),
     navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const edit = params.get("edit") === "1";
@@ -1644,6 +1670,7 @@ function PlaylistPage({ id, onBrowseTag }: { id: string; onBrowseTag: (id: strin
   const moreRequest = useRef<AbortController | null>(null);
   const request = useRef<AbortController | null>(null);
   const historyRevision = useHistoryRevision(usesHistory !== false);
+  const details = useMemo(() => new PlaylistDetails(), []);
   const path = `/playlists/${encodeURIComponent(id)}`;
   async function resolve(background = false, metadataOnly = false) {
     request.current?.abort();
@@ -1658,7 +1685,7 @@ function PlaylistPage({ id, onBrowseTag }: { id: string; onBrowseTag: (id: strin
       if (metadataOnly) {
         setPlaylist(await api<PlaylistDto>(path, "GET", undefined, "high", signal));
       } else {
-        const data = await api<PlaylistDetailDto>(path + "/detail?limit=" + visibleRows.current, "GET", undefined, background ? "low" : "high", signal);
+        const data = await details.read(path + "/detail?limit=" + visibleRows.current, JSON.stringify([contentKey, historyRevision]), background ? "low" : "high", signal);
         setPlaylist(data.playlist);
         setResolved({ ...data.resolved, ids: data.ids, cover: data.cover, changeToken: data.changeToken, validUntil: data.validUntil,
           refreshAt: data.validUntil === null ? null : performance.now() + (data.validUntil - data.serverNow),
@@ -1852,7 +1879,6 @@ function PlaylistPage({ id, onBrowseTag }: { id: string; onBrowseTag: (id: strin
           key={playlist.id}
           playlist={playlist}
           items={resolved?.items}
-          LocalAdditions={LinkedPlaylistCatalog}
           libraryRevision={overview.revision}
           tags={library.tags}
           reload={async () => {
@@ -1982,6 +2008,8 @@ function PlaylistPage({ id, onBrowseTag }: { id: string; onBrowseTag: (id: strin
     </>
   );
 }
+type EditorPreview = Omit<ResolvedPlaylist, "items"> & {items: Pick<ItemDto, "id" | "title" | "kind">[]; hasHistoryRules: boolean};
+
 function PlaylistEditor({
   playlist,
   initialIds,
@@ -1997,9 +2025,9 @@ function PlaylistEditor({
 }) {
   const context = useData();
   const { refresh, notify } = context;
+  const playlistVersion = useMemo(() => JSON.stringify(context.overview.playlists.map(p => [p.id, p.revision])), [context.overview.playlists]);
   const [editRules, setEditRules] = useState(!playlist?.youtubeLinked && initialIds === undefined);
-  const { catalog, error: catalogError, retry: retryCatalog } = useCatalog(editRules);
-  const library = useMemo(() => ({ ...context.library, ...catalog }), [context.library, catalog]);
+  const library = context.overview;
   const [title, setTitle] = useState(playlist?.title ?? ""),
     [description, setDescription] = useState(playlist?.description ?? ""),
     [definition, setDefinition] = useState<PlaylistDefinition>(
@@ -2009,7 +2037,7 @@ function PlaylistEditor({
         sort: "source",
       },
     ),
-    [preview, setPreview] = useState<ResolvedPlaylist | null>(null),
+    [preview, setPreview] = useState<EditorPreview | null>(null),
     [error, setError] = useState(""),
     [previewError, setPreviewError] = useState(""),
     [previewBusy, setPreviewBusy] = useState(false),
@@ -2017,23 +2045,27 @@ function PlaylistEditor({
   const titleInput = useRef<HTMLInputElement>(null);
   useEffect(() => { titleInput.current?.focus(); }, []);
   const [historyPreference, setHistoryPreference] = useState<HistoryPreference>();
-  const hasHistoryRules = usesListeningHistory(definition.rule, library);
+  const hasHistoryRules = !!preview?.hasHistoryRules;
   const sortsByHistory = definition.sort === "last-started";
   const needsHistory = !playlist?.youtubeLinked && (sortsByHistory || hasHistoryRules);
   const historyRevision = useHistoryRevision(needsHistory);
   useEffect(() => {
     if (!needsHistory) return;
     let active = true;
-    void api<HistoryPreference>("/history/preference")
+    const update = () => void api<HistoryPreference>("/history/preference")
       .then((preference) => { if (active) setHistoryPreference(preference); })
       .catch(() => {});
-    return () => { active = false; };
-  }, [needsHistory, historyRevision]);
+    const storage = (event: StorageEvent) => { if (event.key === preferenceEvent) update(); };
+    update();
+    window.addEventListener(preferenceEvent, update);
+    window.addEventListener("storage", storage);
+    return () => { active = false; window.removeEventListener(preferenceEvent, update); window.removeEventListener("storage", storage); };
+  }, [needsHistory]);
   const playlistId = playlist?.id;
   const savedKey = useMemo(() => playlist && JSON.stringify(playlist.definition), [playlist?.definition]);
   const draftKey = useMemo(() => JSON.stringify(definition), [definition]);
   const changed = !!playlist && draftKey !== savedKey;
-  const [savedComposition, setSavedComposition] = useState<{ key: string; items: ItemDto[] }>();
+  const [savedComposition, setSavedComposition] = useState<{ key: string; items: EditorPreview["items"] }>();
   const before = currentItems ?? (savedComposition?.key === savedKey ? savedComposition?.items : undefined);
   const delta = useMemo(() => changed && before && preview
     ? compositionDelta(before, preview.items) : undefined, [changed, before, preview]);
@@ -2043,7 +2075,7 @@ function PlaylistEditor({
     // A quick rule change can also precede the first unmodified preview.
     if (!changed || before || !playlistId || !savedKey) return;
     const controller = new AbortController();
-    api<ResolvedPlaylist>(`/playlists/${encodeURIComponent(playlistId)}/resolve`, "GET", undefined, undefined, controller.signal)
+    api<EditorPreview>("/playlists/preview", "POST", {definition: playlist!.definition, playlistId, cards:true}, undefined, controller.signal)
       .then(result => { if (!controller.signal.aborted) setSavedComposition({ key: savedKey, items: result.items }); })
       .catch(() => {}); // A broken original rule can still be repaired.
     return () => controller.abort();
@@ -2055,7 +2087,7 @@ function PlaylistEditor({
     const { signal } = controller;
     setPreviewBusy(true);
     const timer = setTimeout(() => {
-      api<ResolvedPlaylist>("/playlists/preview", "POST", { definition, playlistId }, undefined, signal)
+      api<EditorPreview>("/playlists/preview", "POST", { definition, playlistId, cards:true }, undefined, signal)
         .then(result => {
           if (signal.aborted) return;
           setPreview(result);
@@ -2073,7 +2105,7 @@ function PlaylistEditor({
       controller.abort();
       clearTimeout(timer);
     };
-  }, [draftKey, savedKey, editRules, historyRevision, playlistId]);
+  }, [draftKey, savedKey, editRules, historyRevision, playlistId, library.revision, playlistVersion]);
   return (
     <Modal
       wide={editRules}
@@ -2093,8 +2125,8 @@ function PlaylistEditor({
               { title, description, definition: playlist?.youtubeLinked ? playlist.definition : definition },
             );
             notify(playlist ? "Плейлист обновлён" : "Плейлист создан");
+            await refresh().catch(e => notify(e.message, true));
             onSaved(saved);
-            void refresh().catch(e => notify(e.message, true));
           } catch (e) {
             setError((e as Error).message);
           } finally {
@@ -2131,14 +2163,7 @@ function PlaylistEditor({
                 Настроить состав
               </Button>
             </div>}
-            {editRules && catalogError && <div>
-              <ErrorMessage error={catalogError} />
-              <Button type="button" onClick={retryCatalog}>Повторить загрузку</Button>
-            </div>}
-            {editRules && !catalog && !catalogError && <div className="loading-inline" role="status">
-              <LoaderCircle size={17} className="spin" /> Загружаем каталог для правил…
-            </div>}
-            {editRules && catalog && <>
+            {editRules && <>
             <div className="section-heading editor-section-heading">
               <h3>Правила состава</h3>
               <Sparkles size={16} />
@@ -2264,7 +2289,7 @@ function PlaylistEditor({
             type="submit"
             className="primary"
             busy={busy}
-            disabled={!title.trim() || (editRules && (!catalog || !!catalogError || !!previewError || previewBusy))}
+            disabled={!title.trim() || (editRules && (!!previewError || previewBusy || !preview))}
           >
             {busy ? "Сохраняем…" : playlist ? "Сохранить изменения" : "Создать плейлист"}
             {!busy && <Check size={16} />}
@@ -2988,7 +3013,7 @@ function JobsPage() {
   );
 }
 function SettingsPage({ user, kaname }: { user: UserDto; kaname: boolean }) {
-  const { library, notify, refresh, openImport } = useData(),
+  const { overview, notify, refresh, openImport } = useData(),
     [tokens, setTokens] = useState<
       { id: string; name: string; createdAt: string }[]
     >([]),
@@ -3041,7 +3066,7 @@ function SettingsPage({ user, kaname }: { user: UserDto; kaname: boolean }) {
       <div className="settings-layout">
         {kaname && <KanameSettings userId={user.id} />}
         <YoutubeSyncSettings />
-        <HistorySettings items={library.items} playlists={library.playlists} />
+        <HistorySettings playlists={overview.playlists} revision={overview.revision} />
         <section className="settings-card">
           <div className="settings-card-heading">
             <span className="settings-icon">

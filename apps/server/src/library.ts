@@ -991,12 +991,19 @@ export class LibraryService {
         items, tags, playlists, history, now,
         onFutureHistoryCutoff: at => { validUntil = Math.min(validUntil, at); },
       }, id);
-      const usesHistory = usesPrivateHistory(definition, new Map(playlists.map(p => [p.id, p])));
-      return { result, usesHistory, validUntil };
+      const hasHistoryRules = usesPrivateHistory({ ...definition, sort: "source" }, new Map(playlists.map(p => [p.id, p])));
+      return { result, hasHistoryRules, usesHistory: definition.sort === "last-started" || hasHistoryRules, validUntil };
     } catch (error) {
       if (!(error instanceof InvalidPlaylistError)) throw error;
       throw new HttpError(422, "invalid_playlist", error.message);
     }
+  }
+  async previewCards(ownerId: string, definition: PlaylistDefinition, id?: string) {
+    return this.db.$transaction(async tx => {
+      if (id) await this.getPlaylist(ownerId, id, tx);
+      const { result, hasHistoryRules } = await this.evaluateRuleRows(tx, ownerId, definition, id);
+      return {...result, hasHistoryRules, items: result.items.map(({id, title, kind}) => ({id, title, kind}))};
+    });
   }
   async preview(ownerId: string, definition: PlaylistDefinition, id?: string, browser = true) {
     const checked = playlistDefinitionSchema.parse(definition);
