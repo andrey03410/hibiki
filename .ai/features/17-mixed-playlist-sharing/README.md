@@ -2,11 +2,11 @@
 id: 17
 title: Смешанный плейлист по одной ссылке
 track: product
-stage: review
+stage: merged
 branch: codex/17-mixed-playlist-sharing
-pr:
+pr: https://github.com/andrey03410/hibiki/pull/21
 started: 2026-11-25
-merged:
+merged: 2026-11-25
 ---
 
 # 17. Смешанный плейлист по одной ссылке
@@ -19,6 +19,6 @@ merged:
 - [x] [Продуктовая постановка](product.md)
 - [x] [Техника](tech.md) и [план](plan.md)
 - [x] Реализация, [проверки и ручная приёмка](verify.md)
-- [ ] Приёмка владельцем и вливание
+- [x] Автономная приёмка и [вливание через PR №21](https://github.com/andrey03410/hibiki/pull/21)
 
 25 ноября 2026 владелец поручил «Давай возьмем эту фичу в работу. Действуй автономно вплоть до деплоя».
