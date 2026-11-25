@@ -249,8 +249,8 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
     const { size, v } = artworkQuery.parse(request.query);
     const thumbnail = canRunHeavy(request.access) ? size : undefined;
     const cover = await artwork.get(request.user!.id, idOf(request), thumbnail);
-    if (cover.etag) {
     if (v && v === cover.version) reply.header("cache-control", "private, max-age=31536000, immutable");
+    if (cover.etag) {
       reply.header("etag", cover.etag);
       const validators = request.headers["if-none-match"]?.split(",").map(tag => tag.trim().replace(/^W\//, ""));
       if (validators?.includes("*") || validators?.includes(cover.etag)) return reply.code(304).send();
@@ -549,6 +549,7 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
       ) {
         if (request.url.startsWith("/share/")) reply.header("referrer-policy", "strict-origin");
         return reply
+          .header("Cache-Control", "no-cache")
           .type("text/html")
           .send(createReadStream(join(webRoot, "index.html")));
       }

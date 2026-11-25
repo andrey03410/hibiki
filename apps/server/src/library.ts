@@ -56,8 +56,8 @@ type IncludedItem = NonNullable<
   Awaited<ReturnType<Db["item"]["findFirst"]>>
 > & { sources: Array<any>; tags: Array<any> };
 export function itemDto(row: IncludedItem): ItemDto {
-  return {
   const coverVersion = artworkVersion(row.sources);
+  return {
     id: row.id,
     title: row.title,
     originalTitle: row.originalTitle,
@@ -743,14 +743,14 @@ export class LibraryService {
       });
       if (settings)
         await this.writeSettings(ownerId, JSON.parse(settings.json), tx);
+      return snapshot.items.find(item => item.id === id)!.sources.flatMap(source => source.hash ?? []);
     });
+    // Worker maintenance retries after a transient filesystem failure.
+    await Promise.all(removedHashes.map(hash => removeUnusedArtwork(this.db, this.storageRoot, ownerId, hash).catch(() => {})));
   }
   listTags(ownerId: string, includeArchived = false) {
     return listTags(this.db, ownerId, includeArchived);
-      return snapshot.items.find(item => item.id === id)!.sources.flatMap(source => source.hash ?? []);
   }
-    // Worker maintenance retries after a transient filesystem failure.
-    await Promise.all(removedHashes.map(hash => removeUnusedArtwork(this.db, this.storageRoot, ownerId, hash).catch(() => {})));
   createTag(ownerId: string, input: TagInput) {
     return this.db.$transaction(tx => saveTag(tx, ownerId, input));
   }
@@ -1223,14 +1223,14 @@ export class LibraryService {
           : [],
       );
     }
+    return this.persistSettings(ownerId, next, tx);
+  }
+  private async persistSettings(ownerId: string, next: Record<string, unknown>, tx: Prisma.TransactionClient) {
+    const json = JSON.stringify(next);
+    invariant(json.length < 1024 * 1024, 413, "settings_too_large", "Настройки слишком велики");
     await tx.setting.upsert({
       where: { userId: ownerId }, create: { userId: ownerId, json }, update: { json },
     });
     return next;
   }
 }
-    return this.persistSettings(ownerId, next, tx);
-  }
-  private async persistSettings(ownerId: string, next: Record<string, unknown>, tx: Prisma.TransactionClient) {
-    const json = JSON.stringify(next);
-    invariant(json.length < 1024 * 1024, 413, "settings_too_large", "Настройки слишком велики");

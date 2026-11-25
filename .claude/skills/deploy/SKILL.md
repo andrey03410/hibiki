@@ -20,7 +20,7 @@ description: Используй, когда нужно выложить hibiki �
 В блоке Hibiki на порту 8443 применяется следующий фрагмент.
 
 ```caddyfile
-@hibikiText not path /files/* /api/items/*/artwork /api/shared* /api/jobs/*/download /mcp
+@hibikiText not path /files/* /api/items/*/artwork /api/shared* /api/jobs/*/download
 encode @hibikiText zstd gzip {
     match {
         header Content-Type application/json*
