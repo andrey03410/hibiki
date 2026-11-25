@@ -1,3 +1,4 @@
+import { discardReservation } from "./storage-writer";
 import { accountStorage } from "./account-storage";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import cookie from "@fastify/cookie";
@@ -13,7 +14,7 @@ import { z, ZodError } from "zod";
 import type { UserDto } from "@hibiki/contracts";
 import { librarySearchSchema, itemPatchSchema, playlistDefinitionSchema, tagInputSchema } from "@hibiki/contracts";
 import type { Db } from "./db";
-import { canRunHeavy, env, kanameEnabled, markActivity, meterStorage, ownerAccess, release, requireHeavy } from "./kaname";
+import { canRunHeavy, env, kanameEnabled, markActivity, meterStorage, ownerAccess, requireHeavy } from "./kaname";
 import { registerKaname } from "./kaname-routes";
 import { AuthService } from "./auth";
 import { hydrateLibraryItems, LibraryService } from "./library";
@@ -339,8 +340,12 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
               .item,
           );
       } finally {
-        await rm(temporaryDir, { recursive: true, force: true });
-        await release(db, hold);
+        try {
+          await rm(temporaryDir, { recursive: true, force: true });
+        } finally {
+          // A failed ZIP handoff may have moved the upload into its job directory.
+          await discardReservation(db, ownerId, hold);
+        }
       }
     }
     invariant(
