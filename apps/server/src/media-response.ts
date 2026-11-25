@@ -1,7 +1,7 @@
 import { open } from "node:fs/promises";
 import { Readable } from "node:stream";
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { bulkAudioStream } from "./audio-pacing";
+import { mediaRangeStream } from "./media-pacing";
 import { invariant } from "./errors";
 import { readOnlyMediaFlags } from "./media-playback";
 import { buildAudioView, readAudioRange, type AudioView } from "./mp4-audio";
@@ -60,7 +60,8 @@ export async function sendMediaFile(request: FastifyRequest, reply: FastifyReply
     }
     const size = view?.bytes ?? info.size;
     const range = request.headers.range ? byteRange(request.headers.range, size) : undefined;
-    reply.type(view ? "audio/mp4" : file.mime).header("accept-ranges", "bytes");
+    const mime = view ? "audio/mp4" : file.mime;
+    reply.type(mime).header("accept-ranges", "bytes");
     if (range === null) return reply.code(416).header("content-range", `bytes */${size}`).send();
     if (range) reply.code(206).header("content-range", `bytes ${range.start}-${range.end}/${size}`);
     reply.header("content-length", range ? range.end - range.start + 1 : size);
@@ -70,7 +71,7 @@ export async function sendMediaFile(request: FastifyRequest, reply: FastifyReply
       : handle.createReadStream(range);
     if (view) stream.once("close", () => { void handle.close().catch(() => {}); });
     streaming = true;
-    return reply.send(bulkAudioStream(stream, view ? "audio/mp4" : file.mime, !!range, request.headers["x-hibiki-audio-rate"]));
+    return reply.send(mediaRangeStream(stream, mime, request.headers));
   } finally {
     if (!streaming) await handle.close();
   }
