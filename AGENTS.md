@@ -39,6 +39,8 @@ watch layout с очередью справа, audio artwork, fullscreen overlay
 
 [15. Карточки плейлистов и быстрые действия](.ai/features/15-playlist-experience/README.md) — явная кнопка ссылки, переход в редактор с обложки, качество изображений и скорость работы с подборкой.
 
+[16. Производительность прослушивания](.ai/features/16-playback-performance/README.md) — виртуальный звук MP4, непрерывная загрузка, фоновые запросы и работа с каталогом.
+
 ## Стек и проверки
 
 TypeScript · Node.js >=22.16 · npm workspaces · Fastify 5 · SQLite + Prisma 7 ·
