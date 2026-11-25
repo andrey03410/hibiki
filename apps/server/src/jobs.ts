@@ -12,6 +12,7 @@ import { HttpError, invariant } from "./errors.js";
 import { hintsVersion, inspectPlaybackMetadata } from "./media-playback";
 import { audioViewVersion } from "./mp4-audio";
 import { storagePath } from "./media.js";
+import { downloadReplacement, finishDownloadReplacement, selectedDownloadVideo, validateDownloadReplacement } from "./source-selection";
 import { ShareService } from "./sharing.js";
 import {
   discoverYoutube,
@@ -643,9 +644,16 @@ export class JobsService {
     if (job.kind === "youtube-download" || shared?.provider === "youtube") {
       requireHeavy(access);
       const itemId: string = input.itemId;
-      const externalId = shared?.externalId ?? (await this.library.getItem(job.ownerId, itemId)).sources.find(
-        (s) => s.provider === "youtube" && !s.shared && s.externalId,
-      )?.externalId;
+      const replacement = input.replaceSource && job.kind === "youtube-download"
+        ? await downloadReplacement(this.db, job.ownerId, itemId, job.id) : undefined;
+      if (replacement?.applied) return {itemId, sourceId:replacement.applied, reused:true};
+      const item = !shared && !replacement ? await this.library.getItem(job.ownerId, itemId) : undefined;
+      const external = item?.sources.filter(s => s.provider === "youtube" && !s.shared && s.externalId);
+      const preferred = external?.find(source => source.id === item?.preferredSourceId)?.externalId;
+      const downloadedFrom = !preferred && item?.preferredSourceId && external && external.length > 1
+        ? await selectedDownloadVideo(this.db, job.ownerId, itemId, item.preferredSourceId) : undefined;
+      const externalId = shared?.externalId ?? (replacement ? new URL(replacement.url).searchParams.get("v")
+        : preferred || downloadedFrom || external?.[0]?.externalId);
       invariant(externalId, 400, "youtube_source", "У медиа нет источника YouTube");
       const temporary = path.join(
         this.directory(job.id),
@@ -691,9 +699,14 @@ export class JobsService {
           itemId,
           signal,
           prepareValidateAccess,
+          validateAccess: replacement ? tx => validateDownloadReplacement(tx, job.ownerId, itemId, job.id, job.attempt) : undefined,
+          applyReplacement: replacement ? (tx, sourceId) =>
+            finishDownloadReplacement(tx, job.ownerId, itemId, job.id, replacement.url, sourceId) : undefined,
         });
-        await save({ itemId: imported.item.id, reused: imported.reused }, 1, 1);
-        return { itemId: imported.item.id, reused: imported.reused };
+        const result = {itemId: imported.item.id, reused: imported.reused,
+          ...(replacement && {sourceId: imported.item.preferredSourceId})};
+        await save(result, 1, 1);
+        return result;
       } finally {
         await progressWrite;
         await rm(temporary, { recursive: true, force: true });

@@ -19,6 +19,7 @@ import type { Services } from "./app";
 import { allowedLocalPath } from "./media";
 import { HttpError, invariant } from "./errors";
 import { proposeReplacement } from "./replacement";
+import { replaceSource } from "./source-selection";
 import { searchLibraryIds } from "./library-pages";
 import { hydrateLibraryItems, requireHistoryAccess } from "./library";
 
@@ -164,7 +165,7 @@ export function buildMcp(ownerId: string, s: Services) {
         youtube:
           "media_import_youtube → job_get; импорт не скачивает файлы автоматически",
         replacement:
-          "media_propose_replacement предлагает ролик; владелец проверяет и подтверждает в карточке",
+          "media_replace_source применяет выбранный источник к той же карточке; для локальной замены по URL дождитесь job_get. media_propose_replacement оставляет предложение для проверки в карточке.",
         historyRules:
           "Условия и сортировку по личной истории задаёт владелец в браузере. MCP читает состав уже сохранённых плейлистов.",
         portability:
@@ -244,6 +245,12 @@ export function buildMcp(ownerId: string, s: Services) {
     "Скачать YouTube-источник в локальный файл того же item",
     { itemId: id, mode: z.enum(["audio", "video"]).default("video") },
     (args) => s.jobs.create(ownerId, "youtube-download", args),
+  );
+  tool(
+    "media_replace_source",
+    "Сменить источник своей карточки. Укажите URL одного ролика YouTube или ID собственного источника. Для замены локальной версии по URL вернётся jobId.",
+    { itemId: id, url: z.string().max(4000).url().optional(), sourceId: id.optional() },
+    args => replaceSource(s.db, s.storageRoot, ownerId, args.itemId, args),
   );
   tool(
     "media_propose_replacement",

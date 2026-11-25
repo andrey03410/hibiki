@@ -172,6 +172,7 @@ export function playbackSources<T extends PlaybackSource>(item: {
     )
     .sort(
       (a, b) =>
+        (mode === "audio" ? Number(preferred(b)) - Number(preferred(a)) : 0) ||
         Number(matchesKind(b)) - Number(matchesKind(a)) ||
         Number(preferred(b)) - Number(preferred(a)) ||
         Number(b.provider === "local") - Number(a.provider === "local"),

@@ -728,3 +728,9 @@ it("changes only the previous and next card snapshots when playback moves", asyn
   expect(changed).toEqual(["a","b"]);
   expect(cards.queueEditable()).toBe(false);
 });
+
+it("prefers the selected full video with sound over an earlier short local audio in listening mode", () => {
+  const movie = {id:"movie",provider:"local" as const,status:"available",streamUrl:"/files/full",mime:"video/webm",hasAudio:true};
+  const short = {...movie,id:"short",streamUrl:"/files/short",mime:"audio/mpeg"};
+  expect(playbackSources({kind:"video",sources:[short,movie],preferredSourceId:"movie"},"audio")[0]).toBe(movie);
+});

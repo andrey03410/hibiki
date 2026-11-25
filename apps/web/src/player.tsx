@@ -403,7 +403,7 @@ export function PlayerProvider({
   const source = current ? playbackSourceForAttempt(
     current,
     failedSources,
-    previousSource?.itemId === current.id && previousSource.sourceId
+    playing && previousSource?.itemId === current.id && previousSource.sourceId
       ? { sourceId: previousSource.sourceId, preferredSourceId: previousSource.preferredSourceId }
       : undefined,
     settings.mode,
