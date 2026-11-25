@@ -3,6 +3,8 @@ import type { SourceDto } from "@hibiki/contracts";
 const MAX_FILE = 128 * 1024 * 1024;
 const MAX_PREFIX = 2 * 1024 * 1024;
 const PAGE = 64 * 1024;
+const CHROME_PAGE = 32 * 1024;
+const WEBKIT_PAGE = 16 * 1024;
 type ReadFile = (url: string, init: RequestInit) => Promise<Response>;
 export type AudioFile = {
   url: string; size: number; mime: string; prefix: number; duration?: number | null;
@@ -101,9 +103,15 @@ class AudioBytes {
     }
     this.inspected = file.audioStart !== undefined;
   }
-  private alignedTail(offset: number) {
-    // Chrome and WebKit ask for the page containing moov, including bytes preceding the box.
-    return Math.max(0, Math.floor(offset / (16 * 1024)) * (16 * 1024)) || offset;
+  private tailFits(start: number, prefix: number) {
+    return this.file.size - Math.max(prefix, start) <= MAX_PREFIX - prefix;
+  }
+  private alignedTail(offset: number, prefix = 1) {
+    // With indexed metadata the prefix can still shrink. A discovered index must
+    // share the remaining budget with every prefix byte already in the tab.
+    const chrome = Math.floor(offset / CHROME_PAGE) * CHROME_PAGE || offset;
+    const webkit = Math.floor(offset / WEBKIT_PAGE) * WEBKIT_PAGE || offset;
+    return [chrome, webkit, offset].find(start => this.tailFits(start, prefix)) ?? chrome;
   }
   get complete() { return this.ranges[0]?.[0] === 0 && this.ranges[0][1] === this.file.size; }
   coverage(): AudioCoverage {
@@ -176,11 +184,11 @@ class AudioBytes {
       }
     } else if (!this.tail && /^(audio|video)\/(mp4|x-m4a)/.test(this.file.mime)) {
       const tail = metadataTail(this.copy(0, this.prefix), this.file.size);
-      if (tail !== undefined) this.tail = this.alignedTail(tail);
+      if (tail !== undefined) this.tail = this.alignedTail(tail, this.prefix);
     }
   }
   private wantTail() {
-    return this.tail !== undefined && (this.filling || this.file.size - this.tail <= MAX_PREFIX - this.prefix);
+    return this.tail !== undefined && (this.filling || this.tailFits(this.tail, this.prefix));
   }
   private readyPrefix() {
     return !this.gap(this.decoderStart, this.prefix) && (!this.wantTail() || !this.gap(this.tail!, this.file.size)) &&

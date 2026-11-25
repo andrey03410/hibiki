@@ -217,11 +217,72 @@ describe("tab-local audio delivery", () => {
     };
     const delivery=new AudioDelivery(transport);
     await delivery.prepare({ ...file("next"), mime: "audio/mp4" });
-    expect(reads).toEqual(["bytes=0-99999","bytes=1097728-1199999"]);
+    expect(reads).toEqual(["bytes=0-99999","bytes=1081344-1199999"]);
     delivery.select({ ...file("next"), mime: "audio/mp4" }, "next");
     expect(await delivery.response("next", "bytes=1100004-1100007")!.text()).toBe("moov");
     await delivery.fill();
-    expect(reads.filter(r=>r==="bytes=1097728-1199999")).toHaveLength(1);
+    expect(reads.filter(r=>r==="bytes=1081344-1199999")).toHaveLength(1);
+  });
+  it("serves the Chrome decoder's 32 KiB-aligned suffix entirely from the prepared next track", async () => {
+    const server = origin();
+    const media = {...file("next"), audioStart:32, tailStart:1_100_000, mime:"audio/mp4"};
+    const delivery = new AudioDelivery(server.fetcher);
+    await delivery.prepare(media);
+    delivery.select(media, "next");
+    const reads = server.ranges.length;
+    // Chromium starts its native range one 16 KiB page before the page containing moov.
+    const reader = delivery.decoderResponse("next", "bytes=1081344-")!.body!.getReader();
+    const {value} = await reader.read();
+    expect(value).toEqual(bytes.slice(1_081_344, 1_081_344 + value!.length));
+    expect(server.ranges.slice(reads).some(range => range.startsWith("bytes=1081344-"))).toBe(false);
+    await reader.cancel();
+    delivery.clear();
+  });
+  it.each([
+    { size:3_932_160, expectedTail:2_097_152 },  // both the 32 KiB page and the index fit
+    { size:3_948_544, expectedTail:2_113_536 },  // only the 16 KiB page and the index fit
+    { size:3_949_000, expectedTail:2_114_036 },  // only the index itself fits
+    { size:3_949_045, expectedTail:null },       // the header has left too little room for the index
+  ])("respects the already-read prefix when discovering a legacy M4A index ($size bytes)", async ({size, expectedTail}) => {
+    const tailStart = 2_114_036;
+    const data = new Uint8Array(size);
+    const header = new DataView(data.buffer);
+    header.setUint32(0, 16);
+    data.set(new TextEncoder().encode("ftyp"),4);
+    header.setUint32(16, tailStart - 16);
+    data.set(new TextEncoder().encode("mdat"),20);
+    header.setUint32(tailStart, size - tailStart);
+    data.set(new TextEncoder().encode("moov"),tailStart + 4);
+    const ranges: string[] = [];
+    const delivery = new AudioDelivery(async (_url, init) => {
+      const range = new Headers(init.headers).get("Range")!;
+      ranges.push(range);
+      const [from,to] = range.slice(6).split("-").map(Number);
+      return new Response(data.slice(from,to! + 1), {status:206, headers:{"Content-Range":`bytes ${from}-${to}/${size}`}});
+    });
+    const file = ownedAudioFile({id:"legacy",provider:"local",status:"available",streamUrl:"/files/legacy",mime:"audio/mp4",bytes:size})!;
+    await delivery.prepare(file);
+    const expected = ["bytes=0-262143"];
+    if (expectedTail !== null) expected.push(`bytes=${expectedTail}-${size-1}`);
+    expect(ranges).toEqual(expected);
+    delivery.clear();
+  });
+  it("reserves the beginning and a fitting index when decoder alignment alone would exceed 2 MiB", async () => {
+    const limit = 2 * 1024 ** 2;
+    const size = 2 * limit + 16_380, tailStart = size - limit + 8192;
+    const reads: [number, number][] = [];
+    const delivery = new AudioDelivery(async (_url, init) => {
+      const [start,end] = new Headers(init.headers).get("Range")!.slice(6).split("-").map(Number);
+      reads.push([start!,end!]);
+      return new Response(new Uint8Array(end! - start! + 1), { status:206,
+        headers:{"Content-Range":`bytes ${start}-${end}/${size}`},
+      });
+    });
+    await delivery.prepare({...file("index"), size, mime:"audio/mp4", audioStart:32, tailStart});
+    expect(reads.some(([start,end]) => start <= tailStart && end === size - 1)).toBe(true);
+    expect(reads.some(([start]) => start === 0)).toBe(true);
+    expect(reads.reduce((total, [a,b]) => total + b - a + 1, 0)).toBeLessThanOrEqual(limit);
+    delivery.clear();
   });
   it("budgets header plus ten seconds within 2 MiB and accepts local audio through 128 MiB", () => {
     const own = { id: "s", provider: "local" as const, status: "available" as const,
@@ -240,10 +301,10 @@ it("requests the indexed M4A tail immediately and fills the remaining gap once",
   const delivery = new AudioDelivery(transport);
   delivery.select({...file("m4a"), tailStart: 1_100_000, audioStart: 32, mime: "audio/mp4"}, "a");
   const ready = delivery.start();
-  expect(server.ranges).toEqual(expect.arrayContaining(["bytes=0-99999","bytes=1097728-1199999"]));
+  expect(server.ranges).toEqual(expect.arrayContaining(["bytes=0-99999","bytes=1081344-1199999"]));
   await ready;
   await delivery.fill();
-  expect(server.ranges.at(-1)).toBe("bytes=100000-1097727");
+  expect(server.ranges.at(-1)).toBe("bytes=100000-1081343");
 });
 
 it("retries a stalled body after 10 seconds, preserving the bytes already received", async () => {
