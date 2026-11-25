@@ -2,7 +2,7 @@
 id: 18
 title: Освобождение места после импорта медиатеки
 track: product
-stage: plan
+stage: build
 branch: codex/18-import-storage
 pr:
 started: 2026-11-25
@@ -17,7 +17,7 @@ merged:
 
 - [x] [Бриф](brief.md)
 - [x] [Продукт](product.md) подтверждён с уточнениями по квоте и MCP
-- [ ] Техника и план
+- [x] [Техника](tech.md) и [план](plan.md)
 - [ ] Реализация и проверка
 - [ ] Приёмка владельцем и вливание
 
