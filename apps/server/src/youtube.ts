@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, realpath } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
+import { probeMediaStreams } from "./media";
 import ffmpegStatic from "ffmpeg-static";
 
 const VIDEO_ID = /^[a-zA-Z0-9_-]{11}$/;
@@ -467,38 +468,45 @@ export async function downloadYoutube(
     "after_move:filepath",
     marker,
     ...(mode === "audio"
-      ? [
-          "--format",
-          "bestaudio[ext=m4a]/bestaudio/best",
-          "--extract-audio",
-          "--audio-format",
-          "m4a",
-        ]
-      : [
-          "--format",
-          "bestvideo[height<=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4]/best",
-          "--merge-output-format",
-          "mp4",
-          "--recode-video",
-          "mp4",
-        ]),
+      ? ["--format", "bestaudio/best"]
+      : ["--format", "bestvideo[height<=1080][vcodec^=avc1]+bestaudio/bestvideo[height<=1080]+bestaudio/best",
+         "--merge-output-format", "mkv", "--remux-video", "mp4"]),
     "--",
     `https://www.youtube.com/watch?v=${externalId}`,
   ];
-  await runTool(binary(), args, {
-    signal,
-    timeoutMs: 60 * 60 * 1000,
-    onLine: (line) => {
-      const match = /\[download\]\s+(\d+(?:\.\d+)?)%/.exec(line);
-      if (match) onProgress?.(Math.min(1, Number(match[1]) / 100));
-    },
-  });
-  const output = (await readFile(marker, "utf8")).trim().split("\n").at(-1)!;
+  let output: string;
+  try {
+    await runTool(binary(), args, {
+      signal,
+      timeoutMs: 60 * 60 * 1000,
+      onLine: (line) => {
+        const match = /\[download\]\s+(\d+(?:\.\d+)?)%/.exec(line);
+        if (match) onProgress?.(Math.min(1, Number(match[1]) / 100));
+      },
+    });
+    output = (await readFile(marker, "utf8")).trim().split("\n").at(-1)!;
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (mode !== "video" || !(error instanceof YoutubeProviderError) || !/postprocess/i.test(error.message)) throw error;
+    // A failed MP4 remux leaves its completed original; partial downloads and component streams have different names.
+    const original = (await readdir(directory)).filter(name => /^media\.(?:webm|mkv|mov|avi)$/i.test(name));
+    if (original.length !== 1) throw error;
+    output = path.join(directory, original[0]);
+  }
   const actual = await realpath(output);
   const root = await realpath(directory);
   if (!actual.startsWith(root + path.sep))
     throw new Error("Провайдер вернул путь за пределами задания");
-  return actual;
+  if (mode === "video") return actual;
+  const { audio, video } = await probeMediaStreams(actual, signal);
+  if (!audio) throw new YoutubeProviderError("Скачанный файл не содержит звуковой дорожки");
+  const extension: Record<string, string> = { aac: ".m4a", opus: ".ogg", vorbis: ".ogg", mp3: ".mp3", flac: ".flac" };
+  const targetExt = extension[audio.codec] ?? ".mka";
+  if (!video && path.extname(actual).toLowerCase() === targetExt) return actual;
+  const target = path.join(root, "audio" + targetExt);
+  await runTool(String(ffmpegStatic), ["-v", "error", "-nostdin", "-y", "-i", actual,
+    "-map", audio.id, "-c:a", "copy", target], { signal, timeoutMs: 5 * 60_000 });
+  return target;
 }
 export async function youtubeDiagnostics() {
   const { stdout } = await runTool(binary(), ["--ignore-config", "--version"], {

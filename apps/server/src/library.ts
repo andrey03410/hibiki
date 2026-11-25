@@ -2,6 +2,7 @@ import { canRunHeavy, ownerAccess, checkItems, requireHeavy, reserve, release } 
 import { randomUUID } from "node:crypto";
 import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { playbackFields } from "./media-playback";
 import type { Db } from "./db";
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
@@ -86,6 +87,7 @@ export function itemDto(row: IncludedItem): ItemDto {
       hash: source.file?.hash,
       hasAudio:
         source.provider === "local" ? (source.file?.hasAudio ?? undefined) : undefined,
+      ...(source.file && playbackFields(source.file, `/files/${source.fileId}`)),
       streamUrl: source.fileId ? `/files/${source.fileId}` : undefined,
     })),
   };
@@ -370,8 +372,8 @@ export class LibraryService {
             options.signal?.throwIfAborted();
             await validateAccess?.(tx);
             options.signal?.throwIfAborted();
-            if (original.hasAudio !== media.hasAudio)
-              await tx.mediaFile.update({ where: { id: original.id }, data: { hasAudio: media.hasAudio } });
+            if (original.hasAudio !== media.hasAudio || !original.hintsVersion || !original.audioViewVersion)
+              await tx.mediaFile.update({ where: { id: original.id }, data: { hasAudio: media.hasAudio, ...media.playback } });
             if (options.applyReplacement) {
               invariant(await tx.source.findFirst({
                 where: { id: prior.id, ownerId, itemId: options.itemId, status: "available" },
@@ -450,6 +452,7 @@ export class LibraryService {
                 kind: info.kind,
                 duration: info.duration,
                 hasAudio: info.hasAudio,
+                ...info.playback,
               },
               update: {
                 path,
@@ -458,12 +461,13 @@ export class LibraryService {
                 kind: info.kind,
                 duration: info.duration,
                 hasAudio: info.hasAudio,
+                ...info.playback,
               },
             });
-          } else if (file && file.hasAudio !== info.hasAudio) {
+          } else if (file && (file.hasAudio !== info.hasAudio || !file.hintsVersion || !file.audioViewVersion)) {
             file = await tx.mediaFile.update({
               where: { id: file.id },
-              data: { hasAudio: info.hasAudio },
+              data: { hasAudio: info.hasAudio, ...info.playback },
             });
           }
           invariant(file, 409, "file_changed", "Состав хранилища изменился, повторите импорт");

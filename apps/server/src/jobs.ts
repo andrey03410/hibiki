@@ -9,6 +9,8 @@ import type { JobDto } from "@hibiki/contracts";
 import type { Db } from "./db.js";
 import { LibraryService, jobDto } from "./library.js";
 import { HttpError, invariant } from "./errors.js";
+import { hintsVersion, inspectPlaybackMetadata } from "./media-playback";
+import { audioViewVersion } from "./mp4-audio";
 import { storagePath } from "./media.js";
 import { ShareService } from "./sharing.js";
 import {
@@ -82,6 +84,37 @@ export class JobsService {
     public storageRoot: string,
   ) {
     this.sharing = new ShareService(db, library);
+  }
+  async backfillPlayback(signal?: AbortSignal) {
+    let after: string | undefined;
+    let updated = 0, skipped = 0;
+    for (;;) {
+      signal?.throwIfAborted();
+      const files = await this.db.mediaFile.findMany({
+        where: { id: after ? { gt: after } : undefined,
+          OR: [{ hintsVersion: { lt: hintsVersion } }, { audioViewVersion: { lt: audioViewVersion } }] },
+        select: { id: true, ownerId: true, path: true, bytes: true, hash: true, mime: true,
+          hintsVersion: true, audioViewVersion: true },
+        orderBy: { id: "asc" }, take: 64,
+      });
+      for (const file of files) {
+        signal?.throwIfAborted();
+        let data;
+        try {
+          await ownerAccess(this.db, file.ownerId);
+          data = await inspectPlaybackMetadata(storagePath(this.storageRoot, file.path), file.mime, file.bytes);
+        } catch {
+          signal?.throwIfAborted();
+          skipped++;
+          continue;
+        }
+        signal?.throwIfAborted();
+        const result = await this.db.mediaFile.updateMany({ where: file, data });
+        updated += result.count;
+      }
+      if (files.length < 64) return { updated, skipped };
+      after = files.at(-1)!.id;
+    }
   }
   private async owned(ownerId: string, id: string, browser = false): Promise<Job> {
     const row = await this.db.job.findFirst({

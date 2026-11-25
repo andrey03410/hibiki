@@ -3,7 +3,7 @@ import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
 import staticFiles from "@fastify/static";
 import { existsSync, createReadStream } from "node:fs";
-import { mkdir, rm, stat } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { resolve, join, extname, basename } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
@@ -19,6 +19,7 @@ import { hydrateLibraryItems, LibraryService } from "./library";
 import { JobsService } from "./jobs";
 import { HttpError, invariant } from "./errors";
 import { allowedLocalPath, storagePath } from "./media";
+import { sendMediaFile } from "./media-response";
 import { registerMcp } from "./mcp";
 import { uploadPolicy } from "./upload-policy";
 import { artworkQuery, ArtworkService } from "./artwork";
@@ -509,49 +510,23 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
     await auth.deleteToken(request.user!.id, idOf(request));
     return { ok: true };
   });
-  app.get("/files/:id", async (request, reply) => {
-    const file = await db.mediaFile.findFirst({
-      where: { id: idOf(request), ownerId: request.user!.id },
+  for (const audio of [false, true]) {
+    app.route({
+      method: ["GET", "HEAD"],
+      url: audio ? "/files/:id/audio" : "/files/:id",
+      async handler(request, reply) {
+        const file = await db.mediaFile.findFirst({
+          where: { id: idOf(request), ownerId: request.user!.id },
+        });
+        invariant(file, 404, "file_not_found", "Файл не найден");
+        reply.header("cache-control", kanameEnabled() ? "private, no-store" : "private, max-age=3600")
+          .header("x-content-type-options", "nosniff");
+        return sendMediaFile(request, reply, storagePath(storageRoot, file.path), file, audio);
+      },
     });
-    invariant(file, 404, "file_not_found", "Файл не найден");
-    const path = storagePath(storageRoot, file.path);
-    const size = (await stat(path)).size;
-    reply
-      .type(file.mime)
-      .header("accept-ranges", "bytes")
-      .header("cache-control", kanameEnabled() ? "private, no-store" : "private, max-age=3600")
-      .header("x-content-type-options", "nosniff");
-    const range = request.headers.range;
-    if (range) {
-      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-      if (!match || (!match[1] && !match[2]))
-        return reply
-          .code(416)
-          .header("content-range", `bytes */${size}`)
-          .send();
-      const start = match[1]
-        ? Number(match[1])
-        : Math.max(0, size - Number(match[2]));
-      const end = match[1]
-        ? Math.min(match[2] ? Number(match[2]) : size - 1, size - 1)
-        : size - 1;
-      if (start >= size || start < 0 || end < start)
-        return reply
-          .code(416)
-          .header("content-range", `bytes */${size}`)
-          .send();
-      reply
-        .code(206)
-        .header("content-range", `bytes ${start}-${end}/${size}`)
-        .header("content-length", end - start + 1);
-      return reply.send(createReadStream(path, { start, end }));
-    }
-    reply.header("content-length", size);
-    return reply.send(createReadStream(path));
-  });
+  }
   registerNotes(app, db);
   registerLibraryPages(app, db, library);
-          .header("Cache-Control", "no-cache")
   registerClassification(app, db);
   registerReplacement(app, db, library, storageRoot);
   registerHistory(app, db);

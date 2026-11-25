@@ -34,6 +34,11 @@ export interface SourceDto {
   hasAudio?: boolean;
   thumbnail?: string;
   streamUrl?: string;
+  playbackHints?: { audioStart: number; tailStart?: number };
+  audioStreamUrl?: string;
+  audioBytes?: number;
+  audioMime?: string;
+  audioViewStart?: number;
 }
 export interface ItemDto {
   id: string;
@@ -401,6 +406,11 @@ export const sourceSchema = z
     hasAudio: z.boolean().optional(),
     thumbnail: z.string().optional(),
     streamUrl: z.string().optional(),
+    playbackHints: z.object({ audioStart: z.int().nonnegative(), tailStart: z.int().nonnegative().optional() }).optional(),
+    audioStreamUrl: z.string().optional(),
+    audioBytes: z.int().positive().optional(),
+    audioMime: z.string().optional(),
+    audioViewStart: z.int().nonnegative().optional(),
   })
   .strict() satisfies z.ZodType<SourceDto>;
 export const itemSchema = z

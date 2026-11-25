@@ -112,6 +112,39 @@ describe("media sharing", () => {
     expect((await asBob({ url: source.streamUrl!, headers: { range: "bytes=44-45" } })).statusCode).toBe(404);
   });
 
+  it("serves virtual M4A ranges through owned and revocable shared URLs", async () => {
+    const input = join(ctx.root, "video.mp4");
+    await promisify(execFile)(String(ffmpeg), ["-v", "error", "-f", "lavfi", "-i", "testsrc2=s=160x90:d=1",
+      "-f", "lavfi", "-i", "sine=duration=1", "-c:v", "libx264", "-c:a", "aac", input]);
+    const { item } = await ctx.library.importLocal(ctx.userId, input);
+    const source = item.sources[0];
+    expect(source).toMatchObject({ audioStreamUrl: source.streamUrl + "/audio", audioMime: "audio/mp4" });
+    const url = source.audioStreamUrl!;
+    expect((await app.inject(url)).statusCode).toBe(401);
+    expect((await asBob({ url })).statusCode).toBe(404);
+    const full = await app.inject({ url, cookies: alice });
+    expect(full.headers).toMatchObject({
+      "content-type": "audio/mp4", "content-length": String(source.audioBytes), etag: `"${source.hash}-a1"`,
+      "x-content-type-options": "nosniff", "cache-control": "private, max-age=3600",
+    });
+    const link = await share("item", item.id);
+    const view = (await asBob({ url: preview(link) })).json<SharedViewDto>();
+    const sharedUrl = view.items[0].sources[0].audioStreamUrl!;
+    const head = await asBob({ method: "HEAD", url: sharedUrl });
+    expect(head.statusCode).toBe(200);
+    expect(head.headers["cache-control"]).toBe("private, no-store");
+    expect(head.headers["content-length"]).toBe(String(source.audioBytes));
+    expect(head.rawPayload).toHaveLength(0);
+    const offset = source.audioViewStart! - 10;
+    const range = await asBob({ url: sharedUrl, headers: { range: `bytes=${offset}-${offset + 99}` } });
+    expect(range.statusCode).toBe(206);
+    expect(range.rawPayload).toEqual(full.rawPayload.subarray(offset, offset + 100));
+    const unsat = await asBob({ url: sharedUrl, headers: { range: `bytes=${source.audioBytes}-` } });
+    expect(unsat.statusCode).toBe(416);
+    expect(unsat.headers["content-range"]).toBe(`bytes */${source.audioBytes}`);
+    await app.inject({ method: "DELETE", url: "/api/share-links/" + link.id, cookies: alice });
+    expect((await asBob({ method: "HEAD", url: sharedUrl })).statusCode).toBe(404);
+  });
   it("streams embedded artwork only while the author and grant remain active", async () => {
     const { stdout: audio } = await promisify(execFile)(String(ffmpeg), [
       "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=0.1",

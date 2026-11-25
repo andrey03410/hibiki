@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chmod, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { JobsService } from "./jobs.js";
-import { testContext } from "./test-utils.js";
+import { hashFile } from "./media";
+import { testContext, wav } from "./test-utils.js";
 import { runTool } from "./youtube.js";
 
 describe("durable jobs", () => {
@@ -16,6 +17,21 @@ describe("durable jobs", () => {
     delete process.env.YTDLP_PATH;
     await jobs.stop();
     await ctx.close();
+  });
+  it("backfills only old metadata without changing the media or repeating updates", async () => {
+    const input = join(ctx.root, "sound.wav");
+    await writeFile(input, wav());
+    const { item } = await ctx.library.importLocal(ctx.userId, input);
+    const file = await ctx.db.mediaFile.update({ where: { id: item.sources[0].fileId }, data: {
+      hintsVersion: 0, audioViewVersion: 0, audioStart: null,
+    } });
+    const before = await hashFile(join(ctx.root, file.path));
+    expect(await jobs.backfillPlayback()).toEqual({ updated: 1, skipped: 0 });
+    expect(await hashFile(join(ctx.root, file.path))).toBe(before);
+    expect(await jobs.backfillPlayback()).toEqual({ updated: 0, skipped: 0 });
+    expect(await ctx.db.mediaFile.findUnique({ where: { id: file.id } })).toMatchObject({
+      audioStart: 0n, hintsVersion: 1, audioViewVersion: 1, audioViewBytes: null,
+    });
   });
   it("does not expose private browser jobs through ordinary job access", async () => {
     await expect(jobs.create(ctx.userId, "export", { includeNotes: true })).rejects.toThrow();
