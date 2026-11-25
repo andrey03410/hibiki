@@ -200,6 +200,7 @@ export interface CheckedArchive {
   archiveHash: string;
 }
 type ExtractedFile = {
+  playback?: import("./media-playback").PlaybackMetadata;
   path: string;
   hash: string;
   bytes: number;
@@ -747,6 +748,7 @@ export async function inspectArchive(
       if (media.kind !== file.kind || media.mime !== file.mime)
         throw new Error(`Тип медиа не совпадает с манифестом: ${file.id}`);
       actual.hasAudio = media.hasAudio;
+      actual.playback = media.playback;
       if (!media.browserCompatible)
         for (const item of manifest.items)
           for (const source of item.sources)
@@ -1057,7 +1059,7 @@ export async function applyArchive(
         for (const file of manifest.files) {
           signal?.throwIfAborted();
           const plan = prepared.get(file.hash)!;
-          const hasAudio = checked.files.get(file.path)?.hasAudio;
+          const { hasAudio, playback } = checked.files.get(file.path) ?? {};
           let stored = await tx.mediaFile.findUnique({
             where: { ownerId_hash: { ownerId, hash: file.hash } },
           });
@@ -1073,6 +1075,7 @@ export async function applyArchive(
                 kind: file.kind,
                 duration: file.duration,
                 hasAudio,
+                ...playback,
               },
             });
           else if (plan.copied && stored.path === plan.previousPath)
@@ -1085,12 +1088,13 @@ export async function applyArchive(
                 kind: file.kind,
                 duration: file.duration,
                 hasAudio,
+                ...playback,
               },
             });
-          else if (hasAudio !== undefined && stored.hasAudio !== hasAudio)
+          else if (hasAudio !== undefined && (stored.hasAudio !== hasAudio || !stored.hintsVersion || !stored.audioViewVersion))
             stored = await tx.mediaFile.update({
               where: { id: stored.id },
-              data: { hasAudio },
+              data: { hasAudio, ...playback },
             });
           const usable =
             stored.path === plan.relative

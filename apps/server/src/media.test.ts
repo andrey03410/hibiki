@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ffmpeg from "ffmpeg-static";
-import { inspectFile, preparePlayback } from "./media";
+import { inspectFile, preparePlayback, inspectPlaybackMetadata, mp4CompatibleAudio } from "./media";
 
 const run = promisify(execFile);
 describe("local playback compatibility", () => {
@@ -23,6 +23,54 @@ describe("local playback compatibility", () => {
       { timeout: 10_000 },
     );
   };
+
+  it("reads a large ID3v2 header including the v2.4 footer", async () => {
+    const file = join(root, "tagged.mp3");
+    await generate(file, ["-f", "lavfi", "-i", "sine=duration=0.2", "-id3v2_version", "0"]);
+    const track = await readFile(file);
+    const length = 300 * 1024;
+    const header = Buffer.from([73, 68, 51, 4, 0, 0x10, 0, 0, 0, 0]);
+    for (let i = 0; i < 4; i++) header[9 - i] = (length >>> (7 * i)) & 127;
+    const footer = Buffer.from(header);
+    footer.write("3DI");
+    await writeFile(file, Buffer.concat([header, Buffer.alloc(length), footer, track]));
+    expect((await inspectFile(file)).playback.audioStart).toBe(length + 20);
+  });
+  it.each([false, true])("indexes M4A top level boxes (faststart %s)", async fast => {
+    const file = join(root, "metadata.m4a");
+    await generate(file, ["-f", "lavfi", "-i", "sine=duration=0.3", "-c:a", "aac", ...(fast ? ["-movflags", "+faststart"] : [])]);
+    const data = await readFile(file);
+    const meta = await inspectPlaybackMetadata(file, "audio/mp4");
+    expect(meta.audioStart).toBe(data.indexOf("mdat") + 4);
+    expect(meta.tailStart).toBe(fast ? null : data.indexOf("moov") - 4);
+  });
+  it.each(["audio", "video"])("preserves floating point samples outside the integer PCM range for %s", async kind => {
+    const file = join(root, "float.mkv");
+    const video = kind === "video" ? ["-f", "lavfi", "-i", "color=s=32x32:d=0.25"] : [];
+    await generate(file, [...video, "-f", "lavfi", "-i", "aevalsrc=1.25*sin(2*PI*440*t)+0.0000000001:d=0.25",
+      "-c:a", "pcm_f32le", ...(video.length ? ["-c:v", "libx264"] : [])]);
+    const result = await preparePlayback(file, await inspectFile(file), root);
+    expect(result?.media).toMatchObject({ browserCompatible: true, audioCodec: "pcm_f32le", kind });
+    const samples = async (input: string) => (await run(String(ffmpeg), ["-loglevel", "error", "-i", input,
+      "-map", "0:a:0", "-c:a", "pcm_f32le", "-f", "f32le", "-"], {encoding: "buffer"})).stdout;
+    expect(await samples(result!.path)).toEqual(await samples(file));
+  });
+  it("preserves 24-bit PCM samples and channels in the lossless preparation", async () => {
+    const file = join(root, "precision.aiff");
+    await generate(file, ["-f", "lavfi", "-i", "anoisesrc=r=96000:d=0.1", "-ac", "2", "-c:a", "pcm_s24be"]);
+    const prepared = await preparePlayback(file, await inspectFile(file), root);
+    expect(prepared?.media).toMatchObject({ audioCodec: "flac", mime: "audio/flac", browserCompatible: true });
+    const hash = async (path: string) => (await run(String(ffmpeg), ["-loglevel", "error", "-i", path, "-c:a", "pcm_s32le", "-f", "hash", "-"])).stdout;
+    expect(await hash(prepared!.path)).toBe(await hash(file));
+    const { parseFile } = await import("music-metadata");
+    expect((await parseFile(prepared!.path)).format).toMatchObject({ sampleRate: 96000, bitsPerSample: 24, numberOfChannels: 2 });
+  });
+
+  it("accepts both HE-AAC profiles for MP4 playback", () => {
+    expect(mp4CompatibleAudio("aac", "(HE-AAC) (mp4a), 44100 Hz, stereo, fltp")).toBe(true);
+    expect(mp4CompatibleAudio("aac", "(HE-AACv2) (mp4a), 48000 Hz, stereo, fltp")).toBe(true);
+    expect(mp4CompatibleAudio("aac", "(SSR)")).toBe(false);
+  });
 
   it("keeps MP3 and PCM WAV as browser-ready audio without creating a copy", async () => {
     for (const [extension, codec] of [

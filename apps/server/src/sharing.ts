@@ -1,9 +1,10 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import type { Prisma, ShareLink } from "@prisma/client";
+import { Prisma, type ShareLink } from "@prisma/client";
 import type {
   ItemDto, SavedSharedPlaylistDto, ShareKind, ShareLinkDto, ShareStatus,
   SharedViewDto, SourceDto,
 } from "@hibiki/contracts";
+import { playbackFields } from "./media-playback";
 import type { Db } from "./db";
 import type { LibraryService } from "./library";
 import { HttpError, invariant } from "./errors";
@@ -77,7 +78,8 @@ const originSelect = {
   sources: {
     select: {
       id: true, ownerId: true, provider: true, externalId: true, status: true, fileId: true,
-      file: { select: { ownerId: true, mime: true, kind: true, path: true, hasAudio: true } },
+      file: { select: { ownerId: true, mime: true, kind: true, path: true, id: true, hash: true, bytes: true, hasAudio: true,
+        audioStart: true, tailStart: true, hintsVersion: true, audioViewStart: true, audioViewBytes: true, audioViewVersion: true } },
     },
   },
 } satisfies Prisma.ItemSelect;
@@ -127,7 +129,8 @@ function projectedSources(item: Origin, ref: SharedMediaRef): SourceDto[] {
     const file = source.file!;
     return [{
       id, status, provider: "local", shared: true,
-      mime: file.mime, hasAudio: file.hasAudio ?? undefined,
+      mime: file.mime, bytes: Number(file.bytes), hasAudio: file.hasAudio ?? undefined,
+      ...playbackFields(file, `${base}/sources/${id}`),
       streamUrl: `${base}/sources/${id}`,
       thumbnail: file.kind === "audio" ? `${base}/artwork` : undefined,
     }];
@@ -420,14 +423,14 @@ export class ShareService {
   async prefetchForViewer(viewerId: string, itemIds?: string[], fresh = false) {
     if (!kanameEnabled() || itemIds?.length === 0) return;
     const now = new Date(Date.now()).toISOString();
-    const wanted = itemIds ? JSON.stringify(itemIds) : null;
+    const wanted = itemIds ? Prisma.sql`AND t.recipientItemId IN (SELECT value FROM json_each(${JSON.stringify(itemIds)}))` : Prisma.empty;
     const authors = await this.db.$queryRaw<{ ownerId: string }[]>`
       SELECT DISTINCT t.originOwnerId AS ownerId
       FROM SharedTrack AS t
       JOIN SharedTrackGrant AS g ON g.recipientItemId = t.recipientItemId
       JOIN ShareLink AS l ON l.id = g.shareLinkId AND l.ownerId = t.originOwnerId
       WHERE t.recipientId = ${viewerId} AND l.revokedAt IS NULL AND (l.expiresAt IS NULL OR l.expiresAt > ${now})
-        AND (${wanted} IS NULL OR t.recipientItemId IN (SELECT value FROM json_each(${wanted})))
+        ${wanted}
     `;
     await this.verifyAuthors(authors.map(author => author.ownerId), { cached: !fresh, bestEffort: true });
   }
@@ -689,7 +692,7 @@ export class ShareService {
       const source = ownedSources(origin).find(row =>
         row.provider === "local" && row.status !== "unavailable" && sourceKey(row.id) === key);
       const file = requireShared(source?.file);
-      return { path: file.path, mime: file.mime };
+      return { path: file.path, mime: file.mime, id: file.id, hash: file.hash };
     }, await this.authorizeMedia(viewerId, ref));
   }
 

@@ -706,3 +706,44 @@ it("stops the current text search between batches when its HTTP client disconnec
     await db.$disconnect();
   }
 });
+
+it("conditionally reads the overview after changes by other writers", async () => {
+  const conditional = (token: string) => app.inject({ url: "/api/library/overview?playlists=summary&since=" + token, headers: {cookie} });
+  let token = (await overview()).json().overviewToken;
+  for (const write of [
+    () => ctx.db.item.create({data: track("new")}),
+    () => ctx.library.savePlaylist(ctx.userId, { title: "New", definition: {version: 1, sort: "source", rule: {type: "favorite"}} }),
+    () => ctx.db.job.create({data:{id:"test-job",ownerId:ctx.userId,kind:"test",inputJson:"{}"}}),
+  ]) {
+    expect((await conditional(token)).statusCode).toBe(204);
+    await write();
+    const result = await conditional(token);
+    expect(result.statusCode).toBe(200);
+    expect(result.json().overviewToken).not.toBe(token);
+    token = result.json().overviewToken;
+  }
+  expect((await conditional(token)).body).toBe("");
+});
+
+it("reuses counts across tag choices and sends compact cards with playback metadata", async () => {
+  const ownerId = ctx.userId;
+  await ctx.db.item.create({data:track("entry")});
+  await ctx.db.tag.create({data:{id:"tag",name:"Genre",ownerId}});
+  await ctx.db.itemTag.create({data:{itemId:"entry",tagId:"tag"}});
+  const file = await ctx.db.mediaFile.create({data:{id:"owned-file", ownerId, hash:"a".repeat(64), path:"unused", mime:"audio/wav", kind:"audio", bytes:100n}});
+  await ctx.db.source.create({data:{id:"source", key:"local", ownerId,itemId:"entry",fileId:file.id, provider:"local", status:"available"}});
+  const first = (await post("page", {filters:{},cards:true})).json();
+  expect(first.countsKey).toEqual(expect.any(String));
+  expect(first.items[0]).toMatchObject({id:"entry",tagRefs:["tag"]});
+  expect(first.items[0]).not.toHaveProperty("tags");
+  const next = (await post("page", {filters:{tagIds:["tag"]},cards:true,countsKey:first.countsKey})).json();
+  expect(next.countsUnchanged).toBe(true);
+  expect(next).not.toHaveProperty("tagCounts");
+  const directory = (await overview()).json();
+  const cardPage = (await post("page", {filters:{},cards:true,tagRevision:directory.revision,countsKey:directory.countsKey})).json();
+  expect(cardPage).toMatchObject({countsUnchanged:true, tags:[], items:[{tagRefs:[0], sources:[{id:"source", bytes:100, streamUrl:"/files/owned-file", mime:"audio/wav"}]}]});
+  expect(cardPage.items[0].sources[0]).not.toHaveProperty("hash");
+  expect(cardPage.items[0].sources[0]).not.toHaveProperty("fileId");
+  const narrowed = (await post("page", {filters:{query:"absent"},cards:true,countsKey:first.countsKey})).json();
+  expect(narrowed.tagCounts).toEqual({tag:0});
+});

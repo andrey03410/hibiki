@@ -686,3 +686,51 @@ it("reaches mute after six five-point decreases from 30% and remembers the last 
   expect(level.volume).toBe(0);
   expect(level.lastNonzeroVolume).toBeCloseTo(0.05);
 });
+
+it("plays the derived MP4 audio source, falling back to the original on a decoder error", () => {
+  const movie = { id: "v", provider: "local" as const, status: "available" as const, mime: "video/mp4",
+    streamUrl: "/files/movie", hasAudio: true, bytes: 1000, audioViewStart: 32, audioBytes: 210,
+    audioStreamUrl: "/files/movie/audio", audioMime: "audio/mp4" };
+  const item = { kind: "video" as const, sources: [movie] };
+  expect(playbackSources(item, "audio")[0]).toMatchObject({ id: "v:audio", streamUrl: "/files/movie/audio",
+    mime: "audio/mp4", bytes: 210, playbackHints: {audioStart: 32} });
+  expect(playbackSourceForAttempt(item, new Set(["v:audio"]), undefined, "audio")).toBe(movie);
+  expect(playbackSources(item, "original")).toEqual([movie]);
+});
+
+it("writes the queue once, throttles playing positions and flushes a pause", async () => {
+  const { PlaybackCache, playbackSettingsPatch } = await import("./player-model");
+  const entries = new Map<string,string>();
+  const write = vi.fn((key: string, value: string) => entries.set(key, value));
+  const storage = { getItem: (key: string) => entries.get(key) ?? null, setItem: write };
+  const state = restorePlayback({queue: ["a","b"], position: 1});
+  const cache = new PlaybackCache(storage, "player", state);
+  for (let time = 0; time < 10_000; time += 250)
+    cache.save({...state, position: time / 1000}, state, time);
+  expect(write.mock.calls.filter(([key]) => key === "player")).toHaveLength(2);
+  expect(write.mock.calls.filter(([key]) => key === "player.queue")).toHaveLength(1);
+  expect(entries.get("player")).not.toContain('"queue"');
+  cache.save({...state, position: 9.99}, state, 9990, true);
+  expect(cache.restore(state)).toMatchObject({queue: ["a","b"], position: 9.99});
+  expect(playbackSettingsPatch({...state, queue: ["a","b"], position: 11}, state)).toMatchObject({position: 11});
+  expect(playbackSettingsPatch({...state, queue: ["a","b"], position: 11}, state)).not.toHaveProperty("queue");
+  expect(playbackSettingsPatch({...state, queue: ["b","a"]}, state)).toHaveProperty("queue", ["b","a"]);
+});
+
+it("changes only the previous and next card snapshots when playback moves", async () => {
+  const { PlayerCards } = await import("./player-model");
+  const cards = new PlayerCards();
+  const state = {active:true, playing:true, loadingLabel:"", waitingForVideo:false, mode:"audio" as const};
+  cards.update("a", state, true);
+  const initial = ["a","b","c"].map(cards.read);
+  cards.update("b", state, false);
+  const changed = ["a","b","c"].filter((id,index) => cards.read(id) !== initial[index]);
+  expect(changed).toEqual(["a","b"]);
+  expect(cards.queueEditable()).toBe(false);
+});
+
+it("prefers the selected full video with sound over an earlier short local audio in listening mode", () => {
+  const movie = {id:"movie",provider:"local" as const,status:"available",streamUrl:"/files/full",mime:"video/webm",hasAudio:true};
+  const short = {...movie,id:"short",streamUrl:"/files/short",mime:"audio/mpeg"};
+  expect(playbackSources({kind:"video",sources:[short,movie],preferredSourceId:"movie"},"audio")[0]).toBe(movie);
+});

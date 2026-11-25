@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, writeFile, rm } from "node:fs/promises";
@@ -6,9 +6,12 @@ import { join } from "node:path";
 import ffmpeg from "ffmpeg-static";
 import { parseFile } from "music-metadata";
 import { createApp } from "./app";
+import { pruneArtworkCache } from "./artwork";
 import { testContext } from "./test-utils";
 import { exportLibrary, inspectArchive, applyArchive } from "./portability";
 import { storagePath } from "./media";
+
+vi.mock("strtok3", { spy: true });
 
 const png = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0ZkAAAAASUVORK5CYII=",
@@ -100,6 +103,40 @@ describe("embedded audio artwork", () => {
   const get = (url: string) =>
     app.inject({ url, cookies: { hibiki_session: cookie } });
 
+  it("retries a transient read failure without persisting a missing image", async () => {
+    const item = await importCover(png);
+    const tokenizer = await import("strtok3");
+    const open = vi.mocked(tokenizer.fromFile).mockRejectedValueOnce(
+      Object.assign(new Error("temporary read failure"), {code: "EIO", syscall: "open"}));
+    try {
+      const url = artworkUrl(item.id) + "?size=thumb";
+      expect((await get(url)).statusCode).toBe(503);
+      expect((await get(url)).statusCode).toBe(200);
+    } finally { open.mockClear(); }
+  });
+  it("reuses a disk rendition after restarting and validates its version before allowing immutable HTTP caching", async () => {
+    const item = await importCover(png);
+    const file = item.sources.find(s => s.hash)!;
+    const url = artworkUrl(item.id) + "?size=thumb&v=" + file.hash;
+    const first = await get(url);
+    expect(first.headers["cache-control"]).toBe("private, max-age=31536000, immutable");
+    const cachedPath = join(ctx.root, "cache", "artwork", ctx.userId, file.hash + "-thumb.webp");
+    expect(await readFile(cachedPath)).toEqual(first.rawPayload);
+    await app.close();
+    app = await createApp({ db: ctx.db, storageRoot: ctx.root });
+    expect((await get(url)).rawPayload).toEqual(first.rawPayload);
+    expect((await get(artworkUrl(item.id) + "?size=thumb&v=stale")).headers["cache-control"]).toBe("private, no-cache");
+    const plain = (await ctx.library.importLocal(ctx.userId, join(ctx.root, "plain.mp3"))).item;
+    expect((await get(artworkUrl(plain.id) + "?size=thumb")).statusCode).toBe(404);
+    expect(await readFile(join(ctx.root, "cache", "artwork", ctx.userId, plain.sources[0]!.hash + "-thumb.none"))).toHaveLength(0);
+    const orphan = join(ctx.root, "cache", "artwork", ctx.userId, "0".repeat(64) + "-thumb.webp");
+    await writeFile(orphan, "unused");
+    await pruneArtworkCache(ctx.db, ctx.root);
+    await expect(readFile(orphan)).rejects.toMatchObject({code: "ENOENT"});
+    expect(await readFile(cachedPath)).toEqual(first.rawPayload);
+    await ctx.library.deleteItem(ctx.userId, item.id);
+    await expect(readFile(cachedPath)).rejects.toMatchObject({code: "ENOENT"});
+  });
   it("serves distinct decodable sizes for track rows, playlist cards and the player", async () => {
     const { stdout: original } = await promisify(execFile)(String(ffmpeg), [
       "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
@@ -159,7 +196,7 @@ describe("embedded audio artwork", () => {
     await ctx.library.refreshDuePlaylistCounts();
     const overview = await get("/api/library/overview?playlists=summary");
     expect(overview.json().playlists).toMatchObject([{
-      id: playlist.id, coverUrls: [artworkUrl(tagged.id) + "?size=cover"],
+      id: playlist.id, coverUrls: [tagged.sources[0]!.thumbnail + "&size=cover"],
     }]);
   });
   it("uses the library fallback when a raster signature has no decodable image", async () => {
@@ -190,7 +227,7 @@ describe("embedded audio artwork", () => {
     });
     expect(item.kind).toBe("video");
     expect(item.sources.find((source) => source.provider === "local")!.thumbnail)
-      .toBe(artworkUrl(item.id));
+      .toBe(artworkUrl(item.id) + "?v=" + item.sources.find(s => s.fileId)!.hash);
     expect(item.sources.find((source) => source.provider === "youtube")!.thumbnail)
       .toBe("https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg");
     const response = await get(artworkUrl(item.id));
@@ -299,7 +336,7 @@ describe("embedded audio artwork", () => {
     await applyArchive(ctx.db, ctx.otherUserId, ctx.root, checked);
     const restored = (await ctx.library.snapshot(ctx.otherUserId)).items[0]!;
     expect(restored.id).not.toBe(item.id);
-    expect(restored.sources[0]!.thumbnail).toBe(artworkUrl(restored.id));
+    expect(restored.sources[0]!.thumbnail).toBe(artworkUrl(restored.id) + "?v=" + restored.sources[0]!.hash);
     const otherCookie = await app.auth.createSession(ctx.otherUserId);
     const response = await app.inject({
       url: artworkUrl(restored.id),

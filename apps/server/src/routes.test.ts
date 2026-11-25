@@ -159,7 +159,7 @@ describe("HTTP and MCP isolation", () => {
     ], { timeout: 10_000 });
     const { item } = await ctx.library.importLocal(owner.id, file);
     const url = `/api/items/${item.id}/artwork`;
-    expect(item.sources[0]!.thumbnail).toBe(url);
+    expect(item.sources[0]!.thumbnail).toBe(url + "?v=" + item.sources[0]!.hash);
     expect((await ctx.db.source.findUnique({
       where: { id: item.sources[0]!.id },
     }))!.thumbnail).toBeNull();

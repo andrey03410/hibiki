@@ -204,3 +204,40 @@ describe("official metadata fallback", () => {
     }
   });
 });
+
+describe("lossless download selection", () => {
+  it.each(["audio", "video"] as const)("selects the best audio in %s mode without encoding", async mode => {
+    const { downloadYoutube } = await import("./youtube");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const { readFile } = await import("node:fs/promises");
+    const ffmpeg = (await import("ffmpeg-static")).default;
+    const root = await mkdtemp(join(tmpdir(), "hibiki-download-"));
+    try {
+      const input = join(root, "media.webm");
+      await promisify(execFile)(String(ffmpeg), ["-v", "error", "-f", "lavfi", "-i", "sine=duration=0.3", "-c:a", "libopus", input]);
+      const binary = join(root, "yt-dlp");
+      await writeFile(binary, `#!/usr/bin/env node
+const fs = require("node:fs"), path = require("node:path"), args = process.argv.slice(2);
+fs.writeFileSync(path.join(__dirname,"args.json"), JSON.stringify(args));
+fs.writeFileSync(path.join(__dirname,"finished.txt"), path.join(__dirname,"media.webm"));
+`);
+      await chmod(binary, 0o755);
+      vi.stubEnv("YTDLP_PATH", binary);
+      const output = await downloadYoutube("abcdefghijk", mode, root);
+      const args: string[] = JSON.parse(await readFile(join(root, "args.json"), "utf8"));
+      expect(args).not.toContain("--audio-format");
+      expect(args).not.toContain("--recode-video");
+      if (mode === "audio") {
+        expect(args[args.indexOf("--format") + 1]).toBe("bestaudio/best");
+        expect(output).toMatch(/\.ogg$/);
+        const hash = async (file: string) => (await promisify(execFile)(String(ffmpeg),
+          ["-v", "error", "-i", file, "-map", "0:a", "-c", "copy", "-f", "streamhash", "-"])).stdout;
+        expect(await hash(output)).toBe(await hash(input));
+      } else {
+        expect(args).toContain("--remux-video");
+        expect(args[args.indexOf("--format") + 1]).toContain("+bestaudio/");
+      }
+    } finally { vi.unstubAllEnvs(); await rm(root, { recursive: true, force: true }); }
+  });
+});

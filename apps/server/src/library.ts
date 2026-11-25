@@ -2,11 +2,12 @@ import { canRunHeavy, ownerAccess, checkItems, requireHeavy, reserve, release } 
 import { randomUUID } from "node:crypto";
 import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { playbackFields } from "./media-playback";
 import type { Db } from "./db";
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
 import { HttpError, invariant } from "./errors";
-import { ArtworkService } from "./artwork";
+import { ArtworkService, artworkVersion, removeUnusedArtwork } from "./artwork";
 import {
   stageMediaCopy,
   hashFile,
@@ -55,6 +56,7 @@ type IncludedItem = NonNullable<
   Awaited<ReturnType<Db["item"]["findFirst"]>>
 > & { sources: Array<any>; tags: Array<any> };
 export function itemDto(row: IncludedItem): ItemDto {
+  const coverVersion = artworkVersion(row.sources);
   return {
     id: row.id,
     title: row.title,
@@ -77,7 +79,7 @@ export function itemDto(row: IncludedItem): ItemDto {
       reason: source.reason ?? undefined,
       thumbnail:
         source.provider === "local" && source.file?.kind === "audio"
-          ? `/api/items/${encodeURIComponent(row.id)}/artwork`
+          ? `/api/items/${encodeURIComponent(row.id)}/artwork?v=${coverVersion}`
           : (source.thumbnail ?? undefined),
       fileId: source.fileId ?? undefined,
       mime: source.file?.mime,
@@ -85,19 +87,42 @@ export function itemDto(row: IncludedItem): ItemDto {
       hash: source.file?.hash,
       hasAudio:
         source.provider === "local" ? (source.file?.hasAudio ?? undefined) : undefined,
+      ...(source.file && playbackFields(source.file, `/files/${source.fileId}`)),
       streamUrl: source.fileId ? `/files/${source.fileId}` : undefined,
     })),
   };
 }
+// A large playlist repeats the same tag directory on many tracks. Read and
+// decode each owned tag once instead of materializing one joined row per use.
+async function batchItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[]) {
+  const [rows, groups] = await Promise.all([
+    tx.item.findMany({where:{ownerId,id:{in:ids}}, include:{sources:ownedItemInclude(ownerId).sources}}),
+    tx.$queryRaw<{itemId:string; assigned:string}[]>`
+      SELECT itemId, json_group_array(tagId ORDER BY tagId) AS assigned FROM ItemTag
+      WHERE itemId IN (SELECT value FROM json_each(${JSON.stringify(ids)}))
+      GROUP BY itemId`,
+  ]);
+  const assignments = new Map(groups.map(row => [row.itemId, JSON.parse(row.assigned) as string[]]));
+  const tagIds = new Set<string>();
+  for (const row of rows) for (const id of assignments.get(row.id) ?? []) tagIds.add(id);
+  const tags = tagIds.size ? await tx.tag.findMany({where:{ownerId,id:{in:[...tagIds]}}}) : [];
+  const directory = new Map(tags.map(tag => [tag.id, tagDto(tag)]));
+  return rows.map(row => {
+    const item = itemDto({...row, tags:[]});
+    item.tags = (assignments.get(row.id) ?? []).flatMap(id => directory.get(id) ?? []);
+    return item;
+  });
+}
+
 export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: false): Promise<ItemDto[]>;
 export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: true, library: LibraryService): Promise<ItemDto[]>;
 export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: boolean, library?: LibraryService) {
   if (!ids.length) return [];
-  const rows = await tx.item.findMany({
+  const owned = ids.length >= 24 ? await batchItems(tx, ownerId, ids) : (await tx.item.findMany({
     where: { ownerId, id: { in: ids } },
     include: ownedItemInclude(ownerId),
-  });
-  const byId = new Map(rows.map(row => [row.id, itemDto(row)]));
+  })).map(itemDto);
+  const byId = new Map(owned.map(item => [item.id, item]));
   const items = ids.flatMap(id => byId.get(id) ?? []);
   return includeShared && library ? decorateSharedItems(tx, ownerId, items, library) : items;
 }
@@ -107,8 +132,8 @@ function* playlistCoverCandidates(items: ItemDto[]) {
     for (const { provider, thumbnail, externalId } of item.sources) {
       if (provider === "youtube" && thumbnail && externalId && /^[\w-]{11}$/.test(externalId))
         yield { url: `https://i.ytimg.com/vi/${externalId}/sddefault.jpg` };
-      else if (provider === "local" && thumbnail === `/api/items/${encodeURIComponent(item.id)}/artwork`)
-        yield { url: `${thumbnail}?size=cover`, itemId: item.id };
+      else if (provider === "local" && thumbnail && thumbnail.split("?")[0] === `/api/items/${encodeURIComponent(item.id)}/artwork`)
+        yield { url: `${thumbnail}${thumbnail.includes("?") ? "&" : "?"}size=cover`, itemId: item.id };
     }
   }
 }
@@ -369,8 +394,8 @@ export class LibraryService {
             options.signal?.throwIfAborted();
             await validateAccess?.(tx);
             options.signal?.throwIfAborted();
-            if (original.hasAudio !== media.hasAudio)
-              await tx.mediaFile.update({ where: { id: original.id }, data: { hasAudio: media.hasAudio } });
+            if (original.hasAudio !== media.hasAudio || !original.hintsVersion || !original.audioViewVersion)
+              await tx.mediaFile.update({ where: { id: original.id }, data: { hasAudio: media.hasAudio, ...media.playback } });
             if (options.applyReplacement) {
               invariant(await tx.source.findFirst({
                 where: { id: prior.id, ownerId, itemId: options.itemId, status: "available" },
@@ -449,6 +474,7 @@ export class LibraryService {
                 kind: info.kind,
                 duration: info.duration,
                 hasAudio: info.hasAudio,
+                ...info.playback,
               },
               update: {
                 path,
@@ -457,12 +483,13 @@ export class LibraryService {
                 kind: info.kind,
                 duration: info.duration,
                 hasAudio: info.hasAudio,
+                ...info.playback,
               },
             });
-          } else if (file && file.hasAudio !== info.hasAudio) {
+          } else if (file && (file.hasAudio !== info.hasAudio || !file.hintsVersion || !file.audioViewVersion)) {
             file = await tx.mediaFile.update({
               where: { id: file.id },
-              data: { hasAudio: info.hasAudio },
+              data: { hasAudio: info.hasAudio, ...info.playback },
             });
           }
           invariant(file, 409, "file_changed", "Состав хранилища изменился, повторите импорт");
@@ -699,7 +726,7 @@ export class LibraryService {
     }, { timeout: 120_000 });
   }
   async deleteItem(ownerId: string, id: string) {
-    await this.db.$transaction(async (tx) => {
+    const removedHashes = await this.db.$transaction(async (tx) => {
       const snapshot = await this.snapshotWith(ownerId, tx);
       invariant(
         snapshot.items.some((item) => item.id === id),
@@ -738,7 +765,10 @@ export class LibraryService {
       });
       if (settings)
         await this.writeSettings(ownerId, JSON.parse(settings.json), tx);
+      return snapshot.items.find(item => item.id === id)!.sources.flatMap(source => source.hash ?? []);
     });
+    // Worker maintenance retries after a transient filesystem failure.
+    await Promise.all(removedHashes.map(hash => removeUnusedArtwork(this.db, this.storageRoot, ownerId, hash).catch(() => {})));
   }
   listTags(ownerId: string, includeArchived = false) {
     return listTags(this.db, ownerId, includeArchived);
@@ -987,12 +1017,19 @@ export class LibraryService {
         items, tags, playlists, history, now,
         onFutureHistoryCutoff: at => { validUntil = Math.min(validUntil, at); },
       }, id);
-      const usesHistory = usesPrivateHistory(definition, new Map(playlists.map(p => [p.id, p])));
-      return { result, usesHistory, validUntil };
+      const hasHistoryRules = usesPrivateHistory({ ...definition, sort: "source" }, new Map(playlists.map(p => [p.id, p])));
+      return { result, hasHistoryRules, usesHistory: definition.sort === "last-started" || hasHistoryRules, validUntil };
     } catch (error) {
       if (!(error instanceof InvalidPlaylistError)) throw error;
       throw new HttpError(422, "invalid_playlist", error.message);
     }
+  }
+  async previewCards(ownerId: string, definition: PlaylistDefinition, id?: string) {
+    return this.db.$transaction(async tx => {
+      if (id) await this.getPlaylist(ownerId, id, tx);
+      const { result, hasHistoryRules } = await this.evaluateRuleRows(tx, ownerId, definition, id);
+      return {...result, hasHistoryRules, items: result.items.map(({id, title, kind}) => ({id, title, kind}))};
+    });
   }
   async preview(ownerId: string, definition: PlaylistDefinition, id?: string, browser = true) {
     const checked = playlistDefinitionSchema.parse(definition);
@@ -1129,11 +1166,19 @@ export class LibraryService {
       const current = await tx.setting.findUnique({
         where: { userId: ownerId },
       });
-      return this.writeSettings(
-        ownerId,
-        { ...(current ? JSON.parse(current.json) : {}), ...value },
-        tx,
-      );
+      const next = { ...(current ? JSON.parse(current.json) : {}), ...value };
+      if (["queue", "originalQueue", "queuePlaylistIds"].some(key => Object.hasOwn(value, key))) {
+        return this.writeSettings(ownerId, next, tx);
+      }
+      const queue: string[] = Array.isArray(next.queue) ? next.queue : [];
+      const index = Number.isFinite(next.queueIndex) ? Math.floor(next.queueIndex) : 0;
+      next.queueIndex = Math.max(0, Math.min(index, queue.length - 1));
+      next.queue = queue;
+      const id = queue[next.queueIndex];
+      const currentItem = id && await tx.item.findFirst({ where: { id, ownerId }, select: { duration: true } });
+      next.position = currentItem && Number.isFinite(next.position)
+        ? Math.max(0, Math.min(next.position, currentItem.duration ?? Infinity)) : 0;
+      return this.persistSettings(ownerId, next, tx);
     });
   }
   private async writeSettings(
@@ -1200,10 +1245,13 @@ export class LibraryService {
           : [],
       );
     }
+    return this.persistSettings(ownerId, next, tx);
+  }
+  private async persistSettings(ownerId: string, next: Record<string, unknown>, tx: Prisma.TransactionClient) {
+    const json = JSON.stringify(next);
+    invariant(json.length < 1024 * 1024, 413, "settings_too_large", "Настройки слишком велики");
     await tx.setting.upsert({
-      where: { userId: ownerId },
-      create: { userId: ownerId, json: JSON.stringify(next) },
-      update: { json: JSON.stringify(next) },
+      where: { userId: ownerId }, create: { userId: ownerId, json }, update: { json },
     });
     return next;
   }

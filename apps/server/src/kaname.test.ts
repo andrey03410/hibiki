@@ -15,7 +15,7 @@ it("closes password login when the installation uses Kaname", async () => {
 
 import { AuthService } from "./auth";
 import { ArtworkService } from "./artwork";
-import { bindSubject, ownerAccess, reserve, usage } from "./kaname";
+import { bindSubject, ownerAccess, reserve, usage, markActivity } from "./kaname";
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -164,4 +164,19 @@ it("checks playlist cover metadata without converting thumbnails for regular Kan
     artwork.mockRestore();
     await f.close();
   }
+});
+
+it("coalesces concurrent file activity per owner for a minute and writes immediately on a new UTC day", async () => {
+  const ctx = await testContext();
+  try {
+    const recorded = async () => (await ctx.db.kanameActivity.findMany({where: {ownerId: ctx.userId}, orderBy: {day: "asc"}})).map(r => r.lastActiveAt.toISOString());
+    const start = Date.parse("2026-11-24T23:58:58Z");
+    const mark = (seconds: number) => markActivity(ctx.db, ctx.userId, new Date(start + seconds * 1000));
+    await Promise.all([mark(0), mark(1), mark(2)]);
+    expect(await recorded()).toEqual([new Date(start).toISOString()]);
+    await mark(59);
+    await mark(60);
+    await mark(62);
+    expect(await recorded()).toEqual([new Date(start + 60000).toISOString(), new Date(start + 62000).toISOString()]);
+  } finally { await ctx.close(); }
 });

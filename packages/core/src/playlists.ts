@@ -99,7 +99,11 @@ export function collectReferences(input: Rule): {
 
 export function validatePlaylist(
   definition: PlaylistDefinition,
-  library: PlaylistLibrary<PlaylistItem>,
+  library: {
+    items: readonly Pick<ItemDto, "id">[];
+    tags: readonly { id: string }[];
+    playlists: readonly Pick<PlaylistDto, "id" | "definition">[];
+  },
   editingPlaylistId?: string,
 ): { valid: boolean; issues: string[] } {
   const issues = new Set<string>();

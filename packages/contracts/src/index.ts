@@ -34,6 +34,11 @@ export interface SourceDto {
   hasAudio?: boolean;
   thumbnail?: string;
   streamUrl?: string;
+  playbackHints?: { audioStart: number; tailStart?: number };
+  audioStreamUrl?: string;
+  audioBytes?: number;
+  audioMime?: string;
+  audioViewStart?: number;
 }
 export interface ItemDto {
   id: string;
@@ -152,6 +157,8 @@ export interface LibraryOverviewDto extends Omit<LibraryDto, "items"> {
 }
 export interface LibraryCardOverviewDto extends Omit<LibraryOverviewDto, "playlists"> {
   playlists: PlaylistSummaryDto[];
+  overviewToken?: string;
+  countsKey?: string;
 }
 export interface LibraryPageDto {
   items: ItemDto[];
@@ -159,6 +166,18 @@ export interface LibraryPageDto {
   nextCursor: string | null;
   tagCounts?: Record<string, number>;
   selectionId?: string;
+  countsKey?: string;
+  countsUnchanged?: boolean;
+}
+export interface LibraryCardDto extends Omit<ItemDto, "tags" | "originalTitle" | "updatedAt"> {
+  /** Numeric references address the requested overview tag directory. */
+  tagRefs: (number | string)[];
+  originalTitle?: string;
+  updatedAt?: string;
+}
+export interface LibraryCardPageDto extends Omit<LibraryPageDto, "items"> {
+  items: LibraryCardDto[];
+  tags: TagDto[];
 }
 
 const librarySort = z.enum(["title-asc", "title-desc", "duration-asc", "duration-desc", "added-asc", "added-desc"]);
@@ -387,6 +406,11 @@ export const sourceSchema = z
     hasAudio: z.boolean().optional(),
     thumbnail: z.string().optional(),
     streamUrl: z.string().optional(),
+    playbackHints: z.object({ audioStart: z.int().nonnegative(), tailStart: z.int().nonnegative().optional() }).optional(),
+    audioStreamUrl: z.string().optional(),
+    audioBytes: z.int().positive().optional(),
+    audioMime: z.string().optional(),
+    audioViewStart: z.int().nonnegative().optional(),
   })
   .strict() satisfies z.ZodType<SourceDto>;
 export const itemSchema = z
