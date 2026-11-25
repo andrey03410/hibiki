@@ -214,7 +214,7 @@ describe("media sharing", () => {
     expect(response.body).not.toContain(file.path);
   });
 
-  it("filters borrowed-only recordings out of the published count and live view", async () => {
+  it("keeps the public count separate from the original owner's personal view", async () => {
     const origin = (await ctx.library.upsertYoutube(ctx.userId, { externalId: "abcdefghijk" })).item;
     const first = await share("item", origin.id);
     const received = (await asBob({ method: "POST", url: preview(first) + "/save" })).json<{ id: string }>();
@@ -232,8 +232,8 @@ describe("media sharing", () => {
     const link = published.json<ShareLinkDto>();
     expect(link.trackCount).toBe(1);
     const view = (await app.inject({ url: preview(link), cookies: alice })).json<SharedViewDto>();
-    expect(view.trackCount).toBe(1);
-    expect(view.items.map(item => item.id)).toEqual([own.id]);
+    expect(view.trackCount).toBe(2);
+    expect(view.items.map(item => item.id)).toEqual([received.id, own.id]);
   });
 
   it("closes a broken playlist grant while retaining an independent item grant", async () => {
