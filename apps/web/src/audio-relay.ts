@@ -1,6 +1,6 @@
 import { AudioDelivery } from "./audio-delivery";
 
-const workerPath = "/audio-worker.js?v=2";
+const workerPath = "/audio-worker.js?v=3";
 function registerRelay() {
   try {
     if (!globalThis.isSecureContext || typeof MessageChannel === "undefined" || typeof ReadableStream === "undefined") return;

@@ -1,13 +1,33 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type Ref } from "react";
+import { memo, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type CSSProperties, type Ref } from "react";
 import { ListMusic, Music2, Video, Volume2, VolumeX, X } from "lucide-react";
 import type { ItemDto } from "@hibiki/contracts";
 import { formatDuration, mediaWord } from "./api";
 import { queueEntryUnavailableReason, type PlaybackSettings } from "./player-model";
 import { animatePlayback } from "./playback-feedback";
 
+import type { AudioCoverage } from "./audio-delivery";
+
 const seekKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"];
 
 export type BufferedRanges = [number, number][];
+export function playbackBuffer(native: BufferedRanges, coverage: AudioCoverage | undefined, duration: number): BufferedRanges {
+  if (!coverage || duration <= 0) return native;
+  if (coverage.complete) return [[0, duration]];
+  const {audioStart, size} = coverage;
+  if (audioStart >= size) return native;
+  const time = (byte: number) => Math.max(0, byte - audioStart) / (size - audioStart) * duration;
+  const ranges: BufferedRanges = [...native];
+  for (const [start, end] of coverage.ranges)
+    if (end > audioStart) ranges.push([time(start), time(end)]);
+  ranges.sort(([a], [b]) => a - b);
+  const merged: BufferedRanges = [];
+  for (const [start, end] of ranges) {
+    const last = merged.at(-1);
+    if (last && start <= last[1]) last[1] = Math.max(end, last[1]);
+    else merged.push([start, end]);
+  }
+  return merged;
+}
 export function PlaybackSeekBar({
   position, duration, className, buffered = [], moving = false, clock, onSeek, onScrubStart, onScrubEnd,
 }: {
@@ -142,6 +162,49 @@ export function PlaybackVolume({volume, onVolume, onMute, compact = false}: {
   </div>;
 }
 
+// Sections share their surrounding scroller so headings, the current row and
+// the expandable previous entries keep their usual keyboard and scroll order.
+export const QueueRows = memo(function QueueRows({queue, start, end, row, compact = false, onVisible}: {
+  queue: string[]; start: number; end: number; row: (id: string, index: number) => ReactNode;
+  compact?: boolean; onVisible?: (ids: string[]) => void;
+}) {
+  const host = useRef<HTMLElement | null>(null);
+  const [visibleRows, setVisibleRows] = useState({first: 0, count: 20});
+  const virtual = queue.length > 200;
+  const height = compact ? 46 : 68;
+  useLayoutEffect(() => {
+    const list = host.current;
+    const scroller = list?.closest<HTMLElement>(".mini-queue-scroll, .watch-queue-list");
+    if (!virtual || !list || !scroller) return;
+    const measure = () => {
+      const top = scroller.getBoundingClientRect().top - list.getBoundingClientRect().top;
+      const first = Math.max(0, Math.min(end - start, Math.floor(top / height) - 5));
+      const count = list.getClientRects().length
+        ? Math.max(0, Math.ceil((top + scroller.clientHeight) / height) + 5 - first) : 0;
+      setVisibleRows(old => old.first === first && old.count === count ? old : {first, count});
+    };
+    measure();
+    const resize = new ResizeObserver(measure);
+    resize.observe(scroller);
+    scroller.addEventListener("scroll", measure, {passive:true});
+    scroller.addEventListener("toggle", measure, true);
+    return () => {
+      resize.disconnect();
+      scroller.removeEventListener("scroll", measure);
+      scroller.removeEventListener("toggle", measure, true);
+    };
+  }, [virtual, height, start, end]);
+  const lower = virtual ? Math.min(end, start + visibleRows.first) : start;
+  const upper = virtual ? Math.min(end, lower + visibleRows.count) : end;
+  useEffect(() => {
+    if (lower < upper) onVisible?.(queue.slice(lower, upper));
+  }, [queue, lower, upper, onVisible]);
+  const Tag = compact ? "ul" : "div";
+  return <Tag ref={(element: HTMLElement | null) => {host.current = element;}} style={virtual ? {
+    display: "grid", gridAutoRows: height, paddingTop: (lower - start) * height, paddingBottom: (end - upper) * height,
+  } : undefined}>{queue.slice(lower, upper).map((id, i) => row(id, lower + i))}</Tag>;
+});
+
 export function CompactPlaybackQueueRow({ title, kind, duration, current, unavailableReason, canRecheck, failed, buttonRef, onSelect }: {
   title: string;
   kind?: ItemDto["kind"];
@@ -180,8 +243,10 @@ export function CompactPlaybackQueueRow({ title, kind, duration, current, unavai
   );
 }
 
-export function CompactPlaybackQueue({ settings, itemsById, failedIds, onSelect, onOpenChange, deleted, canRecheck, incomplete = false }: {
+export const CompactPlaybackQueue = memo(function CompactPlaybackQueue({ settings, onVisible, itemsById, failedIds, onSelect, onOpenChange, deleted, canRecheck, incomplete = false }: {
   settings: Pick<PlaybackSettings, "queue" | "queueIndex" | "mode">;
+  onVisible?: (ids: string[]) => void;
+  version?: number;
   itemsById: ReadonlyMap<string, ItemDto>;
   failedIds: ReadonlySet<string>;
   onSelect: (index: number) => void;
@@ -290,12 +355,12 @@ export function CompactPlaybackQueue({ settings, itemsById, failedIds, onSelect,
               <ul>{queue.slice(queueIndex, queueIndex + 1).map((id) => row(id, queueIndex))}</ul>
               <h3>Далее</h3>
               {queueIndex + 1 < queue.length
-                ? <ul>{queue.slice(queueIndex + 1).map((id, index) => row(id, queueIndex + index + 1))}</ul>
+                ? <QueueRows compact queue={queue} start={queueIndex + 1} end={queue.length} row={row} onVisible={onVisible} />
                 : !incomplete && <p>Дальше записей нет.</p>}
               {queueIndex > 0 && (
                 <details className="mini-queue-past">
                   <summary>Предыдущие <span>{queueIndex}</span></summary>
-                  <ul>{queue.slice(0, queueIndex).map(row)}</ul>
+                  <QueueRows compact queue={queue} start={0} end={queueIndex} row={row} onVisible={onVisible} />
                 </details>
               )}
             </div>
@@ -304,4 +369,4 @@ export function CompactPlaybackQueue({ settings, itemsById, failedIds, onSelect,
       </section>
     </div>
   );
-}
+});

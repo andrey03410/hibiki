@@ -16,6 +16,10 @@ export interface PlaybackSource {
   url?: string | null;
   mime?: string | null;
   hasAudio?: boolean;
+  audioStreamUrl?: string;
+  audioBytes?: number;
+  audioMime?: string;
+  audioViewStart?: number;
 }
 export interface PlaybackSettings extends QueueOrder {
   position: number;
@@ -150,7 +154,16 @@ export function playbackSources<T extends PlaybackSource>(item: {
     : item.kind !== "video" || playbackKind(item, source) === item.kind;
   const soundCapable = (source: T) => source.provider === "local" &&
     (source.hasAudio ?? (playbackKind(item, source) === "audio"));
-  return item.sources
+  const sources = mode === "audio" ? item.sources.flatMap(source => {
+    if (source.provider !== "local" || !source.audioStreamUrl || !source.audioBytes || !source.audioMime) return [source];
+    const derived = { ...source, id: source.id + ":audio", streamUrl: source.audioStreamUrl,
+      bytes: source.audioBytes, mime: source.audioMime, hasAudio: true,
+      playbackHints: { audioStart: source.audioViewStart ?? 0 } };
+    return [derived, source];
+  }) : [...item.sources];
+  const preferred = (source: T) => source.id === item.preferredSourceId ||
+    (!!item.preferredSourceId && source.id === item.preferredSourceId + ":audio");
+  return sources
     .filter(
       (s) =>
         s.status !== "unavailable" &&
@@ -160,7 +173,7 @@ export function playbackSources<T extends PlaybackSource>(item: {
     .sort(
       (a, b) =>
         Number(matchesKind(b)) - Number(matchesKind(a)) ||
-        Number(b.id === item.preferredSourceId) - Number(a.id === item.preferredSourceId) ||
+        Number(preferred(b)) - Number(preferred(a)) ||
         Number(b.provider === "local") - Number(a.provider === "local"),
     );
 }
@@ -552,4 +565,102 @@ export function createFullscreenIdleTimer(onIdle: (idle: boolean) => void) {
       clearTimeout(timer);
     },
   };
+}
+
+function queueFields({queue, originalQueue, queuePlaylistIds}: PlaybackSettings) {
+  return {queue, originalQueue: originalQueue ?? [], queuePlaylistIds: queuePlaylistIds ?? {}};
+}
+function controls({queueIndex, position, volume, lastNonzeroVolume, repeat, shuffle, mode}: PlaybackSettings) {
+  return {queueIndex, position, volume, lastNonzeroVolume, repeat, shuffle, mode};
+}
+function sameQueueReferences(a: PlaybackSettings, b: PlaybackSettings) {
+  return a.queue === b.queue && a.originalQueue === b.originalQueue && a.queuePlaylistIds === b.queuePlaylistIds;
+}
+export function playbackSettingsPatch(state: PlaybackSettings, previous: PlaybackSettings): Partial<PlaybackSettings> {
+  const before = controls(previous);
+  const patch = Object.fromEntries(Object.entries(controls(state)).filter(([key, value]) =>
+    before[key as keyof typeof before] !== value));
+  if (!sameQueueReferences(state, previous) && JSON.stringify(queueFields(state)) !== JSON.stringify(queueFields(previous)))
+    Object.assign(patch, queueFields(state), {queueIndex: state.queueIndex, position: state.position});
+  return patch;
+}
+
+export class PlaybackCache {
+  private lastWrite = -Infinity;
+  private lastState?: PlaybackSettings;
+  private lastServer?: PlaybackSettings;
+  private queueText = "";
+  private serverQueueText = "";
+  private previousQueueText = "";
+  private queueStamp = "";
+  private stateText = "";
+  constructor(private storage: Pick<Storage, "getItem" | "setItem">, private key: string, private initial: PlaybackSettings) {}
+  restore(initial: Partial<PlaybackSettings> | undefined) {
+    try {
+      const cached = JSON.parse(this.storage.getItem(this.key) || "null");
+      if (cached?.version !== 2) return restoreCachedPlayback(initial, cached);
+      const queues = JSON.parse(this.storage.getItem(this.key + ".queue") || "null");
+      if (!queues || queues.stamp !== cached.stamp) return this.initial;
+      const baseline = cached.serverQueue === "current" ? JSON.stringify(queues.state)
+        : cached.serverQueue === "previous" ? queues.previous : undefined;
+      if (!initial?.queue || (baseline === JSON.stringify(queueFields(this.initial)) &&
+          cached.server === JSON.stringify(controls(this.initial))))
+        return restorePlayback({...cached.state, ...queues.state});
+    } catch {}
+    return this.initial;
+  }
+  save(state: PlaybackSettings, server: PlaybackSettings, now: number, force = false) {
+    const changedQueue = !this.lastState || !sameQueueReferences(this.lastState, state);
+    const changedServerQueue = !this.lastServer || !sameQueueReferences(this.lastServer, server);
+    if (!force && !changedQueue && now - this.lastWrite < 5000) return;
+    try {
+      if (changedServerQueue) this.serverQueueText = JSON.stringify(queueFields(server));
+      if (changedQueue) {
+        const fields = queueFields(state);
+        const text = JSON.stringify(fields);
+        if (text !== this.queueText) {
+          const stamp = globalThis.crypto.randomUUID?.() ?? String(Math.random());
+          // Until PUT succeeds the server can still have the preceding queue.
+          // Keep both possible baselines here so position writes stay small.
+          const previous = text !== this.serverQueueText ? this.serverQueueText : "";
+          this.storage.setItem(this.key + ".queue", JSON.stringify({stamp, state: fields, previous}));
+          this.queueStamp = stamp;
+          this.previousQueueText = previous;
+          this.queueText = text;
+        }
+      }
+      const serverQueue = this.serverQueueText === this.queueText ? "current"
+        : this.serverQueueText === this.previousQueueText ? "previous" : undefined;
+      const text = JSON.stringify({version: 2, stamp: this.queueStamp, state: controls(state),
+        serverQueue, server: JSON.stringify(controls(server))});
+      if (text !== this.stateText) this.storage.setItem(this.key, text);
+      this.stateText = text;
+      this.lastState = state;
+      this.lastServer = server;
+      this.lastWrite = now;
+    } catch {}
+  }
+}
+
+export type PlayerCardState = { active: boolean; playing: boolean; waitingForVideo: boolean; loadingLabel: string; mode: PlaybackMode };
+const inactiveCard: PlayerCardState = {active: false, playing: false, waitingForVideo: false, loadingLabel: "", mode: "original"};
+export class PlayerCards {
+  private listeners = new Set<() => void>();
+  private id?: string;
+  private card = inactiveCard;
+  private editable = true;
+  subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  };
+  read = (id: string) => this.id === id ? this.card : inactiveCard;
+  hasCurrent = () => !!this.id;
+  queueEditable = () => this.editable;
+  update(id: string | undefined, card: PlayerCardState, editable: boolean) {
+    this.id = id;
+    if (this.card.active !== card.active || this.card.playing !== card.playing || this.card.mode !== card.mode ||
+        this.card.waitingForVideo !== card.waitingForVideo || this.card.loadingLabel !== card.loadingLabel) this.card = card;
+    this.editable = editable;
+    this.listeners.forEach(listener => listener());
+  }
 }

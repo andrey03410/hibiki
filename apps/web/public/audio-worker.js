@@ -57,5 +57,5 @@ self.addEventListener("fetch", event => {
   const url = new URL(event.request.url);
   const token = url.searchParams.get("hibiki-audio");
   if (event.request.method === "GET" && url.origin === self.location.origin &&
-      /^\/files\/[\w-]+$/.test(url.pathname) && token) event.respondWith(audioResponse(event, token));
+      /^(?:\/files\/[\w-]+|\/api\/(?:shared-items\/[^/]+|(?:shared|shared-playlists)\/[^/]+\/items\/[^/]+)\/sources\/[\w-]+)(?:\/audio)?$/.test(url.pathname) && token) event.respondWith(audioResponse(event, token));
 });

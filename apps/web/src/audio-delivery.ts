@@ -1,38 +1,45 @@
 import type { SourceDto } from "@hibiki/contracts";
 
-const MAX_FILE = 32 * 1024 * 1024;
-const MAX_PREFIX = 512 * 1024;
-const BLOCK = 1024 * 1024;
+const MAX_FILE = 128 * 1024 * 1024;
+const MAX_PREFIX = 2 * 1024 * 1024;
+const PAGE = 64 * 1024;
 type ReadFile = (url: string, init: RequestInit) => Promise<Response>;
-type AudioFile = { url: string; size: number; mime: string; prefix: number };
+type AudioFile = {
+  url: string; size: number; mime: string; prefix: number; duration?: number | null;
+  audioStart?: number; tailStart?: number; shared?: boolean;
+};
+export type AudioCoverage = {
+  size: number; audioStart: number; ranges: readonly [number, number][]; complete: boolean;
+};
+type Failure = "denied" | "unsupported" | "network";
+class AccessDenied extends Error {}
+class MissingAudioView extends Error {}
+
+function prefixBytes(size: number, audioStart: number, duration?: number | null, tailBytes = 0) {
+  const audio = duration && Number.isFinite(duration) && duration > 0
+    ? Math.ceil(10 * (size - audioStart) / duration) : 256 * 1024;
+  const limit = tailBytes < MAX_PREFIX ? MAX_PREFIX - tailBytes : MAX_PREFIX;
+  return Math.min(size - tailBytes, limit, audioStart + audio);
+}
 
 export function ownedAudioFile(source?: SourceDto, duration?: number | null): AudioFile | undefined {
-  const size = source?.bytes;
-  if (source?.provider !== "local" || source.shared || !source.streamUrl || !/^\/files\/[\w-]+$/.test(source.streamUrl) ||
-    !size || !Number.isSafeInteger(size) || size > MAX_FILE || size < 0 || !source.mime) return;
-  const estimate = duration && Number.isFinite(duration) && duration > 0 ? Math.ceil(5 * size / duration) : 128 * 1024;
-  // Reserve part of the preparation budget for trailing MP4 metadata.
-  const prefixLimit = /^(audio|video)\/(mp4|x-m4a)/.test(source.mime) && size > MAX_PREFIX
-    ? MAX_PREFIX - 64 * 1024 : MAX_PREFIX;
-  return { url: source.streamUrl, size, mime: source.mime, prefix: Math.min(size, prefixLimit, estimate) };
+  if (source?.provider !== "local" || !source.streamUrl || !source.mime) return;
+  const path = source.streamUrl;
+  const supported = source.shared
+    ? /^\/api\/(?:shared-items\/[^/?#]+|(?:shared|shared-playlists)\/[^/?#]+\/items\/[^/?#]+)\/sources\/[\w-]+(?:\/audio)?$/.test(path)
+    : /^\/files\/[\w-]+(?:\/audio)?$/.test(path);
+  const size = source.bytes;
+  if (!supported || !size || !Number.isSafeInteger(size) || size > MAX_FILE || size < 0) return;
+  const hint = source.playbackHints;
+  const audioStart = hint && Number.isSafeInteger(hint.audioStart) && hint.audioStart >= 0 && hint.audioStart < size
+    ? hint.audioStart : undefined;
+  const tail = hint?.tailStart;
+  const tailStart = tail && Number.isSafeInteger(tail) && tail > (audioStart ?? 0) && tail < size ? tail : undefined;
+  return { url: path, size, mime: source.mime, duration, shared: source.shared,
+    audioStart, tailStart, prefix: prefixBytes(size, audioStart ?? 0, duration, tailStart ? size - tailStart : 0) };
 }
 
-type Block = {
-  start: number;
-  data: Uint8Array;
-  received: number;
-  changed: Promise<void>;
-  notify: () => void;
-  error?: unknown;
-};
-
-function changed(block: Block) {
-  block.notify();
-  block.changed = new Promise(resolve => { block.notify = resolve; });
-}
-
-// Follow ISO BMFF top-level box lengths. When an mdat runs past the prefix,
-// its exclusive end is where the decoder will look for trailing metadata.
+// Older library entries can lack hints until the worker has indexed their headers.
 function metadataTail(prefix: Uint8Array, size: number) {
   const view = new DataView(prefix.buffer, prefix.byteOffset, prefix.byteLength);
   for (let at = 0; at + 8 <= prefix.length;) {
@@ -44,159 +51,269 @@ function metadataTail(prefix: Uint8Array, size: number) {
       if (length < 16) return;
     }
     if (length < 8 || length > size - at) return;
-    if (type === 0x6d6f6f76) return; // moov precedes the media
+    if (type === 0x6d6f6f76) return;
     at += length;
-    if (type === 0x6d646174 && at >= prefix.length && at < size) return at; // mdat
+    if (type === 0x6d646174 && at >= prefix.length && at < size) return at;
   }
 }
 
-type Demand = { block: Block; priority: RequestPriority };
+type Interval = [number, number]; // Half-open byte offsets.
+type Transfer = { cursor: number; end: number; controller: AbortController };
 
-// A seek takes over the active origin transfer. Sequential filling resumes
-// after the bytes already received when the decoder has enough data.
+// Store pages only where bytes have arrived. A seek can leave holes without
+// reserving the entire track or discarding bytes already handed to the decoder.
 class AudioBytes {
-  private blocks = new Map<number, Block>();
-  private decoders = new Map<symbol, Demand>();
-  private pins = new Map<symbol, Demand>();
-  private network?: { block: Block; controller: AbortController };
-  private closed = false;
-  private filling?: Promise<void>;
+  private pages = new Map<number, Uint8Array>();
+  private ranges: Interval[] = [];
+  private waiters = new Set<() => void>();
+  private demands = new Map<symbol, number>();
+  private transfer?: Transfer;
+  private tailTransfer?: Transfer;
+  private lifetime = new AbortController();
+  private error?: Error;
+  private preparing = false;
+  private filling = false;
+  private inspected = false;
+  private priority: RequestPriority = "high";
+  private prefix: number;
   private tail?: number;
-  constructor(readonly file: AudioFile, private read: ReadFile) {}
+  private audioStart: number;
+  private authorizing = false;
+  onChange?: () => void;
+  onFailure?: (reason: Failure) => void;
 
-  private blockAt(offset: number) {
-    const { prefix, size } = this.file;
-    const tail = this.tail ?? size;
-    const start = offset >= tail ? tail : offset < prefix ? 0 : prefix + Math.floor((offset - prefix) / BLOCK) * BLOCK;
-    let block = this.blocks.get(start);
-    if (!block) {
-      const end = offset >= tail ? size : Math.min(tail, start === 0 ? prefix : start + BLOCK);
-      block = { start, data: new Uint8Array(end - start), received: 0, changed: Promise.resolve(), notify: () => {} };
-      changed(block);
-      this.blocks.set(start, block);
-    }
-    return block;
+  constructor(readonly file: AudioFile, private read: ReadFile) {
+    this.prefix = file.prefix;
+    this.tail = file.tailStart;
+    this.audioStart = file.audioStart ?? 0;
   }
-
-  private schedule() {
-    if (this.closed) return;
-    const demands = [...this.decoders.values()].reverse().concat([...this.pins.values()]);
-    const wanted = demands.find(({ block }) => !block.error && block.received < block.data.length);
-    if (this.network) {
-      const { block, controller } = this.network;
-      if (wanted?.block !== block && block.received < block.data.length) controller.abort();
-      return;
+  get complete() { return this.ranges[0]?.[0] === 0 && this.ranges[0][1] === this.file.size; }
+  coverage(): AudioCoverage {
+    return { size: this.file.size, audioStart: this.audioStart, ranges: this.ranges.slice(), complete: this.complete };
+  }
+  private wake() {
+    for (const resolve of this.waiters) resolve();
+    this.waiters.clear();
+  }
+  private async until(done: () => boolean) {
+    for (;;) {
+      if (this.error || this.lifetime.signal.aborted) throw this.error ?? new Error("Playback changed");
+      if (done()) return;
+      await new Promise<void>(resolve => this.waiters.add(resolve));
     }
-    if (!wanted) return;
-    const { block, priority } = wanted;
-    const controller = new AbortController();
-    this.network = { block, controller };
-    void this.download(block, priority, controller.signal).catch(error => {
-      if (!controller.signal.aborted) block.error = error;
+  }
+  private rangeAt(at: number) { return this.ranges.find(([start, end]) => start <= at && at < end); }
+  private gap(start: number, limit: number): Interval | undefined {
+    const at = this.rangeAt(start)?.[1] ?? start;
+    if (at >= limit) return;
+    return [at, Math.min(limit, this.ranges.find(([lower]) => lower > at)?.[0] ?? limit)];
+  }
+  private write(at: number, data: Uint8Array) {
+    for (let i = 0; i < data.length;) {
+      const page = Math.floor((at + i) / PAGE);
+      const local = (at + i) % PAGE;
+      let buffer = this.pages.get(page);
+      if (!buffer) {
+        buffer = new Uint8Array(Math.min(this.file.size - page * PAGE, PAGE));
+        this.pages.set(page, buffer);
+      }
+      const count = Math.min(buffer.length - local, data.length - i);
+      buffer.set(data.subarray(i, i + count), local);
+      i += count;
+    }
+    let start = at, end = at + data.length;
+    const before = this.ranges.findIndex(([, hi]) => hi >= start);
+    const index = before === -1 ? this.ranges.length : before;
+    let last = index;
+    while (last < this.ranges.length && this.ranges[last][0] <= end) {
+      start = Math.min(start, this.ranges[last][0]);
+      end = Math.max(end, this.ranges[last][1]);
+      last++;
+    }
+    this.ranges.splice(index, last - index, [start, end]);
+    this.wake();
+    this.onChange?.();
+  }
+  private copy(at: number, end: number) {
+    const bytes = new Uint8Array(end - at);
+    for (let i = 0; i < bytes.length;) {
+      const offset = (at + i) % PAGE;
+      const buffer = this.pages.get(Math.floor((at + i) / PAGE))!;
+      const count = Math.min(bytes.length - i, buffer.length - offset);
+      bytes.set(buffer.subarray(offset, offset + count), i);
+      i += count;
+    }
+    return bytes;
+  }
+  private inspectHeader() {
+    if (this.inspected || this.gap(0, this.prefix)) return;
+    this.inspected = true;
+    if (this.file.audioStart !== undefined) return;
+    if (this.file.mime === "audio/mpeg" && this.prefix >= 10) {
+      const b = this.copy(0, 10);
+      if (b[0] === 73 && b[1] === 68 && b[2] === 51 && b.subarray(6).every(n => n < 128)) {
+        const size = b.subarray(6).reduce((value, n) => value * 128 + n, 0);
+        this.audioStart = Math.min(this.file.size, 10 + size + (b[3] === 4 && (b[5] & 16) ? 10 : 0));
+        this.prefix = prefixBytes(this.file.size, this.audioStart, this.file.duration);
+      }
+    } else if (!this.tail && /^(audio|video)\/(mp4|x-m4a)/.test(this.file.mime)) {
+      this.tail = metadataTail(this.copy(0, this.prefix), this.file.size);
+    }
+  }
+  private wantTail() {
+    return this.tail !== undefined && (this.filling || this.file.size - this.tail <= MAX_PREFIX - this.prefix);
+  }
+  private readyPrefix() {
+    return !this.gap(0, this.prefix) && (!this.wantTail() || !this.gap(this.tail!, this.file.size));
+  }
+  private fail(error: unknown) {
+    if (this.lifetime.signal.aborted) return;
+    this.error = error instanceof Error ? error : new Error("Audio unavailable");
+    this.close();
+    this.onFailure?.(error instanceof AccessDenied ? "denied" : error instanceof MissingAudioView ? "unsupported" : "network");
+  }
+  private schedule() {
+    if (this.lifetime.signal.aborted) return;
+    this.inspectHeader();
+    const size = this.file.size;
+    if ((this.preparing || this.filling) && this.wantTail() && !this.tailTransfer) {
+      const tail = this.gap(this.tail!, size);
+      if (tail) this.launch(tail, true, false);
+    }
+    if (this.transfer) return;
+    const demand = [...this.demands.values()].reverse().find(at =>
+      !this.rangeAt(at) && !(this.tailTransfer && at >= this.tailTransfer.cursor && at < size));
+    const end = this.tailTransfer ? this.tail! : size;
+    let gap: Interval | undefined;
+    if (demand !== undefined) {
+      const limit = demand < this.prefix ? this.prefix : demand >= end ? size : end;
+      gap = this.gap(demand, limit);
+    } else if (this.preparing || this.filling) {
+      gap = this.gap(0, this.prefix);
+      if (!gap && this.filling) gap = this.gap(0, end);
+    }
+    if (gap) this.launch(gap, false, gap[0] >= this.prefix && gap[1] === size);
+  }
+  private launch([start, end]: Interval, tail: boolean, openEnded: boolean) {
+    const job = { cursor: start, end, controller: new AbortController() };
+    if (tail) this.tailTransfer = job;
+    else this.transfer = job;
+    void this.download(job, openEnded).catch(error => {
+      if (!job.controller.signal.aborted) this.fail(error);
     }).finally(() => {
-      this.network = undefined;
-      changed(block);
+      if (tail) this.tailTransfer = undefined;
+      else this.transfer = undefined;
       this.schedule();
+      this.wake();
     });
   }
-
-  private async download(block: Block, priority: RequestPriority, signal: AbortSignal) {
-    const start = block.start + block.received;
-    const end = block.start + block.data.length - 1;
-    const response = await this.read(this.file.url, { headers: { Range: `bytes=${start}-${end}` }, signal, cache: "no-store", priority });
-    if (response.status !== 206 || response.headers.get("Content-Range") !== `bytes ${start}-${end}/${this.file.size}` || !response.body) {
-      await response.body?.cancel();
-      throw new Error("Unexpected audio range");
+  private async download(job: Transfer, openEnded: boolean) {
+    const stop = job.controller.signal;
+    for (let attempt = 1; ; attempt++) {
+      stop.throwIfAborted();
+      const timeout = new AbortController();
+      const signal = AbortSignal.any([stop, timeout.signal]);
+      const expire = () => timeout.abort(new Error("Audio transfer stalled"));
+      let timer = setTimeout(expire, 10_000);
+      try {
+        const at = job.cursor;
+        const response = await this.read(this.file.url, {
+          headers: { Range: `bytes=${at}-${openEnded ? "" : job.end - 1}` },
+          signal, cache: "no-store", priority: this.priority,
+        });
+        if ([401, 403, 404].includes(response.status)) {
+          if (response.status === 404 && this.file.url.endsWith("/audio")) {
+            const problem = await response.json().catch(() => null);
+            if (problem?.error?.code === "audio_view_missing") throw new MissingAudioView("Audio view unavailable");
+          } else await response.body?.cancel();
+          throw new AccessDenied("Audio access denied");
+        }
+        if (response.status !== 206 || response.headers.get("Content-Range") !== `bytes ${at}-${job.end - 1}/${this.file.size}` || !response.body) {
+          await response.body?.cancel();
+          throw new Error("Unexpected audio range");
+        }
+        const reader = response.body.getReader();
+        const cancel = () => { void reader.cancel(signal.reason).catch(() => {}); };
+        signal.addEventListener("abort", cancel, {once: true});
+        try {
+          while (job.cursor < job.end) {
+            signal.throwIfAborted();
+            const { value, done } = await reader.read();
+            signal.throwIfAborted();
+            if (done || value.length > job.end - job.cursor) throw new Error("Incomplete audio range");
+            if (!value.length) continue;
+            clearTimeout(timer);
+            timer = setTimeout(expire, 10_000);
+            const from = job.cursor;
+            job.cursor += value.length;
+            this.write(from, value);
+          }
+        } finally {
+          signal.removeEventListener("abort", cancel);
+          void reader.cancel().catch(() => {});
+          reader.releaseLock();
+        }
+        return;
+      } catch (error) {
+        if (stop.aborted || error instanceof AccessDenied || error instanceof MissingAudioView || attempt >= 3) throw error;
+      } finally { clearTimeout(timer); }
+      await new Promise<void>(resolve => setTimeout(resolve, attempt * 200));
     }
-    const reader = response.body.getReader();
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        signal.throwIfAborted();
-        block.data.set(value, block.received);
-        block.received += value.length;
-        changed(block);
-      }
-      if (block.received !== block.data.length) throw new Error("Incomplete audio range");
-    } catch (error) {
-      await reader.cancel().catch(() => {});
-      throw error;
-    } finally { reader.releaseLock(); }
   }
 
-  private async load(block: Block, priority: RequestPriority) {
-    const key = Symbol();
-    this.pins.set(key, { block, priority });
+  async prepare(priority: RequestPriority) {
+    this.priority = priority;
+    this.preparing = true;
     this.schedule();
-    try {
-      while (block.received < block.data.length) {
-        if (this.closed || block.error) throw block.error ?? new Error("Playback changed");
-        await block.changed;
-      }
-    } finally {
-      this.pins.delete(key);
+    await this.until(() => { this.inspectHeader(); return this.readyPrefix(); });
+  }
+  async fill() {
+    this.filling = true;
+    this.schedule();
+    await this.until(() => this.complete);
+  }
+  playing() { this.priority = "auto"; }
+  async chunk(key: symbol, at: number, end: number) {
+    if (!this.rangeAt(at)) {
+      this.demands.delete(key);
+      this.demands.set(key, at);
+      const active = this.transfer;
+      if (active && active.cursor !== at && !(this.tailTransfer && at >= this.tailTransfer.cursor)) active.controller.abort();
       this.schedule();
+      await this.until(() => !this.demands.has(key) || !!this.rangeAt(at));
+      if (!this.demands.has(key)) throw new Error("Range cancelled");
     }
+    const range = this.rangeAt(at)!;
+    return this.copy(at, Math.min(at + PAGE, (end + 1), range[1]));
   }
-
-  prepare(priority: RequestPriority) { return this.load(this.blockAt(0), priority); }
-
-  async prepareMetadata() {
-    if (!/^(audio|video)\/(mp4|x-m4a)/.test(this.file.mime)) return;
-    const prefix = this.blockAt(0).data;
-    const tail = metadataTail(prefix, this.file.size);
-    if (!tail || this.file.size - tail > MAX_PREFIX - prefix.length) return;
-    this.tail = tail;
-    await this.load(this.blockAt(tail), "low");
-  }
-
-  fill() {
-    return this.filling ??= (async () => {
-      for (let offset = 0; offset < this.file.size;) {
-        const block = this.blockAt(offset);
-        await this.load(block, "low");
-        offset += block.data.length;
-      }
-    })();
-  }
-
-  async chunk(key: symbol, offset: number, end: number) {
-    const block = this.blockAt(offset);
-    if (this.decoders.get(key)?.block !== block) {
-      this.decoders.set(key, { block, priority: "high" });
-      this.schedule();
-    }
-    while (offset >= block.start + block.received) {
-      if (this.closed || !this.decoders.has(key) || block.error) throw block.error ?? new Error("Range cancelled");
-      await block.changed;
-    }
-    const count = Math.min(64 * 1024, end + 1 - offset, block.start + block.received - offset);
-    return block.data.slice(offset - block.start, offset - block.start + count);
-  }
-
   release(key: symbol) {
-    const demand = this.decoders.get(key);
-    this.decoders.delete(key);
-    if (demand) changed(demand.block);
-    this.schedule();
+    this.demands.delete(key);
+    this.wake();
+    if (!this.demands.size && !this.filling && !this.preparing) this.transfer?.controller.abort();
   }
-
-  async authorize() {
-    const response = await this.read(this.file.url, { method: "HEAD", cache: "no-store", signal: this.lifecycle.signal });
-    if (!response.ok || Number(response.headers.get("Content-Length")) !== this.file.size)
-      throw new Error("Audio no longer available");
+  checkRetained() {
+    if (this.authorizing) return;
+    this.authorizing = true;
+    // A fully retained own file has no missing range which could check access.
+    const init = this.file.shared ? { method: "HEAD" } : { headers: { Range: "bytes=0-0" } };
+    const signal = AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(10_000)]);
+    void this.read(this.file.url, { ...init, signal, cache: "no-store" }).then(async response => {
+      await response.body?.cancel();
+      if ([401,403,404].includes(response.status)) throw new AccessDenied("Audio access denied");
+      if (!response.ok) throw new Error("Audio unavailable");
+      const valid = this.file.shared ? Number(response.headers.get("Content-Length")) === this.file.size
+        : response.status === 206 && response.headers.get("Content-Range") === `bytes 0-0/${this.file.size}`;
+      if (!valid) throw new AccessDenied("Audio source changed");
+    }).catch(error => this.fail(error));
   }
-
-  private lifecycle = new AbortController();
+  resetAccess() { this.authorizing = false; }
   close() {
-    this.closed = true;
-    this.lifecycle.abort();
-    this.network?.controller.abort();
-    this.pins.clear();
-    this.decoders.clear();
-    for (const block of this.blocks.values()) changed(block);
-    this.blocks.clear();
+    this.lifetime.abort();
+    this.transfer?.controller.abort();
+    this.tailTransfer?.controller.abort();
+    this.pages.clear();
+    this.ranges = [];
+    this.wake();
   }
 }
 
@@ -210,31 +327,41 @@ function audioRange(value: string | null, size: number) {
 }
 
 export class AudioDelivery {
-  private current?: { token: string; bytes: AudioBytes; access: Promise<void> };
+  private current?: { token: string; bytes: AudioBytes; recheck: boolean };
   private next?: AudioBytes;
   private prepared = false;
+  private state?: AudioCoverage;
+  private listeners = new Set<() => void>();
+  private timer?: ReturnType<typeof setTimeout>;
   constructor(private read: ReadFile = (url, init) => fetch(url, init)) {}
-
-  suspendPreparation() {
-    if (!this.prepared) void this.prepare();
+  snapshot = () => this.state;
+  subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  };
+  private publish = () => {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    this.state = this.current?.bytes.coverage();
+    this.listeners.forEach(listener => listener());
+  };
+  isPrepared(file?: AudioFile) {
+    return !!file && this.prepared && this.next?.file.url === file.url && this.next.file.size === file.size;
   }
-
+  suspendPreparation() { if (!this.prepared) void this.prepare(); }
   async prepare(file?: AudioFile) {
     if (file && this.next?.file.url === file.url && this.next.file.size === file.size) return;
     this.next?.close();
     this.next = undefined;
     this.prepared = false;
-    if (!file || file.url === this.current?.bytes.file.url) return;
+    if (!file || (this.current && (!this.current.bytes.complete || file.url === this.current.bytes.file.url))) return;
     const next = this.next = new AudioBytes(file, this.read);
     try {
       await next.prepare("low");
-      if (this.next === next) await next.prepareMetadata();
       if (this.next === next) this.prepared = true;
-    }
-    catch { if (this.next === next) { next.close(); this.next = undefined; } }
+    } catch { if (this.next === next) { next.close(); this.next = undefined; } }
   }
-
-  select(file: AudioFile | undefined, token: string) {
+  select(file: AudioFile | undefined, token: string, onFailure?: (reason: Failure) => void) {
     if (!file) { this.clear(); return; }
     const previous = this.current?.bytes;
     const reuse = [this.next, previous].find(entry => entry?.file.url === file.url && entry.file.size === file.size);
@@ -242,9 +369,18 @@ export class AudioDelivery {
     if (this.next !== reuse) this.next?.close();
     this.next = undefined;
     const bytes = reuse ?? new AudioBytes(file, this.read);
-    const access = reuse ? bytes.authorize() : Promise.resolve();
-    void access.catch(() => bytes.close());
-    this.current = { token, bytes, access };
+    bytes.resetAccess();
+    this.current = { token, bytes, recheck: !!(file.shared || reuse?.complete) };
+    bytes.onChange = () => {
+      if (bytes.complete) this.publish();
+      else this.timer ??= setTimeout(this.publish, 120);
+    };
+    bytes.onFailure = reason => {
+      if (this.current?.bytes !== bytes) return;
+      this.clear();
+      onFailure?.(reason);
+    };
+    this.publish();
   }
 
   response(token: string, range: string | null) {
@@ -263,11 +399,11 @@ export class AudioDelivery {
     let cancelled = false;
     const stream = new ReadableStream<Uint8Array>({
       pull: async controller => {
-        await current.access;
         if (cancelled || this.current !== current) throw new Error("Playback changed");
+        if (current.recheck) current.bytes.checkRetained();
         const first = offset === bounds.start;
         const chunk = await current.bytes.chunk(key, offset, bounds.end);
-        if (this.current !== current) throw new Error("Playback changed");
+        if (cancelled || this.current !== current) throw new Error("Playback changed");
         controller.enqueue(chunk);
         offset += chunk.length;
         if (offset > bounds.end) {
@@ -280,22 +416,18 @@ export class AudioDelivery {
     }, { highWaterMark: 0 });
     return new Response(stream, { status: range ? 206 : 200, headers });
   }
-
   async start() {
     const current = this.current;
-    await current?.access;
-    if (current === this.current) await current?.bytes.prepare("high");
+    if (current?.recheck) current.bytes.checkRetained();
+    await current?.bytes.prepare("high");
   }
-
-  async fill() {
-    const current = this.current;
-    await current?.access;
-    if (current === this.current) await current?.bytes.fill();
-  }
-
+  playing() { this.current?.bytes.playing(); }
+  paused() { this.current?.bytes.resetAccess(); }
+  async fill() { await this.current?.bytes.fill(); }
   clear() {
     this.current?.bytes.close();
     this.next?.close();
     this.current = this.next = undefined;
+    this.publish();
   }
 }
