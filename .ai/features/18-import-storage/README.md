@@ -2,7 +2,7 @@
 id: 18
 title: Освобождение места после импорта медиатеки
 track: product
-stage: tech
+stage: plan
 branch: codex/18-import-storage
 pr:
 started: 2026-11-25
