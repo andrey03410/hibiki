@@ -1,4 +1,5 @@
-import { ownerAccess, requireHeavy, release, retain, reserve, kanameEnabled } from "./kaname";
+import { discardReservation } from "./storage-writer";
+import { ownerAccess, requireHeavy, release, retain, reserve, kanameEnabled, startHeavyStorage, finishHeavyStorage } from "./kaname";
 import { MAX_ARCHIVE_UPLOAD_BYTES } from "./upload-policy";
 import { randomUUID } from "node:crypto";
 import { copyFile, rename, readdir, mkdir, realpath, rm, lstat } from "node:fs/promises";
@@ -678,12 +679,14 @@ export class JobsService {
         this.directory(job.id),
         `download-${job.attempt}`,
       );
+      const downloadHold = `download-${job.id}-${job.attempt}`;
       let progress = 0;
       let lastWrite = 0;
       let writing = false;
       let progressError: unknown;
       let progressWrite = Promise.resolve();
       try {
+        await startHeavyStorage(this.db, job.ownerId, access, downloadHold, temporary);
         const file = await downloadYoutube(
           externalId,
           input.mode ?? "video",
@@ -709,6 +712,7 @@ export class JobsService {
             }
           },
         );
+        await finishHeavyStorage(this.db, job.ownerId, downloadHold, temporary);
         await progressWrite;
         if (progressError) throw progressError;
         signal.throwIfAborted();
@@ -728,7 +732,7 @@ export class JobsService {
         return result;
       } finally {
         await progressWrite;
-        await rm(temporary, { recursive: true, force: true });
+        await discardReservation(this.db, job.ownerId, downloadHold);
       }
     }
     if (job.kind === "export") {

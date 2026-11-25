@@ -216,7 +216,7 @@ export function registerReplacement(app: FastifyInstance, db: Db, library: Libra
         invariant(filename && filename !== "." && filename !== "..", 400, "file_required", "Выберите файл");
         await mkdir(directory(id), { recursive: true, mode: 0o700 });
         stagedPath = join(stageDirectory(id), filename);
-        await pipeline(part.file, meterStorage(db, ownerId, request.access, "stage-" + id), createWriteStream(storagePath(storageRoot, stagedPath), {
+        await pipeline(part.file, meterStorage(db, ownerId, request.access, "stage-" + id, directory(id)), createWriteStream(storagePath(storageRoot, stagedPath), {
           flags: "wx", mode: 0o600,
         }));
         invariant(!part.file.truncated, 413, "file_too_large", "Файл превышает 2 ГиБ");
@@ -318,7 +318,7 @@ export function registerReplacement(app: FastifyInstance, db: Db, library: Libra
         invariant((await lstat(staged).catch(() => null))?.isFile(),
           422, "replacement_file_missing", "Загруженный файл недоступен. Выберите его заново.");
         await library.importLocal(ownerId, staged, {
-          itemId, creditId: "stage-" + proposalId,
+          itemId, uploadReservation: "stage-" + proposalId,
           applyReplacement: async (tx: Prisma.TransactionClient, sourceId: string) => {
             await tx.sourceProposal.update({
               where: { id: proposalId, ownerId, itemId, status: "applying" },

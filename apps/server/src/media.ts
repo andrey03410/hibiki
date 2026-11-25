@@ -1,14 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { copyFile, mkdir, stat, realpath, rm, rename } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdir, stat, realpath, rm, rename } from "node:fs/promises";
 import {
   resolve,
   relative,
   extname,
   basename,
+  dirname,
   delimiter,
   sep,
 } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { parseFile } from "music-metadata";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
@@ -359,18 +361,47 @@ export async function stageMediaCopy(
   hash: string,
   ext: string,
   source: string,
+  expectedBytes: number,
+  beforeWrite: (paths: string[], bytes: number) => Promise<unknown>,
+  move?: (renameFile: () => Promise<void>) => Promise<void>,
 ) {
   const dir = resolve(root, "media", ownerId);
   await mkdir(dir, { recursive: true });
   const target = resolve(dir, `${hash}${ext}`);
   const temporary = resolve(dir, `.${hash}-${randomUUID()}.tmp`);
   try {
-    await copyFile(source, temporary);
+    let moved = false;
+    if (move) {
+      await beforeWrite([temporary, target, source], 0);
+      try {
+        await move(() => rename(source, temporary));
+        moved = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+      }
+    }
+    if (!moved) {
+      await beforeWrite([temporary, target], expectedBytes);
+      let bytes = 0;
+      const digest = createHash("sha256");
+      await pipeline(createReadStream(source), async function* (chunks) {
+        for await (const chunk of chunks) {
+          bytes += chunk.length;
+          invariant(bytes <= expectedBytes, 409, "file_changed", "Файл изменился во время импорта");
+          digest.update(chunk);
+          yield chunk;
+        }
+      }, createWriteStream(temporary, { flags: "wx" }));
+      invariant(bytes === expectedBytes && digest.digest("hex") === hash, 409, "file_changed", "Файл изменился во время импорта");
+    }
+    return { path: relative(root, target), moved, publish: async (destination: string) => {
+      await mkdir(dirname(destination), { recursive: true });
+      await rename(temporary, destination);
+    } };
   } catch (error) {
     await rm(temporary, { force: true });
     throw error;
   }
-  return { path: relative(root, target), publish: () => rename(temporary, target), discard: () => rm(temporary, { force: true }) };
 }
 export async function allowedLocalPath(path: string) {
   const full = await realpath(path);

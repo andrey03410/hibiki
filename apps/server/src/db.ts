@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import Sqlite from "better-sqlite3";
 
 export type Db = PrismaClient;
+export const dbStorageRoots = new WeakMap<Db, string>();
 export function createDb(
   storageRoot: string,
   options: { databaseUrl?: string } = {},
@@ -19,5 +20,7 @@ export function createDb(
   connection.pragma("foreign_keys = ON");
   connection.pragma("busy_timeout = 5000");
   connection.close();
-  return new PrismaClient({ adapter: sqliteAdapter(url) });
+  const db = new PrismaClient({ adapter: sqliteAdapter(url) });
+  dbStorageRoots.set(db, resolve(storageRoot));
+  return db;
 }

@@ -15,9 +15,9 @@ it("closes password login when the installation uses Kaname", async () => {
 
 import { AuthService } from "./auth";
 import { ArtworkService } from "./artwork";
-import { bindSubject, ownerAccess, reserve, usage, markActivity } from "./kaname";
+import { bindSubject, ownerAccess, reserve, usage, markActivity, storageBreakdown } from "./kaname";
 import { randomUUID } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { lstat, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { wav } from "./test-utils";
 
@@ -179,4 +179,138 @@ it("coalesces concurrent file activity per owner for a minute and writes immedia
     await mark(62);
     expect(await recorded()).toEqual([new Date(start + 60000).toISOString(), new Date(start + 62000).toISOString()]);
   } finally { await ctx.close(); }
+});
+
+it("keeps a staged upload charged while publishing its media copy", async () => {
+  const f = await fixture();
+  try {
+    const data = wav();
+    const file = path.join(f.root, "upload.wav");
+    await writeFile(file, data);
+    const grant = await ownerAccess(f.db, f.userId);
+    await reserve(f.db, f.userId, data.length, grant, "upload-regression");
+    f.grants.get("alice")!.storageBytes = data.length * 2 - 1;
+    const options = { title: "Upload" };
+    await expect(f.library.importLocal(f.userId, file, options)).rejects.toMatchObject({ code: "kaname_storage_quota" });
+    f.grants.get("alice")!.storageBytes++;
+    await f.library.importLocal(f.userId, file, options);
+    await f.library.importLocal(f.userId, file, options);
+    expect((await usage(f.db, f.userId)).storageBytes).toBe(data.length);
+  } finally { await f.close(); }
+});
+
+it("reports pre-ledger local archives and recovers only a stopped storage writer", async () => {
+  const f = await testContext();
+  const { createDb } = await import("./db");
+  const second = createDb(f.root);
+  try {
+    const id = randomUUID();
+    const dir = path.join(f.root, "jobs", id);
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "input.zip"), Buffer.alloc(101));
+    await f.db.job.create({ data: { id, ownerId: f.userId, kind: "import", inputJson: "{}" } });
+    const tmp = path.join(f.root, "uploads", f.userId, randomUUID());
+    await reserve(second, f.userId, 60, null, "orphan", tmp);
+    await mkdir(tmp, { recursive: true });
+    await writeFile(path.join(tmp, "part"), Buffer.alloc(37));
+    await second.kanameStorage.update({ where: { id: "orphan" }, data: { expiresAt: new Date(0) } });
+    expect(await storageBreakdown(f.db, f.userId, f.root)).toEqual({
+      mediaBytes: 0, importBytes: 101, exportBytes: 0, otherBytes: 0, temporaryBytes: 60,
+    });
+    expect((await storageBreakdown(f.db, f.otherUserId, f.root)).importBytes).toBe(0);
+    await second.$disconnect();
+    expect((await storageBreakdown(f.db, f.userId, f.root)).temporaryBytes).toBe(0);
+    await expect(lstat(tmp)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await lstat(path.join(dir, "input.zip"))).size).toBe(101);
+  } finally { await second.$disconnect(); await f.close(); }
+});
+
+it("uploads an exact-limit WAV without consuming space for a second copy", async () => {
+  const f = await fixture();
+  try {
+    const data = wav();
+    const payload = Buffer.concat([
+      Buffer.from('--quota\r\nContent-Disposition: form-data; name="file"; filename="exact.wav"\r\n\r\n'),
+      data, Buffer.from("\r\n--quota--\r\n"),
+    ]);
+    const upload = () => f.app.inject({ method: "POST", url: "/api/items/upload",
+      headers: { ...f.alice, "content-type": "multipart/form-data; boundary=quota" }, payload });
+    f.grants.get("alice")!.storageBytes = data.length - 1;
+    expect((await upload()).statusCode).toBe(413);
+    f.grants.get("alice")!.storageBytes++;
+    expect((await upload()).statusCode).toBe(200);
+    expect(await storageBreakdown(f.db, f.userId, f.root)).toEqual({
+      mediaBytes: data.length, importBytes: 0, exportBytes: 0, otherBytes: 0, temporaryBytes: 0,
+    });
+    expect((await usage(f.db, f.userId)).storageBytes).toBe(data.length);
+  } finally { await f.close(); }
+});
+
+it("moves reserved extraction data at the exact ZIP plus media limit", async () => {
+  const f = await fixture();
+  try {
+    const { exportLibrary, inspectArchive, applyArchive } = await import("./portability");
+    const data = wav();
+    const original = path.join(f.root, "original.wav");
+    await writeFile(original, data);
+    await f.library.importLocal(f.otherUserId, original);
+    const zip = path.join(f.root, "source.zip");
+    await exportLibrary(f.db, f.otherUserId, f.root, zip, { includeFiles: true });
+    const zipBytes = (await lstat(zip)).size;
+    f.grants.get("alice")!.storageBytes = zipBytes + data.length;
+    const grant = await ownerAccess(f.db, f.userId);
+    await reserve(f.db, f.userId, zipBytes, grant, "job-preview");
+    const work = path.join(f.root, "inspection");
+    const checked = await inspectArchive(zip, work, undefined, async bytes => {
+      await reserve(f.db, f.userId, bytes, grant, "inspection", work);
+    });
+    const before = await lstat([...checked.files.values()][0].path);
+    await applyArchive(f.db, f.userId, f.root, checked, undefined, "inspection");
+    const file = await f.db.mediaFile.findFirstOrThrow({ where: { ownerId: f.userId } });
+    expect((await lstat(path.join(f.root, file.path))).ino).toBe(before.ino);
+    expect((await f.db.kanameStorage.findUniqueOrThrow({ where: { id: "inspection" } })).bytes).toBe(0n);
+  } finally { await f.close(); }
+});
+
+it("recovers expired legacy upload holds and empty reservations per owner", async () => {
+  const f = await testContext();
+  try {
+    const make = async (ownerId: string, file: boolean) => {
+      const id = randomUUID();
+      await f.db.kanameStorage.create({ data: { id, ownerId, writer: "legacy", bytes: 42n, expiresAt: new Date(0) } });
+      const dir = path.join(f.root, "uploads", ownerId, id);
+      if (file) {
+        await mkdir(dir, { recursive: true });
+        await writeFile(path.join(dir, "partial"), Buffer.alloc(42));
+      }
+      return dir;
+    };
+    const partial = await make(f.userId, true);
+    await make(f.userId, false);
+    const other = await make(f.otherUserId, true);
+    expect((await storageBreakdown(f.db, f.userId, f.root)).temporaryBytes).toBe(0);
+    await expect(lstat(partial)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await lstat(path.join(other, "partial"))).size).toBe(42);
+    expect(await f.db.kanameStorage.count({ where: { ownerId: f.otherUserId } })).toBe(1);
+  } finally { await f.close(); }
+});
+
+it("measures growing external-tool output before completion and closes it once", async () => {
+  const f = await testContext();
+  try {
+    const { startHeavyStorage, finishHeavyStorage } = await import("./kaname");
+    const { discardReservation } = await import("./storage-writer");
+    const directory = path.join(f.root, "jobs", "sample", "download-1");
+    await startHeavyStorage(f.db, f.userId, null, "download", directory);
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "video.part"), Buffer.alloc(1000));
+    await writeFile(path.join(directory, "audio.part"), Buffer.alloc(333));
+    expect((await storageBreakdown(f.db, f.userId, f.root)).temporaryBytes).toBe(1333);
+    expect((await storageBreakdown(f.db, f.otherUserId, f.root)).temporaryBytes).toBe(0);
+    await finishHeavyStorage(f.db, f.userId, "download", directory);
+    expect((await storageBreakdown(f.db, f.userId, f.root)).temporaryBytes).toBe(1333);
+    await discardReservation(f.db, f.userId, "download");
+    expect((await storageBreakdown(f.db, f.userId, f.root)).temporaryBytes).toBe(0);
+    await expect(lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally { await f.close(); }
 });

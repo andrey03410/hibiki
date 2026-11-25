@@ -335,6 +335,9 @@ model KanameActivity {
 }
 
 model KanameStorage {
+  writer String?
+  workPaths String?
+  measureOnDisk Boolean @default(false)
   id String @id
   ownerId String
   bytes BigInt
