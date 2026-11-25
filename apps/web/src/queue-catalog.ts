@@ -116,6 +116,12 @@ export class QueueCatalog {
     });
   }
   rechecksPlayback = (id?: string) => id !== undefined && (this.isShared(id) || this.rows.get(id)?.shared !== undefined);
+  excludeFailedPlayback(id: string, failed: Set<string>) {
+    // Use the refreshed position: a missing media file and a revoked grant
+    // can both return 404. Only a closed position needs a retry on the next lap.
+    const closed = this.rechecksPlayback(id) && !this.rows.get(id)?.sources.length;
+    return (closed ? new Set(failed) : failed).add(id);
+  }
   async readPlayback(id: string, reads: SharedReads = new Map()) {
     const known = this.rows.get(id);
     const shared = this.sharedIds.get(id);
