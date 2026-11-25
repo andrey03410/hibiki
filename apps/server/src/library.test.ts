@@ -262,7 +262,7 @@ describe("personal library", () => {
       else
         expect(await inspectFile(stored)).toMatchObject({
           videoCodec: "h264",
-          audioCodec: "aac",
+          audioCodec: "flac",
           browserCompatible: true,
         });
     }
@@ -518,6 +518,20 @@ describe("personal library", () => {
         originalQueue: ["foreign", a],
       }),
     ).toMatchObject({ queueIndex: 0, position: 0, originalQueue: [a] });
+  });
+  it("updates a playback checkpoint without scanning the owner's library or playlist contexts", async () => {
+    const item = (await ctx.library.upsertYoutube(ctx.userId, { externalId: "abcdefghijk", duration: 12 })).item;
+    await ctx.library.setSettings(ctx.userId, {queue: [item.id], queuePlaylistIds: {}});
+    const scans: string[] = [];
+    const db = ctx.db.$extends({query: {$allModels: {async findMany({model, args, query}) {
+      scans.push(model);
+      return query(args);
+    }}}});
+    const { LibraryService } = await import("./library");
+    const library = new LibraryService(db as typeof ctx.db, ctx.root);
+    const saved = await library.setSettings(ctx.userId, {position: 100, queueIndex: 100});
+    expect(saved).toMatchObject({queue: [item.id], position: 12, queueIndex: 0, queuePlaylistIds: {}});
+    expect(scans).toEqual([]);
   });
   it("validates explicit changes to playback mode while retaining partial settings writes", async () => {
     expect(await ctx.library.getSettings(ctx.userId)).not.toHaveProperty("mode");

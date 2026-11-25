@@ -6,7 +6,7 @@ import type { Db } from "./db";
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
 import { HttpError, invariant } from "./errors";
-import { ArtworkService } from "./artwork";
+import { ArtworkService, artworkVersion, removeUnusedArtwork } from "./artwork";
 import {
   stageMediaCopy,
   hashFile,
@@ -56,6 +56,7 @@ type IncludedItem = NonNullable<
 > & { sources: Array<any>; tags: Array<any> };
 export function itemDto(row: IncludedItem): ItemDto {
   return {
+  const coverVersion = artworkVersion(row.sources);
     id: row.id,
     title: row.title,
     originalTitle: row.originalTitle,
@@ -77,7 +78,7 @@ export function itemDto(row: IncludedItem): ItemDto {
       reason: source.reason ?? undefined,
       thumbnail:
         source.provider === "local" && source.file?.kind === "audio"
-          ? `/api/items/${encodeURIComponent(row.id)}/artwork`
+          ? `/api/items/${encodeURIComponent(row.id)}/artwork?v=${coverVersion}`
           : (source.thumbnail ?? undefined),
       fileId: source.fileId ?? undefined,
       mime: source.file?.mime,
@@ -107,8 +108,8 @@ function* playlistCoverCandidates(items: ItemDto[]) {
     for (const { provider, thumbnail, externalId } of item.sources) {
       if (provider === "youtube" && thumbnail && externalId && /^[\w-]{11}$/.test(externalId))
         yield { url: `https://i.ytimg.com/vi/${externalId}/sddefault.jpg` };
-      else if (provider === "local" && thumbnail === `/api/items/${encodeURIComponent(item.id)}/artwork`)
-        yield { url: `${thumbnail}?size=cover`, itemId: item.id };
+      else if (provider === "local" && thumbnail && thumbnail.split("?")[0] === `/api/items/${encodeURIComponent(item.id)}/artwork`)
+        yield { url: `${thumbnail}${thumbnail.includes("?") ? "&" : "?"}size=cover`, itemId: item.id };
     }
   }
 }
@@ -699,7 +700,7 @@ export class LibraryService {
     }, { timeout: 120_000 });
   }
   async deleteItem(ownerId: string, id: string) {
-    await this.db.$transaction(async (tx) => {
+    const removedHashes = await this.db.$transaction(async (tx) => {
       const snapshot = await this.snapshotWith(ownerId, tx);
       invariant(
         snapshot.items.some((item) => item.id === id),
@@ -742,7 +743,10 @@ export class LibraryService {
   }
   listTags(ownerId: string, includeArchived = false) {
     return listTags(this.db, ownerId, includeArchived);
+      return snapshot.items.find(item => item.id === id)!.sources.flatMap(source => source.hash ?? []);
   }
+    // Worker maintenance retries after a transient filesystem failure.
+    await Promise.all(removedHashes.map(hash => removeUnusedArtwork(this.db, this.storageRoot, ownerId, hash).catch(() => {})));
   createTag(ownerId: string, input: TagInput) {
     return this.db.$transaction(tx => saveTag(tx, ownerId, input));
   }
@@ -1129,11 +1133,19 @@ export class LibraryService {
       const current = await tx.setting.findUnique({
         where: { userId: ownerId },
       });
-      return this.writeSettings(
-        ownerId,
-        { ...(current ? JSON.parse(current.json) : {}), ...value },
-        tx,
-      );
+      const next = { ...(current ? JSON.parse(current.json) : {}), ...value };
+      if (["queue", "originalQueue", "queuePlaylistIds"].some(key => Object.hasOwn(value, key))) {
+        return this.writeSettings(ownerId, next, tx);
+      }
+      const queue: string[] = Array.isArray(next.queue) ? next.queue : [];
+      const index = Number.isFinite(next.queueIndex) ? Math.floor(next.queueIndex) : 0;
+      next.queueIndex = Math.max(0, Math.min(index, queue.length - 1));
+      next.queue = queue;
+      const id = queue[next.queueIndex];
+      const currentItem = id && await tx.item.findFirst({ where: { id, ownerId }, select: { duration: true } });
+      next.position = currentItem && Number.isFinite(next.position)
+        ? Math.max(0, Math.min(next.position, currentItem.duration ?? Infinity)) : 0;
+      return this.persistSettings(ownerId, next, tx);
     });
   }
   private async writeSettings(
@@ -1201,10 +1213,13 @@ export class LibraryService {
       );
     }
     await tx.setting.upsert({
-      where: { userId: ownerId },
-      create: { userId: ownerId, json: JSON.stringify(next) },
-      update: { json: JSON.stringify(next) },
+      where: { userId: ownerId }, create: { userId: ownerId, json }, update: { json },
     });
     return next;
   }
 }
+    return this.persistSettings(ownerId, next, tx);
+  }
+  private async persistSettings(ownerId: string, next: Record<string, unknown>, tx: Prisma.TransactionClient) {
+    const json = JSON.stringify(next);
+    invariant(json.length < 1024 * 1024, 413, "settings_too_large", "Настройки слишком велики");

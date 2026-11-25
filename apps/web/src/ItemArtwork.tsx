@@ -14,8 +14,8 @@ function artworkUrl(source: Props["source"], size: NonNullable<Props["size"]>) {
     return `${source.thumbnail}?size=${size}`;
   if (source.provider === "youtube" && /^[\w-]{11}$/.test(source.externalId ?? ""))
     return `https://i.ytimg.com/vi/${source.externalId}/${size === "cover" ? "sddefault" : "default"}.jpg`;
-  if (source.provider === "local" && /^\/api\/items\/[\w-]+\/artwork$/.test(source.thumbnail))
-    return `${source.thumbnail}?size=${size}`;
+  if (source.provider === "local" && /^\/api\/items\/[\w-]+\/artwork(?:\?v=[a-f0-9]{64})?$/.test(source.thumbnail))
+    return `${source.thumbnail}${source.thumbnail.includes("?") ? "&" : "?"}size=${size}`;
 }
 
 const nearbyArtwork = new WeakMap<Element, () => void>();

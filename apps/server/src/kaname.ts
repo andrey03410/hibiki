@@ -102,11 +102,26 @@ async function heldBytes(tx: Tx, ownerId: string, persistentOnly: boolean) {
     { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }) }, _sum: { bytes: true } });
   return Number(held._sum.bytes ?? 0n);
 }
-export async function markActivity(db: Db, ownerId: string) {
-  const lastActiveAt = new Date();
+const activityByDb = new WeakMap<Db, Map<string, { day: string; at: number; written: Promise<unknown> }>>();
+export async function markActivity(db: Db, ownerId: string, lastActiveAt = new Date()) {
   const day = lastActiveAt.toISOString().slice(0, 10);
-  await db.kanameActivity.upsert({ where: { ownerId_day: { ownerId, day } },
-    create: { ownerId, day, lastActiveAt }, update: { lastActiveAt } });
+  const at = +lastActiveAt;
+  const activity = activityByDb.get(db) ?? new Map();
+  activityByDb.set(db, activity);
+  const previous = activity.get(ownerId);
+  if (previous?.day === day && at - previous.at < 60_000) {
+    await previous.written;
+    return;
+  }
+  const written = Promise.resolve(db.kanameActivity.upsert({ where: { ownerId_day: { ownerId, day } },
+    create: { ownerId, day, lastActiveAt }, update: { lastActiveAt } }));
+  activity.set(ownerId, { day, at, written });
+  try {
+    await written;
+  } catch (error) {
+    if (activity.get(ownerId)?.written === written) activity.delete(ownerId);
+    throw error;
+  }
 }
 export async function usage(db: Db, ownerId?: string) {
   if (!ownerId) return { storageBytes: 0, counts: { items: 0, playlists: 0, jobs: 0 }, lastActiveAt: null, activeDays30: 0 };

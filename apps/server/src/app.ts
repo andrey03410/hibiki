@@ -68,7 +68,7 @@ const idOf = (request: { params: unknown }) =>
 const browserAccess = (request: FastifyRequest) =>
   Boolean(request.user && !request.headers.authorization && request.cookies.hibiki_session);
 
-export async function createApp(options: { db: Db; storageRoot: string }) {
+export async function createApp(options: { db: Db; storageRoot: string; webRoot?: string }) {
   const { db, storageRoot } = options;
   const auth = new AuthService(db);
   const library = new LibraryService(db, storageRoot);
@@ -245,10 +245,11 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       .header("cache-control", "private, no-cache")
       .header("vary", "Cookie, Authorization")
       .header("x-content-type-options", "nosniff");
-    const { size } = artworkQuery.parse(request.query);
+    const { size, v } = artworkQuery.parse(request.query);
     const thumbnail = canRunHeavy(request.access) ? size : undefined;
     const cover = await artwork.get(request.user!.id, idOf(request), thumbnail);
     if (cover.etag) {
+    if (v && v === cover.version) reply.header("cache-control", "private, max-age=31536000, immutable");
       reply.header("etag", cover.etag);
       const validators = request.headers["if-none-match"]?.split(",").map(tag => tag.trim().replace(/^W\//, ""));
       if (validators?.includes("*") || validators?.includes(cover.etag)) return reply.code(304).send();
@@ -485,12 +486,12 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     return reply.send(createReadStream(path));
   });
   app.get("/api/settings", (request) => library.getSettings(request.user!.id));
-  app.put("/api/settings", (request) =>
-    library.setSettings(
-      request.user!.id,
-      z.record(z.string(), z.unknown()).parse(request.body),
-    ),
-  );
+  app.put("/api/settings", async (request) => {
+    const patch = z.record(z.string(), z.unknown()).parse(request.body);
+    const saved = await library.setSettings(request.user!.id, patch);
+    return (request.query as { patch?: string }).patch === "1"
+      ? Object.fromEntries(Object.keys(patch).map(key => [key, saved[key]])) : saved;
+  });
   app.get("/api/tokens", async (request) => ({
     tokens: await auth.listTokens(request.user!.id),
   }));
@@ -548,15 +549,22 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
   });
   registerNotes(app, db);
   registerLibraryPages(app, db, library);
+          .header("Cache-Control", "no-cache")
   registerClassification(app, db);
   registerReplacement(app, db, library, storageRoot);
   registerHistory(app, db);
   registerYoutubeSync(app, db, library);
   registerSharing(app, sharing, storageRoot);
   registerMcp(app, s);
-  const webRoot = resolve("apps/web/dist");
+  const webRoot = options.webRoot ?? resolve("apps/web/dist");
   if (existsSync(join(webRoot, "index.html"))) {
-    await app.register(staticFiles, { root: webRoot, prefix: "/" });
+    await app.register(staticFiles, {
+      root: webRoot, prefix: "/", cacheControl: false,
+      setHeaders(response, filePath) {
+        response.header("Cache-Control", filePath.startsWith(join(webRoot, "assets") + "/")
+          ? "public, max-age=31536000, immutable" : "no-cache");
+      },
+    });
     app.setNotFoundHandler((request, reply) => {
       if (
         request.method === "GET" &&
