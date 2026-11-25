@@ -36,3 +36,23 @@ encode @hibikiText zstd gzip {
 `caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`.
 При ошибке восстановите сохранённое содержимое и повторите reload. Через HTTPS
 проверьте Content-Encoding у большой сводки и байты Range-ответа у медиа.
+
+
+В том же блоке для точного пути `/mcp` задан свой обработчик. У загрузок по
+одноразовой ссылке остаётся отдельный маршрут `/api/uploads/*`.
+
+```caddyfile
+handle /mcp {
+    reverse_proxy hibiki:8790 {
+        lb_try_duration 20s
+        lb_try_interval 250ms
+    }
+}
+```
+
+Это даёт контейнеру время начать принимать соединения при смене образа.
+Стандартное ограничение Caddy на повтор после установленного соединения
+сохраняется. На изолированном прокси проверены оба случая с POST. При
+запуске backend с задержкой он получил одно полное тело запроса. Если backend
+принял тело и закрыл соединение, Caddy вернул ошибку клиенту после одной
+попытки. [Документация Caddy о повторах](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#load-balancing)
