@@ -1,0 +1,30 @@
+.storage-usage {
+  display: grid;
+  gap: 0.55rem;
+  margin: 1rem 0;
+}
+
+.storage-usage > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.storage-usage dd {
+  margin: 0;
+  text-align: end;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.storage-usage-total {
+  font-weight: 600;
+}
+
+.storage-settings > .button {
+  white-space: normal;
+}
+
+.storage-cleanup-result {
+  margin-top: 0.75rem;
+}

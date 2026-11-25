@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Download, Plus, LoaderCircle, CircleAlert, CheckCircle2, RefreshCw } from "lucide-react";
+import type { JobDto } from "@hibiki/contracts";
 import { api } from "./api";
-import { Button, EmptyState, ErrorMessage, PageTop, useData } from "./WorkspaceUi";
+import { Button, EmptyState, ErrorMessage, Modal, PageTop, useData } from "./WorkspaceUi";
 
 const JOB_NAMES: Record<string, string> = {
   "youtube-import": "Импорт из YouTube",
@@ -71,9 +72,11 @@ function JobReport({ result }: { result: any }) {
       ))}
       {result.preview && (
         <p className={`report-verdict ${report.canApply ? "" : "danger-text"}`}>
-          {report.canApply
-            ? "Архив проверен. Можно применить импорт."
-            : "Импорт заблокирован. Исправьте ошибки архива."}
+          {result.archiveReleased === true
+            ? "Архив освобождён"
+            : report.canApply
+              ? "Архив проверен. Можно применить импорт."
+              : "Импорт заблокирован. Исправьте ошибки архива."}
         </p>
       )}
       {result.itemId && (
@@ -91,7 +94,8 @@ function JobReport({ result }: { result: any }) {
 export default function JobsPage() {
   const { library, refresh, notify, openImport } = useData(),
     [filter, setFilter] = useState("all"),
-    [pending, setPending] = useState("");
+    [pending, setPending] = useState(""),
+    [importResult, setImportResult] = useState<JobDto>();
   const jobs = [...library.jobs]
     .filter(
       (j) =>
@@ -104,10 +108,15 @@ export default function JobsPage() {
   async function action(id: string, name: string) {
     setPending(`${id}:${name}`);
     try {
-      await api(
+      const job = await api<JobDto>(
         name === "apply" ? `/imports/${id}/apply` : `/jobs/${id}/${name}`,
         "POST",
       );
+      if (name === "apply" && job.state === "done") {
+        setImportResult(job);
+        await refresh();
+        return;
+      }
       await refresh();
       notify(
         name === "cancel"
@@ -116,6 +125,16 @@ export default function JobsPage() {
             ? "Задание добавлено на повтор"
             : "Импорт запущен",
       );
+    } catch (e) {
+      notify((e as Error).message, true);
+    } finally {
+      setPending("");
+    }
+  }
+  async function openResult(previewId: string, appliedJobId: string) {
+    setPending(`${previewId}:result`);
+    try {
+      setImportResult(await api<JobDto>(`/jobs/${encodeURIComponent(appliedJobId)}`));
     } catch (e) {
       notify((e as Error).message, true);
     } finally {
@@ -168,6 +187,9 @@ export default function JobsPage() {
             job.kind === "import" &&
             job.state === "done" &&
             result?.preview?.canApply === true;
+          const archiveReleased = isPreview && result.archiveReleased === true;
+          const appliedJobId = archiveReleased && typeof result.appliedJobId === "string"
+            ? result.appliedJobId : undefined;
           const percent = Math.min(100, Math.round(job.progress * 100));
           return (
             <article className="job-card" key={job.id}>
@@ -246,13 +268,22 @@ export default function JobsPage() {
                     Скачать архив
                   </a>
                 )}
-                {isPreview && (
+                {isPreview && !archiveReleased && (
                   <Button
                     className="primary compact"
                     busy={pending === `${job.id}:apply`}
                     onClick={() => action(job.id, "apply")}
                   >
                     Применить импорт
+                  </Button>
+                )}
+                {appliedJobId && (
+                  <Button
+                    className="subtle compact"
+                    busy={pending === `${job.id}:result`}
+                    onClick={() => void openResult(job.id, appliedJobId)}
+                  >
+                    Открыть результат
                   </Button>
                 )}
               </div>
@@ -276,6 +307,13 @@ export default function JobsPage() {
           }
           icon={<CheckCircle2 size={29} />}
         />
+      )}
+      {importResult && (
+        <Modal title="Результат импорта" close={() => setImportResult(undefined)}>
+          <p>{STATE_NAMES[importResult.state]}</p>
+          {importResult.error && <ErrorMessage error={importResult.error} />}
+          {importResult.result != null && <JobReport result={importResult.result} />}
+        </Modal>
       )}
     </>
   );
