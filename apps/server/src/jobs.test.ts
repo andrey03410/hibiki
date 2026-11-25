@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { chmod, writeFile } from "node:fs/promises";
+import { chmod, writeFile, stat, rename, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { JobsService } from "./jobs.js";
 import { hashFile } from "./media";
@@ -265,9 +265,72 @@ else { console.error('ERROR: Connection timed out'); process.exit(1); }
     await jobs.runOnce();
     expect((await jobs.get(ctx.otherUserId, preview.id)).state).toBe("done");
     await expect(jobs.applyImport(ctx.userId, preview.id)).rejects.toThrow();
-    const apply = await jobs.applyImport(ctx.otherUserId, preview.id);
+    const [apply, duplicate] = await Promise.all([
+      jobs.applyImport(ctx.otherUserId, preview.id),
+      jobs.applyImport(ctx.otherUserId, preview.id),
+    ]);
+    expect(duplicate.id).toBe(apply.id);
     await jobs.runOnce();
     expect((await jobs.get(ctx.otherUserId, apply.id)).state).toBe("done");
+    expect((await jobs.applyImport(ctx.otherUserId, preview.id)).id).toBe(apply.id);
+    expect((await jobs.get(ctx.otherUserId, preview.id)).result).toMatchObject({archiveReleased: true});
+    await expect(stat(join(ctx.root, "jobs", preview.id, "input.zip"))).rejects.toMatchObject({code: "ENOENT"});
+  });
+  it("protects sibling retries and releases the archive only after both applications finish", async () => {
+    const exported = await jobs.create(ctx.userId, "export", {});
+    await jobs.runOnce();
+    const preview = await jobs.create(ctx.userId, "import", { archivePath: await jobs.exportPath(ctx.userId, exported.id) });
+    await jobs.runOnce();
+    const apply = await jobs.applyImport(ctx.userId, preview.id);
+    const first = await ctx.db.job.findUniqueOrThrow({ where: { id: apply.id } });
+    await ctx.db.job.create({ data: { ...first, id: "other-apply", state: "cancelled", attempt: 1 } });
+    await jobs.runOnce();
+    expect((await jobs.get(ctx.userId, apply.id)).state).toBe("done");
+    const input = join(ctx.root, "jobs", preview.id, "input.zip");
+    expect((await stat(input)).size).toBeGreaterThan(0);
+    expect(await jobs.cleanupArchives(ctx.userId)).toEqual({ count: 0, bytes: 0, failedCount: 0 });
+    await jobs.retry(ctx.userId, "other-apply");
+    await jobs.runOnce();
+    expect((await jobs.get(ctx.userId, "other-apply")).state).toBe("done");
+    await expect(stat(input)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+  it("rechecks historical previews, keeps the charge on unlink failure and recovers durable cleanup intent", async () => {
+    const ownerId = ctx.userId;
+    const exported = await jobs.create(ownerId, "export", {});
+    await jobs.runOnce();
+    const source = await jobs.exportPath(ownerId, exported.id);
+    const preview = await jobs.create(ownerId, "import", { archivePath: source }, true);
+    await jobs.runOnce();
+    const apply = await jobs.applyImport(ownerId, preview.id, true);
+    await ctx.db.job.update({ where: { id: apply.id }, data: { state: "done" } });
+    const input = join(ctx.root, "jobs", preview.id, "input.zip");
+    const bytes = (await stat(input)).size;
+    await ctx.db.kanameStorage.upsert({ where: { id: "job-" + preview.id }, update: {}, create: {
+      id: "job-" + preview.id, ownerId, bytes: BigInt(bytes), expiresAt: null,
+    } });
+    await ctx.db.job.createMany({ data: Array.from({ length: 105 }, (_, i) => ({
+      id: "later-" + i, ownerId, kind: "export", state: "done", inputJson: "{}",
+    })) });
+    expect((await jobs.list(ownerId, true)).some(job => job.id === preview.id)).toBe(false);
+    expect(await jobs.archiveCleanupPreview(ctx.otherUserId)).toEqual({ count: 0, bytes: 0 });
+    expect(await jobs.archiveCleanupPreview(ownerId)).toEqual({ count: 1, bytes });
+    const duplicate = await jobs.applyImport(ownerId, preview.id, true);
+    expect(duplicate.id).not.toBe(apply.id);
+    expect(await jobs.cleanupArchives(ownerId)).toEqual({ count: 0, bytes: 0, failedCount: 0 });
+    await ctx.db.job.update({ where: { id: duplicate.id }, data: { state: "done" } });
+    await rename(input, input + ".bak");
+    await mkdir(input);
+    expect(await jobs.cleanupArchives(ownerId)).toEqual({ count: 0, bytes: 0, failedCount: 1 });
+    expect(await ctx.db.kanameStorage.findUnique({ where: { id: "job-" + preview.id } })).toMatchObject({ bytes: BigInt(bytes) });
+    await rm(input, { recursive: true });
+    await rename(input + ".bak", input);
+    const restarted = new JobsService(ctx.db, ctx.library, ctx.root);
+    await restarted.runOnce();
+    expect((await restarted.get(ownerId, preview.id, true)).result).toMatchObject({ archiveReleased: true });
+    expect(await ctx.db.kanameStorage.findUnique({ where: { id: "job-" + preview.id } })).toBeNull();
+    expect(await restarted.cleanupArchives(ownerId)).toEqual({ count: 0, bytes: 0, failedCount: 0 });
+    expect((await stat(source)).size).toBe(bytes);
+    await restarted.stop();
   });
   it("returns a third claimed attempt on graceful shutdown so a fresh worker can finish", async () => {
     const executable = join(ctx.root, "graceful-yt-dlp");
