@@ -41,6 +41,7 @@ import { ItemArtwork } from "./ItemArtwork.tsx";
 import { fetchItems } from "./library-pages";
 import { completeLibraryOrder, LibraryQueueLoad, QueueCatalog, QueueIntents } from "./queue-catalog";
 import { CompactPlaybackQueue, QueueRows, playbackBuffer, PlaybackSeekBar, PlaybackVolume, type BufferedRanges } from "./PlaybackControls";
+import { attachVideoStream, videoFile } from "./video-stream";
 import { AudioDelivery, ownedAudioFile } from "./audio-delivery";
 import { attachM4aSource, canUseM4aSource } from "./audio-mp4";
 import { audioRelayReady, listenForAudioRanges, subscribeAudioRelay } from "./audio-relay";
@@ -489,6 +490,35 @@ export function PlayerProvider({
       m4a.current?.start();
     }
   }, [delivery, playing, audioToken, m4aEnabled]);
+  const [nativeVideo, setNativeVideo] = useState<{ key: string; position: number }>();
+  const retiredVideos = useRef(new WeakSet<HTMLMediaElement>());
+  const streamedVideo = useMemo(() => presentationKind === "video" && !waitingForVideo && nativeVideo?.key !== sourceKey &&
+    typeof MediaSource !== "undefined" && navigator.vendor === "Google Inc." ? videoFile(source, current?.duration) : undefined,
+    [userId, presentationKind, waitingForVideo, nativeVideo, sourceKey, source?.shared, source?.streamUrl,
+      source?.bytes, source?.mime, source?.playbackHints?.audioStart, source?.playbackHints?.tailStart, current?.duration]);
+  function fallbackToNativeVideo(element: HTMLMediaElement) {
+    if (!streamedVideo || native.current !== element || retiredVideos.current.has(element)) return false;
+    seekOnLoad.current = element.currentTime || seekOnLoad.current;
+    retiredVideos.current.add(element);
+    setNativeVideo({key: sourceKey, position: seekOnLoad.current});
+    return true;
+  }
+  useLayoutEffect(() => {
+    const video = native.current;
+    if (!streamedVideo || !(video instanceof HTMLVideoElement)) return;
+    try {
+      return attachVideoStream(video, streamedVideo, denied => {
+        if (!currentNative(video)) return;
+        if (!denied) { fallbackToNativeVideo(video); return; }
+        // Clearing a denied video sends pause/error events while the next grant is being checked.
+        retiredVideos.current.add(video);
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+        void sourceError(true);
+      });
+    } catch { fallbackToNativeVideo(video); }
+  }, [streamedVideo, sourceKey]);
   const mediaKey = useRef(sourceKey);
   const feedback = useMemo(() => new PlaybackFeedback(), [sourceKey]);
   const phase = useSyncExternalStore(feedback.subscribe, feedback.snapshot);
@@ -557,7 +587,7 @@ export function PlayerProvider({
     return mediaKey.current === sourceKey;
   }
   function currentNative(element: HTMLMediaElement) {
-    return currentMedia() && native.current === element && !(audioToken && deniedToken.current === audioToken);
+    return currentMedia() && native.current === element && !retiredVideos.current.has(element) && !(audioToken && deniedToken.current === audioToken);
   }
   function confirmPosition(position: number, rate?: number) {
     feedback.sample(position, rate);
@@ -576,12 +606,12 @@ export function PlayerProvider({
   }
   function playNative(element: HTMLMediaElement) {
     element.play().catch((reason: unknown) => {
-      if (native.current !== element || !currentMedia() || !playingRef.current) return;
+      if (!currentNative(element) || !playingRef.current) return;
       if (reason instanceof DOMException && reason.name === "AbortError") return;
       if (reason instanceof DOMException && reason.name === "NotAllowedError") {
         playIntent(false);
         setError("Нажмите «Воспроизвести», чтобы продолжить.");
-      } else if (!fallbackToAudioRange()) {
+      } else if (!fallbackToAudioRange() && !fallbackToNativeVideo(element)) {
         void sourceError();
       }
     });
@@ -1083,7 +1113,8 @@ export function PlayerProvider({
       if (currentNative(event.currentTarget)) void next(1, true);
     },
     onError(event: SyntheticEvent<HTMLMediaElement>) {
-      if (currentNative(event.currentTarget) && !fallbackToAudioRange()) void sourceError();
+      const element = event.currentTarget;
+      if (currentNative(element) && !fallbackToAudioRange() && !fallbackToNativeVideo(element)) void sourceError();
     },
   };
   async function toggle() {
@@ -1287,6 +1318,7 @@ export function PlayerProvider({
     attempt.paused();
     youtubeRestart.current = null;
     mediaKey.current = sourceKey;
+    setNativeVideo(previous => previous?.key === sourceKey ? previous : undefined);
     cancelledYoutubeStart.current = false;
     scrub.current = null;
     setDuration(0);
@@ -1361,7 +1393,7 @@ export function PlayerProvider({
       if (playingRef.current) playNative(native.current);
       else native.current.pause();
     }
-  }, [playing, sourceKey, audioUrl, m4aEnabled]);
+  }, [playing, sourceKey, streamedVideo, audioUrl, m4aEnabled]);
   useEffect(() => {
     if (native.current) native.current.volume = settings.volume;
   }, [settings.volume]);
@@ -1795,9 +1827,10 @@ export function PlayerProvider({
                     />
                   ) : source && presentationKind === "video" ? (
                     <video
-                      key={sourceKey}
+                      key={sourceKey + (streamedVideo ? ":stream" : ":native")}
                       ref={attachNative}
-                      src={source.streamUrl!}
+                      src={streamedVideo ? undefined : source.streamUrl! + (nativeVideo?.key === sourceKey && nativeVideo.position > 0
+                        ? `#t=${nativeVideo.position}` : "")}
                       playsInline
                       {...nativeEvents}
                       onClick={event => {
