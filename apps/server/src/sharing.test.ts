@@ -142,6 +142,24 @@ describe("media sharing", () => {
     const unsat = await asBob({ url: sharedUrl, headers: { range: `bytes=${source.audioBytes}-` } });
     expect(unsat.statusCode).toBe(416);
     expect(unsat.headers["content-range"]).toBe(`bytes */${source.audioBytes}`);
+    const retained = (await asBob({ method: "POST", url: preview(link) + "/save" })).json<{ id: string }>();
+    const playlist = await ctx.library.savePlaylist(ctx.otherUserId, {
+      title: "Video collection",
+      definition: { version: 1, sort: "source", rule: { type: "items", ids: [retained.id] } },
+    });
+    const published = await app.sharing.create(ctx.otherUserId, "playlist", playlist.id);
+    await ctx.db.user.create({ data: { id: "listener", login: "listener", passwordHash: "test" } });
+    const listener = { hibiki_session: await app.auth.createSession("listener") };
+    await app.sharing.updateLink(ctx.userId, link.id, { allowReshare: true });
+    const delegated = (await app.inject({ url: preview(published), cookies: listener })).json<SharedViewDto>();
+    const delegatedAudio = delegated.items[0].sources[0].audioStreamUrl!;
+    expect(delegatedAudio).toContain(preview(published) + "/items/" + retained.id + "/");
+    const chunk = await app.inject({ url: delegatedAudio, cookies: listener, headers: { range: "bytes=0-99" } });
+    expect(chunk.statusCode).toBe(206);
+    expect(chunk.rawPayload).toEqual(full.rawPayload.subarray(0, 100));
+    await app.sharing.updateLink(ctx.userId, link.id, { allowReshare: false });
+    expect((await app.inject({ method: "HEAD", url: delegatedAudio, cookies: listener })).statusCode).toBe(404);
+    expect((await asBob({ method: "HEAD", url: sharedUrl })).statusCode).toBe(200);
     await app.inject({ method: "DELETE", url: "/api/share-links/" + link.id, cookies: alice });
     expect((await asBob({ method: "HEAD", url: sharedUrl })).statusCode).toBe(404);
   });
