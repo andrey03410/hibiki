@@ -3,8 +3,9 @@ id: 16
 title: Производительность прослушивания и основных сценариев
 track: product
 stage: merged
-branch: codex/16-video-buffer
-pr: https://github.com/andrey03410/hibiki/pull/24
+branch: codex/16-media-startup
+pr: https://github.com/andrey03410/hibiki/pull/26
+video_pr: https://github.com/andrey03410/hibiki/pull/24
 tuning_pr: https://github.com/andrey03410/hibiki/pull/22
 initial_pr: https://github.com/andrey03410/hibiki/pull/18
 started: 2026-11-25
@@ -27,7 +28,9 @@ merged: 2026-11-25
 Первая реализация вышла в [PR №18](https://github.com/andrey03410/hibiki/pull/18).
 Во [второй итерации](https://github.com/andrey03410/hibiki/pull/22) учтены замеры
 на рабочем аккаунте и стабильность MCP при выкладке. Упреждающая загрузка
-оригинала в видеорежиме вынесена в [PR №24](https://github.com/andrey03410/hibiki/pull/24).
+оригинала в видеорежиме вышла в [PR №24](https://github.com/andrey03410/hibiki/pull/24).
+По результатам проверки изменены холодный старт видеоплеера и восстановление
+воспроизведения в WebKit. [PR №26](https://github.com/andrey03410/hibiki/pull/26)
 
 ## Стадии
 
