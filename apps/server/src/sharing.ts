@@ -189,7 +189,8 @@ class ShareLookup {
 
   private readonly proofs: Map<string, AuthorProof> | null;
 
-  constructor(readonly tx: Tx, private library: LibraryService, authorizations: AuthorProof[] | "cached" = []) {
+  constructor(readonly tx: Tx, private library: LibraryService, authorizations: AuthorProof[] | "cached" = [],
+    private readonly viewerId?: string) {
     this.proofs = authorizations === "cached" ? null : new Map(authorizations.map(proof => [proof.ownerId, proof]));
   }
 
@@ -311,9 +312,13 @@ class ShareLookup {
     return link.kind === "item" ? link.targetId === origin.id : (await this.members(link))?.has(origin.id) ?? false;
   }
 
-  async receivedOrigin(track: ReceivedTrack) {
+  async receivedOrigin(track: ReceivedTrack, playlistListenerId?: string) {
     const origin = await this.origin(track.originItemId);
     if (!origin || !shareable(origin, track.originOwnerId)) return;
+    if (origin.ownerId === playlistListenerId) {
+      const owner = await this.viewer(playlistListenerId);
+      return { origin, sharedBy: owner.login, canListenInPlaylist: true };
+    }
     const active = track.grants.filter(({ link }) =>
       linkStatus(link, this.now) === "active" && link.ownerId === track.originOwnerId);
     if (!active.length) return;
@@ -322,7 +327,7 @@ class ShareLookup {
     const matches = await Promise.all(active.map(async ({ link }) =>
       await this.includes(link, origin) ? link : null));
     if (matches.some(link => link !== null)) return {
-      origin, sharedBy, allowReshare: matches.some(link => link?.allowReshare),
+      origin, sharedBy, canListenInPlaylist: matches.some(link => link?.allowReshare),
     };
   }
 
@@ -346,9 +351,9 @@ class ShareLookup {
       for (const id of ids) this.accounts.set(id, Promise.resolve(byId.get(id) ?? null));
     }
     await Promise.all(received.map(async track => {
-      const match = await this.receivedOrigin(track);
+      const match = await this.receivedOrigin(track, this.viewerId);
       const id = track.recipientItemId;
-      positions.set(id, match?.allowReshare ? {
+      positions.set(id, match?.canListenInPlaylist ? {
         access: "delegated", id, origin: match.origin, sharedBy: match.sharedBy,
       } : { access: match ? "missingPermission" : "unavailable" });
     }));
@@ -439,7 +444,7 @@ export class ShareService {
 
   private async withViewer<T>(viewerId: string, run: (lookup: ShareLookup) => Promise<T>, proofs: AuthorProof[] = []) {
     return this.db.$transaction(async tx => {
-      const lookup = new ShareLookup(tx, this.library, proofs);
+      const lookup = new ShareLookup(tx, this.library, proofs, viewerId);
       await lookup.viewer(viewerId);
       return run(lookup);
     });
