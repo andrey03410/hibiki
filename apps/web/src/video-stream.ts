@@ -98,8 +98,11 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
   let fatal = false, lastAuthorized = 0, bulkRate = 0;
   let permission: AbortController | undefined;
   const waitForModule = import("mp4box");
-  // A pending import may reject after the user leaves; pump reports failures only for the active view.
-  void waitForModule.catch(() => {});
+  let parserUnavailable = false;
+  void waitForModule.catch(() => {
+    parserUnavailable = true;
+    if (transfer && !transfer.signal.aborted) fail();
+  });
   function fail(denied = false) {
     if (signal.aborted || fatal) return;
     fatal = true;
@@ -108,6 +111,7 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
   }
   function schedule() {
     if (signal.aborted || fatal || media.readyState === "closed" || element.paused && !pausedSeek) return;
+    if (parserUnavailable) { fail(); return; }
     if (file.shared && ready && !permission && Date.now() - lastAuthorized > 10000) {
       const request = permission = new AbortController();
       // Even a completed or slow range can keep playing buffered media after the grant changes.
@@ -163,44 +167,42 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
       });
     }));
   }
+  function createParser(createFile: typeof import("mp4box").createFile) {
+    const iso = createFile(true);
+    iso.onError = () => fail();
+    iso.onReady = movie => {
+      // Leave alternative tracks, subtitles and unfamiliar containers to the native player.
+      if (movie.isFragmented || movie.videoTracks.length !== 1 || movie.audioTracks.length > 1 ||
+          movie.tracks.length !== movie.videoTracks.length + movie.audioTracks.length) throw new Error("Unsupported tracks");
+      for (const track of movie.tracks) {
+        const mime = `${track.type}/mp4; codecs="${track.codec}"`;
+        if (!MediaSource.isTypeSupported(mime)) throw new Error("Unsupported video codec");
+        if (iso.getTrackSamplesInfo(track.id).some(sample => sample.size > 12 * MiB))
+          throw new Error("Video sample exceeds playback window");
+        const buffer = media.addSourceBuffer(mime);
+        tracks.set(track.id, { buffer, pending: [], spans: [] });
+        iso.setSegmentOptions(track.id, null, { nbSamples: 4, rapAlignement: false });
+      }
+      for (const init of iso.initializeSegmentation("per-track")) tracks.get(init.id)!.pending.push(init.buffer);
+      media.duration = movie.duration / movie.timescale || file.duration;
+      ready = true;
+      iso.start();
+    };
+    iso.onSegment = (id, _user, data, next) => {
+      const track = tracks.get(id)!;
+      track.pending.push(data);
+      const frame = iso.getTrackSamplesInfo(id)[next - 1];
+      held += data.byteLength;
+      track.spans.push({ end: (frame.cts + frame.duration) / frame.timescale, bytes: data.byteLength });
+      iso.releaseUsedSamples(id, next);
+    };
+    return iso;
+  }
   async function pump() {
-    const { createFile } = await waitForModule;
-    if (signal.aborted || element.paused && !pausedSeek || fatal) return;
-    if (!parser) {
-      parser = createFile(true);
-      const iso = parser;
-      iso.onError = () => fail();
-      iso.onReady = movie => {
-        // Leave alternative tracks, subtitles and unfamiliar containers to the native player.
-        if (movie.isFragmented || movie.videoTracks.length !== 1 || movie.audioTracks.length > 1 ||
-            movie.tracks.length !== movie.videoTracks.length + movie.audioTracks.length) throw new Error("Unsupported tracks");
-        for (const track of movie.tracks) {
-          const mime = `${track.type}/mp4; codecs="${track.codec}"`;
-          if (!MediaSource.isTypeSupported(mime)) throw new Error("Unsupported video codec");
-          if (iso.getTrackSamplesInfo(track.id).some(sample => sample.size > 12 * MiB))
-            throw new Error("Video sample exceeds playback window");
-          const buffer = media.addSourceBuffer(mime);
-          tracks.set(track.id, { buffer, pending: [], spans: [] });
-          iso.setSegmentOptions(track.id, null, { nbSamples: 4, rapAlignement: false });
-        }
-        for (const init of iso.initializeSegmentation("per-track")) tracks.get(init.id)!.pending.push(init.buffer);
-        media.duration = movie.duration / movie.timescale || file.duration;
-        ready = true;
-        iso.start();
-      };
-      iso.onSegment = (id, _user, data, next) => {
-        const track = tracks.get(id)!;
-        track.pending.push(data);
-        const frame = iso.getTrackSamplesInfo(id)[next - 1];
-        held += data.byteLength;
-        track.spans.push({ end: (frame.cts + frame.duration) / frame.timescale, bytes: data.byteLength });
-        iso.releaseUsedSamples(id, next);
-      };
-    }
     do {
       requested = false;
       if (signal.aborted || element.paused && !pausedSeek || fatal) return;
-      if (jump !== undefined) {
+      if (jump !== undefined && parser) {
         const position = jump;
         jump = undefined;
         at = parser.seek(position, true).offset;
@@ -241,6 +243,7 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
       const end = Math.min(file.size, at + block, seeking ? seekEnd! : Infinity);
       if (seekEnd !== undefined && end >= seekEnd) seekEnd = undefined;
       if (end <= at) {
+        if (!parser) throw new Error("Incomplete video index");
         parser.flush();
         await flush();
         if (!ready || !tracks.size) throw new Error("Incomplete video index");
@@ -256,6 +259,7 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
       const response = await fetch(file.url, { headers: { Range: `bytes=${at}-${end - 1}`,
         ...(paced && {"X-Hibiki-Video-Rate": String(bulkRate)}) }, cache: "no-store",
         signal: AbortSignal.any([signal, active.signal, headerTimeout.signal]), priority: paced ? "low" : "high" }).finally(() => clearTimeout(timer));
+      if (active.signal.aborted) return;
       if ([401,403,404].includes(response.status)) { fail(true); return; }
       if (response.status !== 206 || response.headers.get("Content-Range") !== `bytes ${at}-${end - 1}/${file.size}` ||
           Number(response.headers.get("Content-Length")) !== end - at) {
@@ -263,6 +267,12 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
         throw new Error("Invalid video range");
       }
       lastAuthorized = Date.now();
+      if (!parser) {
+        // The bounded prefix and the decoder module travel in parallel on a cold start.
+        const { createFile } = await waitForModule;
+        if (active.signal.aborted) return;
+        parser = createParser(createFile);
+      }
       const pageSize = !ready ? end - at : Math.min(seeking ? 32 * 1024 : ahead < 2 ? 128 * 1024 : 512 * 1024, videoRangeSize(file, ahead, held));
       await readVideoPages(response, at, end, pageSize, active.signal, async (page, position) => {
         if (!ready) {

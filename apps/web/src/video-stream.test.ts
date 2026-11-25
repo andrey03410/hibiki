@@ -20,6 +20,49 @@ it("opens a bounded video window only for an authorized original MP4 route", () 
   expect(videoFile({ ...source, bytes: 23 * 50e6 / 8 }, 23)).toBeUndefined();
 });
 
+it("opens a single prefix immediately on sourceopen and cancels it across pause, replay and teardown", async () => {
+  let media!: EventTarget;
+  class Source extends EventTarget {
+    readyState = "open";
+    constructor() { super(); media = this; }
+  }
+  vi.stubGlobal("MediaSource", Source);
+  vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:fixture");
+  const active: AbortSignal[] = [];
+  const read = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_, reject) => {
+    const signal = init.signal!;
+    active.push(signal);
+    signal.addEventListener("abort", () => reject(signal.reason), {once: true});
+  }));
+  vi.stubGlobal("fetch", read);
+  const video = Object.assign(new EventTarget(), {currentTime:0, readyState:0, paused:false, buffered:{length:0}, getAttribute:() => null});
+  const failed = vi.fn();
+  const close = attachVideoStream(video as unknown as HTMLVideoElement,
+    {url:"/files/first", size:100000, duration:12, prefix:12000}, failed);
+  try {
+    expect(read).not.toHaveBeenCalled();
+    media.dispatchEvent(new Event("sourceopen"));
+    video.dispatchEvent(new Event("play"));
+    video.dispatchEvent(new Event("timeupdate"));
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(new Headers(read.mock.calls[0]![1].headers).get("range")).toBe("bytes=0-11999");
+    video.paused = true;
+    video.dispatchEvent(new Event("pause"));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(active[0]!.aborted).toBe(true);
+    expect(read).toHaveBeenCalledTimes(1);
+    video.paused = false;
+    video.dispatchEvent(new Event("play"));
+    expect(read).toHaveBeenCalledTimes(2);
+    close();
+    expect(active[1]!.aborted).toBe(true);
+    video.dispatchEvent(new Event("play"));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(failed).not.toHaveBeenCalled();
+  } finally { close(); vi.restoreAllMocks(); vi.unstubAllGlobals(); }
+});
+
 it("feeds the first range page before the rest arrives and cancels when a seek changes the next byte", async () => {
   let response!: ReadableStreamDefaultController<Uint8Array>, cancelled = false;
   const stream = new Response(new ReadableStream({ start(c) { response = c; }, cancel() { cancelled = true; } }));
