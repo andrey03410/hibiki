@@ -4,7 +4,7 @@ title: Производительность прослушивания и осн
 track: product
 stage: build
 branch: codex/16-playback-performance
-pr:
+pr: https://github.com/andrey03410/hibiki/pull/18
 started: 2026-11-25
 merged:
 ---
