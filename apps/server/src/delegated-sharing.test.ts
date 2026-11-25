@@ -44,6 +44,40 @@ describe("delegated playlist listening", () => {
     return { author, curator, original, first, last, upstream, grant, borrowed, mix, link };
   }
 
+  it("lets the original owner listen to their own entry without enabling further sharing", async () => {
+    const { author, curator, original, first, last, grant, borrowed, link } = await mixed();
+    const url = token(link);
+    const saved = await shares.save(author, url);
+    const full = [first.id, borrowed.id, last.id];
+    const publicPositions = [first.id, null, last.id];
+    const due = new Date(Date.now() + 5000);
+    await ctx.library.refreshDuePlaylistCounts(due);
+    await ctx.library.refreshDuePlaylistCounts(due);
+
+    const ownerView = await shares.open(author, url);
+    expect(ownerView.positions).toEqual(full);
+    expect((await shares.openSaved(author, saved.id)).positions).toEqual(full);
+    expect(await shares.listSaved(author)).toMatchObject([{ trackCount: 3, totalCount: 3 }]);
+    expect((await shares.open(listener, url)).positions).toEqual(publicPositions);
+    expect(await shares.get(curator, link.id)).toMatchObject({ trackCount: 2, missingPermissionCount: 1 });
+
+    const key = ownerView.items[1].sources[0].id;
+    const ref = { kind: "link" as const, token: url, itemId: borrowed.id };
+    const savedRef = { kind: "playlist" as const, id: saved.id, itemId: borrowed.id };
+    await shares.revoke(author, grant.id);
+    for (const address of [ref, savedRef]) {
+      expect(await shares.file(author, address, key)).toMatchObject({ mime: "audio/wav" });
+      expect(await shares.artworkOrigin(author, address)).toEqual({ ownerId: author, itemId: original.id });
+    }
+    await expect(shares.file(listener, ref, key)).rejects.toMatchObject({ status: 404 });
+    await expect(shares.artworkOrigin(listener, ref)).rejects.toMatchObject({ status: 404 });
+    await ctx.db.item.delete({ where: { id: original.id } });
+    expect((await shares.open(author, url)).positions).toEqual(publicPositions);
+    await expect(shares.file(author, ref, key)).rejects.toMatchObject({ status: 404 });
+    await shares.revoke(curator, link.id);
+    await expect(shares.openSaved(author, saved.id)).rejects.toMatchObject({ status: 404 });
+  });
+
   it("keeps closed slots anonymous and grants only live listening through either playlist address", async () => {
     const { author, curator, original, first, last, grant, borrowed, mix, link } = await mixed();
     const own = [first.id, null, last.id];
