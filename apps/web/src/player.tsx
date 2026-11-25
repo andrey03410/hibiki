@@ -40,7 +40,7 @@ import { api, formatDuration, mediaWord } from "./api.ts";
 import { ItemArtwork } from "./ItemArtwork.tsx";
 import { fetchItems } from "./library-pages";
 import { completeLibraryOrder, LibraryQueueLoad, QueueCatalog, QueueIntents } from "./queue-catalog";
-import { CompactPlaybackQueue, PlaybackSeekBar, PlaybackVolume, type BufferedRanges } from "./PlaybackControls";
+import { CompactPlaybackQueue, QueueRows, playbackBuffer, PlaybackSeekBar, PlaybackVolume, type BufferedRanges } from "./PlaybackControls";
 import { AudioDelivery, ownedAudioFile } from "./audio-delivery";
 import { audioRelayReady, listenForAudioRanges, subscribeAudioRelay } from "./audio-relay";
 import { PlaybackFeedback } from "./playback-feedback";
@@ -69,8 +69,9 @@ import {
   itemActivation,
   startPlaybackQueue,
   togglePlaybackShuffle,
-  playbackSettingsSignature,
-  restoreCachedPlayback,
+  PlaybackCache,
+  PlayerCards,
+  playbackSettingsPatch,
   nativePlaybackReading,
   youtubePlaybackReading,
   prepareYoutubePlayback,
@@ -110,6 +111,22 @@ type StartOptions = {
 type SharedStartOptions = Pick<StartOptions, "mode" | "isCurrent" | "openPlayer"> & { activate?: boolean };
 const PlayerContext = createContext<Controller | null>(null);
 export const usePlayer = () => useContext(PlayerContext)!;
+type PlayerCommands = Pick<Controller, "start" | "activateItem" | "playShared" | "sharedId" | "toggle" | "watchCurrent" | "enqueue" | "playNext">;
+const CommandsContext = createContext<PlayerCommands | null>(null);
+const CardsContext = createContext<PlayerCards | null>(null);
+export const usePlayerCommands = () => useContext(CommandsContext)!;
+export function usePlayerCard(id: string) {
+  const store = useContext(CardsContext)!;
+  return useSyncExternalStore(store.subscribe, () => store.read(id));
+}
+export function useHasPlayer() {
+  const store = useContext(CardsContext)!;
+  return useSyncExternalStore(store.subscribe, store.hasCurrent);
+}
+export function useQueueEditable() {
+  const store = useContext(CardsContext)!;
+  return useSyncExternalStore(store.subscribe, store.queueEditable);
+}
 
 declare global {
   interface Window {
@@ -312,9 +329,10 @@ export function PlayerProvider({
   const { key: routeKey } = useLocation();
   const onPlayerScreen = !!useMatch("/player");
   const [catalog] = useState(() => new QueueCatalog(fetchItems, ids => fetchItems(ids, true)));
-  useSyncExternalStore(catalog.subscribe, catalog.snapshot);
+  const catalogVersion = useSyncExternalStore(catalog.subscribe, catalog.snapshot);
   const itemsById = catalog.rows;
   const [intent] = useState(() => new QueueIntents());
+  const firstSound = useRef<(() => void) | undefined>(undefined);
   const [libraryOrder] = useState(() => new LibraryQueueLoad());
   const orderStatus = useSyncExternalStore(libraryOrder.subscribe, libraryOrder.snapshot);
   const queueEditable = orderStatus === "complete";
@@ -325,16 +343,13 @@ export function PlayerProvider({
   const [selectionFailure, setSelectionFailure] = useState<{ token: number; message: string; retry: () => void }>();
   const history = useListeningAttempt(userId);
   const [attempt] = useState(() => createPlaybackAttempt(history));
-  const serverSignature = useRef<string | undefined>(undefined);
-  const storageKey = `hibiki.player.${userId}`;
-  const [settings, setSettings] = useState<PlaybackSettings>(() => {
-    let cached = null;
-    try {
-      cached = JSON.parse(localStorage.getItem(storageKey) || "null");
-    } catch {}
-    serverSignature.current = playbackSettingsSignature(restorePlayback(initialSettings ?? {}));
-    return restoreCachedPlayback(initialSettings, cached);
-  });
+  const [cards] = useState(() => new PlayerCards());
+  const [initialState] = useState(() => restorePlayback(initialSettings ?? {}));
+  const savedSettings = useRef(initialState);
+  const [cache] = useState(() => new PlaybackCache({
+    getItem: key => localStorage.getItem(key), setItem: (key, value) => localStorage.setItem(key, value),
+  }, `hibiki.player.${userId}`, initialState));
+  const [settings, setSettings] = useState(() => cache.restore(initialSettings));
   const [playing, setPlaying] = useState(false),
     [duration, setDuration] = useState(0),
     [failedSources, setFailedSources] = useState<ReadonlySet<string>>(() => new Set()),
@@ -388,7 +403,7 @@ export function PlayerProvider({
   const source = current ? playbackSourceForAttempt(
     current,
     failedSources,
-    previousSource?.itemId === current.id && previousSource.sourceId
+    playing && previousSource?.itemId === current.id && previousSource.sourceId
       ? { sourceId: previousSource.sourceId, preferredSourceId: previousSource.preferredSourceId }
       : undefined,
     settings.mode,
@@ -408,8 +423,10 @@ export function PlayerProvider({
   const [audioReplay, setAudioReplay] = useState(0);
   const [directAudioKey, setDirectAudioKey] = useState("");
   const completedAudio = useRef(false);
+  const deniedToken = useRef<string | undefined>(undefined);
+  const coverage = useSyncExternalStore(delivery.subscribe, delivery.snapshot);
   const file = useMemo(() => presentationKind === "audio" ? ownedAudioFile(source, current?.duration) : undefined,
-    [presentationKind, source?.id, source?.streamUrl, source?.shared, source?.bytes, source?.mime, current?.duration]);
+    [presentationKind, source?.id, source?.streamUrl, source?.shared, source?.bytes, source?.mime, source?.playbackHints?.audioStart, source?.playbackHints?.tailStart, current?.duration]);
   const relayReady = useSyncExternalStore(subscribeAudioRelay, audioRelayReady);
   const relayKey = useMemo(() => file ? crypto.randomUUID?.() : undefined,
     [delivery, sourceKey, file?.url, file?.size, audioReplay]);
@@ -421,7 +438,25 @@ export function PlayerProvider({
   useLayoutEffect(() => () => delivery.clear(), [delivery]);
   useLayoutEffect(() => listenForAudioRanges(delivery), [delivery, audioToken]);
   useLayoutEffect(() => {
-    delivery.select(audioToken ? file : undefined, audioToken ?? "");
+    delivery.select(audioToken ? file : undefined, audioToken ?? "", reason => {
+      const element = native.current;
+      seekOnLoad.current = readPosition() ?? live.current.position;
+      if (reason === "denied") {
+        deniedToken.current = audioToken;
+        finishAttempt("error");
+        playIntent(false);
+        element?.pause();
+        element?.removeAttribute("src");
+        element?.load();
+        completedAudio.current = true;
+        setError("Доступ к записи закрыт.");
+      } else if (reason === "unsupported" && source) {
+        setFailedSources(failed => new Set([...failed, source.id]));
+        setError("Звуковая дорожка недоступна. Открываем исходный файл.");
+      } else if (audioToken) {
+        setDirectAudioKey(audioToken);
+      }
+    });
     completedAudio.current = false;
   }, [delivery, audioToken, sourceKey]);
   useLayoutEffect(() => {
@@ -430,16 +465,10 @@ export function PlayerProvider({
   const mediaKey = useRef(sourceKey);
   const feedback = useMemo(() => new PlaybackFeedback(), [sourceKey]);
   const phase = useSyncExternalStore(feedback.subscribe, feedback.snapshot);
+  useEffect(() => { if (phase === "playing") firstSound.current?.(); }, [phase, sourceKey]);
   const loadingLabel = feedback.label;
   const [buffer, setBuffer] = useState<{source: PlaybackFeedback; ranges: BufferedRanges}>();
-  const reserve = buffer?.source === feedback && buffer.ranges.some(([start, end]) =>
-    start <= settings.position && end >= settings.position &&
-    (end - settings.position >= 5 || duration > 0 && end >= duration - 0.05));
-  const canPrepareNext = !!source && presentationKind === "audio" && playing && phase === "playing" && reserve;
-  useEffect(() => {
-    if (canPrepareNext) delivery.suspendPreparation();
-    else void delivery.prepare();
-  }, [delivery, settings.queue, settings.mode, settings.repeat, revision]);
+  const canPrepareNext = !!audioToken && playing && phase === "playing" && !!coverage?.complete;
   useEffect(() => {
     let active = true;
     // Keep the prepared prefix across the brief ended → next selection.
@@ -489,7 +518,7 @@ export function PlayerProvider({
     setVolume(live.current.volume ? 0 : live.current.lastNonzeroVolume ?? 0.8);
   }
   function playIntent(value: boolean) {
-    if (!value) feedback.pause();
+    if (!value) { feedback.pause(); delivery.paused(); }
     playingRef.current = value;
     setPlaying(value);
   }
@@ -571,7 +600,7 @@ export function PlayerProvider({
     setOfferAudioSkip(false);
     playIntent(shouldPlay);
     if (sameSource && file && relayReady) {
-      // A fresh attempt must revalidate even when it reuses this file's bytes.
+      // Give the new native element its own playback token.
       feedback.reset();
       if (shouldPlay) feedback.wait();
       setAudioReplay(value => value + 1);
@@ -618,7 +647,7 @@ export function PlayerProvider({
       toggle();
       return;
     }
-    const guarded = catalog.rechecksPlayback(id);
+    const guarded = catalog.rechecksPlayback(id) && !preparedSource(id, state.mode);
     const item = guarded ? await reloadPlaybackEntry(id, token) : itemsById.get(id);
     if (token !== intent.navigation || !item || live.current.queue !== state.queue) return;
     if (queueEntryUnavailableReason(item, state.mode)) {
@@ -637,7 +666,7 @@ export function PlayerProvider({
     catalog.put(entries);
     let selected: ItemDto | undefined = entries[index];
     if (!selected) return;
-    if (selected.shared && !catalog.isShared(selected.id)) {
+    if (selected.shared && !catalog.isShared(selected.id) && !preparedSource(selected.id, options.fromLibrary ? "audio" : options.mode ?? "original")) {
       try {
         selected = await catalog.refreshPlayback(selected.id, isCurrent);
         if (!selected || !isCurrent()) return;
@@ -697,14 +726,27 @@ export function PlayerProvider({
     const opensPlayer = mode === "original" &&
       (!!playlistId || options.openPlayer || entry.kind === "video" || playbackKind(entry, chosenSource, mode) === "video");
     intent.advance(); // Ignore old automatic navigation once the new queue takes over.
+    firstSound.current?.();
+    firstSound.current = undefined;
     libraryOrder.cancel();
     finishAttempt("manual");
     failed.current.clear();
     setRemoval(undefined);
     setShowSavePlaylist(false);
     playEntry({...live.current, ...newOrder, mode, shuffle}, playable, playable === state.queueIndex ? "manual" : "advance");
-    if (!complete && loadQueueIds)
-      libraryOrder.start(loadQueueIds, ids => patch(completeLibraryOrder(live.current, ids)));
+    if (!complete && loadQueueIds) {
+      const gate = new AbortController();
+      const release = () => gate.abort();
+      const timer = window.setTimeout(release, 300);
+      firstSound.current = release;
+      libraryOrder.start(async () => {
+        if (!gate.signal.aborted) await new Promise<void>(resolve => gate.signal.addEventListener("abort", () => resolve(), {once:true}));
+        clearTimeout(timer);
+        if (firstSound.current !== release) return [];
+        // A retry after a network error reuses this already-open gate.
+        return loadQueueIds();
+      }, ids => patch(completeLibraryOrder(live.current, ids)));
+    }
     if (opensPlayer && !onPlayerScreen) openAndPlay(entry.id);
     if (playable !== state.queueIndex) showSkipped(state, state.queueIndex, playable);
   }
@@ -735,8 +777,21 @@ export function PlayerProvider({
       if (active()) onError((e as Error).message);
     }
   }
+  function preparedSource(id: string | undefined, mode: PlaybackMode) {
+    const item = id && itemsById.get(id);
+    if (!item || !audioRelayReady()) return false;
+    const source = playbackSources(item, mode)[0];
+    return playbackKind(item, source, mode) === "audio" && delivery.isPrepared(ownedAudioFile(source, item.duration));
+  }
   async function advanceTarget(direction: 1 | -1, ended: boolean, retry: () => void, manual = false) {
     const token = manual ? intent.command() : intent.advance();
+    const state = live.current;
+    const nextIndex = state.queueIndex + direction;
+    const index = state.repeat === "all" && !libraryOrder.tail
+      ? (nextIndex + state.queue.length) % state.queue.length : nextIndex;
+    const id = state.queue[index];
+    if (!(ended && state.repeat === "one") && id && !failed.current.has(id) && preparedSource(id, state.mode))
+      return {index, state};
     try {
       return await catalog.nextInQueue(() => live.current, direction, ended, failed.current, () => token === intent.navigation, () => libraryOrder.tail);
     } catch (e) {
@@ -784,7 +839,7 @@ export function PlayerProvider({
       showSkipped(state, (state.queueIndex + 1) % state.queue.length, index);
   }
   async function sourceError() {
-    if (!currentMedia()) return;
+    if (!currentMedia() || (audioToken && deniedToken.current === audioToken)) return;
     if (audioToken && native.current?.error) {
       seekOnLoad.current = readPosition() ?? live.current.position;
       setDirectAudioKey(audioToken);
@@ -919,7 +974,7 @@ export function PlayerProvider({
     onLoadedMetadata(event: SyntheticEvent<HTMLMediaElement>) {
       if (!currentNative(event.currentTarget)) return;
       const element = event.currentTarget;
-      element.currentTime = seekOnLoad.current;
+      if (seekOnLoad.current > 0) element.currentTime = seekOnLoad.current;
       nativePositionReady.current.add(element);
       updateNativeRanges(event);
       element.volume = live.current.volume;
@@ -932,6 +987,7 @@ export function PlayerProvider({
       if (nativeRestart.current?.element === element && (element.seeking || element.readyState < 3)) return;
       nativeRestart.current = null;
       nativeStarted.current.add(element);
+      delivery.playing();
       feedback.play(element.currentTime, element.playbackRate);
       if (scrub.current?.target === undefined) attempt.playing(...nativePlaybackReading(element));
       playIntent(true);
@@ -990,7 +1046,7 @@ export function PlayerProvider({
   async function toggle() {
     const token = intent.command();
     if (!current || waitingForVideo) return;
-    if (!playingRef.current && catalog.rechecksPlayback(current.id)) {
+    if (!playingRef.current && catalog.rechecksPlayback(current.id) && !(source?.shared && file && audioToken)) {
       const item = await reloadPlaybackEntry(current.id, token);
       if (!item || token !== intent.navigation) return;
       if (!playbackSources(item, live.current.mode).length) {
@@ -1167,6 +1223,8 @@ export function PlayerProvider({
   }
   function clearQueue() {
     intent.command();
+    firstSound.current?.();
+    firstSound.current = undefined;
     libraryOrder.cancel();
     finishAttempt("manual");
     attempt.select(null);
@@ -1207,14 +1265,14 @@ export function PlayerProvider({
     if (position !== live.current.position) patch({ position });
     playIntent(false);
   }, [onPlayerScreen, waitingForVideo, sourceKey]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     catalog.invalidate();
   }, [catalog, revision]);
-  useEffect(() => () => {intent.command(); libraryOrder.cancel();}, [libraryOrder]);
+  useEffect(() => () => {firstSound.current?.(); firstSound.current = undefined; intent.command(); libraryOrder.cancel();}, [libraryOrder]);
   useEffect(() => {
     let active = true;
     const {queue, queueIndex} = settings;
-    const visible = onPlayerScreen || queueOpen ? queue : queue.slice(Math.max(0, queueIndex - 1), queueIndex + 3);
+    const visible = queue.length <= 200 && (onPlayerScreen || queueOpen) ? queue : queue.slice(Math.max(0, queueIndex - 1), queueIndex + 3);
     // Fetch the current entry first, including on reload in the middle of a long queue.
     const id = queue[queueIndex];
     setQueueLoadError("");
@@ -1223,6 +1281,9 @@ export function PlayerProvider({
       .catch(e => {if (active) setQueueLoadError(e.message);});
     return () => {active = false;};
   }, [catalog, revision, settings.queue, settings.queueIndex, onPlayerScreen, queueOpen, queueRetry]);
+  const loadVisible = useCallback((ids: string[]) => {
+    void catalog.ensure(ids).catch(e => setQueueLoadError(e.message));
+  }, [catalog, revision, queueRetry]);
   const pendingEntry = useRef<string | undefined>(undefined);
   useEffect(() => {
     const state = live.current;
@@ -1270,7 +1331,7 @@ export function PlayerProvider({
       finishAttempt("interrupted");
       const restored = restorePlayback(initialSettings ?? {});
       playOnPlayerOpen.current = undefined;
-      serverSignature.current = playbackSettingsSignature(restored);
+      savedSettings.current = restored;
       resetSources();
       patch(restored);
       playIntent(false);
@@ -1285,7 +1346,7 @@ export function PlayerProvider({
   // Partial library results and access-scoped playback stay in this tab.
   // Keep the last complete personal queue when saving preferences.
   const persistable = useRef(settings);
-  const sharedQueue = settings.queue.some(catalog.isShared);
+  const sharedQueue = useMemo(() => settings.queue.some(catalog.isShared), [catalog, settings.queue]);
   useLayoutEffect(() => {
     if (!libraryOrder.tail && !sharedQueue) {
       persistable.current = settings;
@@ -1295,73 +1356,55 @@ export function PlayerProvider({
         persistable.current = { ...persistable.current, volume, lastNonzeroVolume };
     }
   }, [settings, orderStatus, libraryOrder, sharedQueue]);
-  function cachePlayback() {
-    try {
-      localStorage.setItem(storageKey, JSON.stringify({
-        ...persistable.current, serverSignature: serverSignature.current,
-      }));
-    } catch {}
-  }
-  useEffect(cachePlayback, [settings, storageKey]);
   useEffect(() => {
-    const save = () => {
+    cache.save(persistable.current, savedSettings.current, Date.now(), !playing);
+  }, [settings, playing, cache]);
+  useEffect(() => {
+    let mounted = true;
+    let sending = false;
+    const save = async () => {
+      if (sending || savingSuspended.current) return;
+      const submitted = persistable.current;
+      const baseline = savedSettings.current;
+      const delta = playbackSettingsPatch(submitted, baseline);
+      if (!Object.keys(delta).length) return;
+      sending = true;
+      try {
+        const saved = await api<Partial<PlaybackSettings>>("/settings?patch=1", "PUT", delta);
+        if (!mounted || savingSuspended.current || savedSettings.current !== baseline) return;
+        savedSettings.current = {...submitted, ...saved};
+        const state = live.current;
+        const queuePlaylistIds = reconcileQueuePlaylistIds(state.queuePlaylistIds, submitted.queuePlaylistIds, saved.queuePlaylistIds);
+        if (queuePlaylistIds !== state.queuePlaylistIds) {
+          patch({ queuePlaylistIds });
+          const id = state.queue[state.queueIndex];
+          if (id) attempt.updatePlaylistId(id, queuePlaylistIds?.[id]);
+        }
+        setSaveError("");
+      } catch {
+        if (mounted && !savingSuspended.current) setSaveError("Не удалось сохранить настройки. Локальная копия сохранена.");
+      } finally { sending = false; }
+    };
+    const flush = () => {
       if (savingSuspended.current) return;
-      fetch("/api/settings", {
-        method: "PUT",
-        credentials: "same-origin",
+      cache.save(persistable.current, savedSettings.current, Date.now(), true);
+      const delta = playbackSettingsPatch(persistable.current, savedSettings.current);
+      if (!Object.keys(delta).length) return;
+      void fetch("/api/settings?patch=1", {
+        method: "PUT", credentials: "same-origin", keepalive: true,
         headers: { "Content-Type": "application/json", "X-Hibiki-Workspace": userId },
-        body: JSON.stringify(persistable.current),
-        keepalive: true,
+        body: JSON.stringify(delta),
       }).catch(() => {});
     };
-    window.addEventListener("pagehide", save);
-    return () => window.removeEventListener("pagehide", save);
-  }, [userId]);
-  useEffect(() => {
-    let last = "";
-    let latestRequest = 0;
-    let mounted = true;
-    const save = () => {
-      if (savingSuspended.current) return;
-      const submitted = persistable.current;
-      const serialized = JSON.stringify(submitted);
-      if (serialized === last) return;
-      last = serialized;
-      const request = ++latestRequest;
-      const initial = lastInitialSettings.current;
-      const responseIsCurrent = () => mounted && !savingSuspended.current &&
-        request === latestRequest && initial === lastInitialSettings.current;
-      api<Partial<PlaybackSettings>>("/settings", "PUT", submitted)
-        .then((saved) => {
-          if (!responseIsCurrent()) return;
-          serverSignature.current = playbackSettingsSignature(restorePlayback(saved));
-          const current = live.current;
-          const queuePlaylistIds = reconcileQueuePlaylistIds(
-            current.queuePlaylistIds, submitted.queuePlaylistIds, saved.queuePlaylistIds,
-          );
-          if (queuePlaylistIds !== current.queuePlaylistIds) {
-            patch({ queuePlaylistIds });
-            const itemId = current.queue[current.queueIndex];
-            if (itemId) attempt.updatePlaylistId(itemId, queuePlaylistIds?.[itemId]);
-          }
-          cachePlayback();
-          setSaveError("");
-        })
-        .catch(() => {
-          if (!responseIsCurrent()) return;
-          last = "";
-          setSaveError(
-            "Не удалось сохранить настройки. Локальная копия сохранена.",
-          );
-        });
-    };
     const timer = setInterval(save, 5000);
+    window.addEventListener("pagehide", flush);
     return () => {
-      clearInterval(timer);
       mounted = false;
-      save();
+      clearInterval(timer);
+      window.removeEventListener("pagehide", flush);
+      void save();
     };
-  }, [userId]);
+  }, [cache, userId]);
   useEffect(() => {
     const mediaSession = navigator.mediaSession;
     if (!mediaSession || !current) return;
@@ -1504,7 +1547,7 @@ export function PlayerProvider({
     position: settings.position,
     duration: total,
     moving: playing && phase === "playing",
-    buffered: buffer?.source === feedback ? buffer.ranges : undefined,
+    buffered: playbackBuffer(buffer?.source === feedback ? buffer.ranges : [], audioToken ? coverage : undefined, total),
     clock,
     onSeek: seekFromSlider,
     onScrubStart: () => { scrub.current ??= {}; },
@@ -1515,7 +1558,13 @@ export function PlayerProvider({
   const audioFallback = current?.kind === "video" && settings.mode === "original" &&
     source && presentationKind === "audio";
   const sourceLabel = source?.shared ? "Источник по ссылке" : isYoutube ? "YouTube" : source ? "Локальный файл" : "Источник недоступен";
-  function queueRow(id: string, index: number, editable = false) {
+  const rowCommands = useRef({switchTo, watchQueueVideo, reorder, removeFromQueue});
+  useLayoutEffect(() => { rowCommands.current = {switchTo, watchQueueVideo, reorder, removeFromQueue}; });
+  const selectRow = useCallback((index: number) => { void rowCommands.current.switchTo(index); }, []);
+  const queueSettings = useMemo(() => ({queue: settings.queue, queueIndex: settings.queueIndex, mode: settings.mode}),
+    [settings.queue, settings.queueIndex, settings.mode]);
+  const queueRow = useCallback((id: string, index: number) => {
+    const editable = queueEditable && index > settings.queueIndex;
     const item = itemsById.get(id);
     const title = item?.title ?? (catalog.deleted(id) ? "Запись удалена" : "Загружаем запись…");
     const artworkSource = item?.sources.find(candidate => candidate.thumbnail);
@@ -1540,7 +1589,7 @@ export function PlayerProvider({
         onDrop={editable ? (event) => {
           event.preventDefault();
           const dragging = draggingId.current;
-          if (dragging) reorder(dragging, live.current.queue.indexOf(id));
+          if (dragging) rowCommands.current.reorder(dragging, live.current.queue.indexOf(id));
           draggingId.current = undefined;
           setDragOver(undefined);
         } : undefined}
@@ -1558,7 +1607,7 @@ export function PlayerProvider({
             onDragEnd={() => { draggingId.current = undefined; setDragOver(undefined); }}
           ><GripVertical size={16} /></span>
         )}
-        <button type="button" className={`watch-queue-row ${active ? "active" : ""}`} aria-current={active ? "true" : undefined} aria-disabled={!!unavailableReason && !catalog.rechecksPlayback(id)} onClick={() => switchTo(index)}>
+        <button type="button" className={`watch-queue-row ${active ? "active" : ""}`} aria-current={active ? "true" : undefined} aria-disabled={!!unavailableReason && !catalog.rechecksPlayback(id)} onClick={() => selectRow(index)}>
           <span className="watch-queue-number">{active && playing ? <span className="equalizer" aria-hidden="true"><i /><i /><i /></span> : index + 1}</span>
           <span className={`watch-queue-art art-${title.length % 6}`}>
             <ItemArtwork source={artworkSource} kind={item?.kind ?? "audio"} />
@@ -1570,20 +1619,20 @@ export function PlayerProvider({
           </span>
         </button>
         {canWatch && (
-          <button className="icon-button queue-watch-video" aria-label={`Смотреть ${title}`} title="Смотреть" onClick={() => watchQueueVideo(index)}>
+          <button className="icon-button queue-watch-video" aria-label={`Смотреть ${title}`} title="Смотреть" onClick={() => rowCommands.current.watchQueueVideo(index)}>
             <Video size={16} />
           </button>
         )}
         {editable && (
           <div className="queue-entry-actions">
-            <button className="icon-button" aria-disabled={!canMoveUp} aria-label={`Переместить выше: ${title}`} title="Переместить выше" onClick={() => reorder(id, index - 1)}><ArrowUp size={14} /></button>
-            <button className="icon-button" aria-disabled={!canMoveDown} aria-label={`Переместить ниже: ${title}`} title="Переместить ниже" onClick={() => reorder(id, index + 1)}><ArrowDown size={14} /></button>
-            <button className="icon-button" aria-label={`Удалить из очереди: ${title}`} title="Удалить из очереди" onClick={() => removeFromQueue(id)}><X size={14} /></button>
+            <button className="icon-button" aria-disabled={!canMoveUp} aria-label={`Переместить выше: ${title}`} title="Переместить выше" onClick={() => rowCommands.current.reorder(id, index - 1)}><ArrowUp size={14} /></button>
+            <button className="icon-button" aria-disabled={!canMoveDown} aria-label={`Переместить ниже: ${title}`} title="Переместить ниже" onClick={() => rowCommands.current.reorder(id, index + 1)}><ArrowDown size={14} /></button>
+            <button className="icon-button" aria-label={`Удалить из очереди: ${title}`} title="Удалить из очереди" onClick={() => rowCommands.current.removeFromQueue(id)}><X size={14} /></button>
           </div>
         )}
       </div>
     );
-  }
+  }, [catalogVersion, queueSettings, queueEditable, playing, dragOver, error, failedSources]);
   const failedSelection = selectionFailure?.token === intent.selection ? selectionFailure : undefined;
   const queueMessage = failedSelection?.message ?? (orderStatus === "error" ? "Не удалось загрузить всю очередь." : queueLoadError);
   const queueRetryNotice = queueMessage && (
@@ -1782,13 +1831,13 @@ export function PlayerProvider({
                 {settings.queueIndex > 0 && (
                   <details className="queue-past">
                     <summary>Предыдущие <span>{settings.queueIndex}</span></summary>
-                    {settings.queue.slice(0, settings.queueIndex).map((id, index) => queueRow(id, index))}
+                    <QueueRows queue={settings.queue} start={0} end={settings.queueIndex} row={queueRow} onVisible={loadVisible} />
                   </details>
                 )}
                 <h3 className="queue-section-heading">Сейчас</h3>
-                {queueRow(current.id, settings.queueIndex)}
+                <QueueRows queue={settings.queue} start={settings.queueIndex} end={settings.queueIndex + 1} row={queueRow} />
                 <h3 className="queue-section-heading">Далее</h3>
-                {settings.queue.slice(settings.queueIndex + 1).map((id, index) => queueRow(id, index + settings.queueIndex + 1, queueEditable))}
+                <QueueRows queue={settings.queue} start={settings.queueIndex + 1} end={settings.queue.length} row={queueRow} onVisible={loadVisible} />
                 {queueEditable && settings.queueIndex === settings.queue.length - 1 && <p className="queue-empty">Дальше записей нет.</p>}
               </div>
               {removal && (
@@ -1876,7 +1925,7 @@ export function PlayerProvider({
           <div className="mini-player-side">
             <span>{formatDuration(settings.position)} / {formatDuration(total)}</span>
             <PlaybackVolume compact volume={settings.volume} onMute={toggleMute} onVolume={setVolume} />
-            <CompactPlaybackQueue incomplete={!queueEditable} key={routeKey} onOpenChange={setQueueOpen} deleted={catalog.deleted} canRecheck={catalog.rechecksPlayback} settings={settings} itemsById={itemsById} failedIds={failed.current} onSelect={switchTo} />
+            <CompactPlaybackQueue incomplete={!queueEditable} key={routeKey} onOpenChange={setQueueOpen} deleted={catalog.deleted} canRecheck={catalog.rechecksPlayback} settings={queueSettings} version={catalogVersion} onVisible={loadVisible} itemsById={itemsById} failedIds={failed.current} onSelect={selectRow} />
           </div>
         </section>
       )}
@@ -1886,8 +1935,7 @@ export function PlayerProvider({
   // that affect their buttons and cover, while commands use the latest state.
   const commands = useRef({start, activateItem, playShared, toggle, watchCurrent, addToQueue});
   useLayoutEffect(() => {commands.current = {start, activateItem, playShared, toggle, watchCurrent, addToQueue};});
-  const controller = useMemo<Controller>(() => ({
-    current, playing, waitingForVideo, loadingLabel, mode: settings.mode, queueEditable,
+  const stableCommands = useMemo<PlayerCommands>(() => ({
     start: (...args) => commands.current.start(...args),
     activateItem: (...args) => commands.current.activateItem(...args),
     playShared: (...args) => commands.current.playShared(...args),
@@ -1896,13 +1944,18 @@ export function PlayerProvider({
     watchCurrent: () => commands.current.watchCurrent(),
     enqueue: (item, playlistId) => commands.current.addToQueue(item, "last", playlistId),
     playNext: (item, playlistId) => commands.current.addToQueue(item, "next", playlistId),
-  }), [current, playing, waitingForVideo, loadingLabel, settings.mode, queueEditable]);
+  }), [catalog]);
+  const controller = useMemo<Controller>(() => ({ ...stableCommands, current, playing, waitingForVideo, loadingLabel, mode: settings.mode, queueEditable }),
+    [stableCommands, current, playing, waitingForVideo, loadingLabel, settings.mode, queueEditable]);
+  useLayoutEffect(() => {
+    cards.update(current?.id, {active: !!current, playing, waitingForVideo, loadingLabel, mode: settings.mode}, queueEditable);
+  }, [cards, current?.id, playing, waitingForVideo, loadingLabel, settings.mode, queueEditable]);
   return (
-    <PlayerContext.Provider value={controller}>
+    <CardsContext.Provider value={cards}><CommandsContext.Provider value={stableCommands}><PlayerContext.Provider value={controller}>
       {children(player, miniPlayer)}
       {source && presentationKind === "audio" && (
         <audio key={audioToken ?? sourceKey} ref={attachNative} src={audioUrl} preload={playing ? "auto" : "none"} {...nativeEvents} />
       )}
-    </PlayerContext.Provider>
+    </PlayerContext.Provider></CommandsContext.Provider></CardsContext.Provider>
   );
 }

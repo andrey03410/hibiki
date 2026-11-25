@@ -1,9 +1,7 @@
-import { constants } from "node:fs";
-import { open } from "node:fs/promises";
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { artworkQuery, ArtworkService } from "./artwork";
-import { invariant } from "./errors";
+import { sendMediaFile } from "./media-response";
 import { canRunHeavy } from "./kaname";
 import { storagePath } from "./media";
 import type { ShareService, SharedMediaRef } from "./sharing";
@@ -28,15 +26,6 @@ function sharedResponse(reply: FastifyReply) {
   return reply.header("cache-control", "private, no-store")
     .header("vary", "Cookie, Authorization")
     .header("x-content-type-options", "nosniff");
-}
-
-function byteRange(header: string, size: number) {
-  const match = /^bytes=(\d*)-(\d*)$/.exec(header);
-  if (!match || (!match[1] && !match[2]) || !size) return null;
-  const [, first, last] = match;
-  const start = first ? Number(first) : Math.max(0, size - Number(last));
-  const end = first && last ? Math.min(Number(last), size - 1) : size - 1;
-  return Number.isSafeInteger(start) && start <= end && start < size ? { start, end } : null;
 }
 
 export function registerSharing(app: FastifyInstance, sharing: ShareService, storageRoot: string) {
@@ -95,16 +84,18 @@ export function registerSharing(app: FastifyInstance, sharing: ShareService, sto
   });
 
   const registerMedia = (prefix: string, ref: (params: unknown) => SharedMediaRef) => {
-    app.route({
-      method: ["GET", "HEAD"],
-      url: prefix + "/sources/:source",
-      async handler(request, reply) {
-        sharedResponse(reply);
-        const file = await sharing.file(request.user!.id, ref(request.params), sourceParam.parse(request.params).source);
-        const path = storagePath(storageRoot, file.path);
-        return sendFile(request, reply, path, file.mime);
-      },
-    });
+    for (const audio of [false, true]) {
+      app.route({
+        method: ["GET", "HEAD"],
+        url: prefix + "/sources/:source" + (audio ? "/audio" : ""),
+        async handler(request, reply) {
+          sharedResponse(reply);
+          const key = sourceParam.parse(request.params).source;
+          const file = await sharing.file(request.user!.id, ref(request.params), key);
+          return sendMediaFile(request, reply, storagePath(storageRoot, file.path), file, audio, key);
+        },
+      });
+    }
     app.get(prefix + "/artwork", async (request, reply) => {
       sharedResponse(reply);
       const { size } = artworkQuery.parse(request.query);
@@ -116,32 +107,4 @@ export function registerSharing(app: FastifyInstance, sharing: ShareService, sto
   registerMedia("/api/shared/:token/items/:itemId", params => ({ kind: "link", ...sharedItem.parse(params) }));
   registerMedia("/api/shared-playlists/:id/items/:itemId", params => ({ kind: "playlist", ...savedPlaylistItem.parse(params) }));
   registerMedia("/api/shared-items/:id", params => ({ kind: "item", ...idParam.parse(params) }));
-}
-
-async function sendFile(request: FastifyRequest, reply: FastifyReply, path: string, mime: string) {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-    .catch(() => undefined);
-  invariant(handle, 404, "file_not_found", "Файл не найден");
-  let streaming = false;
-  try {
-    const info = await handle.stat().catch(() => undefined);
-    invariant(info && info.isFile(), 404, "file_not_found", "Файл не найден");
-    const { size } = info;
-    const range = request.headers.range ? byteRange(request.headers.range, size) : undefined;
-    reply.type(mime).header("accept-ranges", "bytes");
-    if (range === null) return reply.code(416).header("content-range", `bytes */${size}`).send();
-    if (range) {
-      const { start, end } = range;
-      reply.code(206).header("content-range", `bytes ${start}-${end}/${size}`)
-        .header("content-length", end - start + 1);
-    } else {
-      reply.header("content-length", size);
-    }
-    if (request.method === "HEAD") return reply.send();
-    const stream = handle.createReadStream(range);
-    streaming = true;
-    return reply.send(stream);
-  } finally {
-    if (!streaming) await handle.close();
-  }
 }

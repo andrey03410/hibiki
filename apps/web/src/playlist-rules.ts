@@ -1,4 +1,4 @@
-import type { LibraryCardOverviewDto, LibraryDto, Rule } from "@hibiki/contracts";
+import type { LibraryCardOverviewDto, Rule } from "@hibiki/contracts";
 import { mediaWord } from "./api";
 
 export type HistoryRule = Extract<Rule, { type: "history" }>;
@@ -8,24 +8,6 @@ export const HISTORY_CONDITIONS: Record<HistoryRule["condition"], string> = {
   "skipped-at-least": "Быстро пропускал несколько раз",
   "last-started-before": "Давно не включал",
 };
-
-export function usesListeningHistory(rule: Rule, library: LibraryDto, visited = new Set<string>()): boolean {
-  switch (rule.type) {
-    case "history": return true;
-    case "union":
-    case "intersection": return rule.rules.some((child) => usesListeningHistory(child, library, visited));
-    case "difference": return usesListeningHistory(rule.include, library, visited) || usesListeningHistory(rule.exclude, library, visited);
-    case "playlist": {
-      if (visited.has(rule.id)) return false;
-      visited.add(rule.id);
-      const definition = library.playlists.find((playlist) => playlist.id === rule.id)?.definition;
-      return !!definition && (
-        definition.sort === "last-started" || usesListeningHistory(definition.rule, library, visited)
-      );
-    }
-    default: return false;
-  }
-}
 
 export function ruleDescription(rule: Rule, library: Pick<LibraryCardOverviewDto, "tags" | "playlists">): string {
   switch (rule.type) {

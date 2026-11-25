@@ -3,7 +3,7 @@ import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
 import staticFiles from "@fastify/static";
 import { existsSync, createReadStream } from "node:fs";
-import { mkdir, rm, stat } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { resolve, join, extname, basename } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
@@ -19,6 +19,7 @@ import { hydrateLibraryItems, LibraryService } from "./library";
 import { JobsService } from "./jobs";
 import { HttpError, invariant } from "./errors";
 import { allowedLocalPath, storagePath } from "./media";
+import { sendMediaFile } from "./media-response";
 import { registerMcp } from "./mcp";
 import { uploadPolicy } from "./upload-policy";
 import { artworkQuery, ArtworkService } from "./artwork";
@@ -68,7 +69,7 @@ const idOf = (request: { params: unknown }) =>
 const browserAccess = (request: FastifyRequest) =>
   Boolean(request.user && !request.headers.authorization && request.cookies.hibiki_session);
 
-export async function createApp(options: { db: Db; storageRoot: string }) {
+export async function createApp(options: { db: Db; storageRoot: string; webRoot?: string }) {
   const { db, storageRoot } = options;
   const auth = new AuthService(db);
   const library = new LibraryService(db, storageRoot);
@@ -245,9 +246,10 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       .header("cache-control", "private, no-cache")
       .header("vary", "Cookie, Authorization")
       .header("x-content-type-options", "nosniff");
-    const { size } = artworkQuery.parse(request.query);
+    const { size, v } = artworkQuery.parse(request.query);
     const thumbnail = canRunHeavy(request.access) ? size : undefined;
     const cover = await artwork.get(request.user!.id, idOf(request), thumbnail);
+    if (v && v === cover.version) reply.header("cache-control", "private, max-age=31536000, immutable");
     if (cover.etag) {
       reply.header("etag", cover.etag);
       const validators = request.headers["if-none-match"]?.split(",").map(tag => tag.trim().replace(/^W\//, ""));
@@ -390,13 +392,15 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
   app.get("/api/playlists", async (request) => ({
     playlists: await library.listPlaylists(request.user!.id),
   }));
-  app.post("/api/playlists/preview", (request) => {
+  app.post("/api/playlists/preview", (request, reply) => {
     const input = z
       .object({
         definition: playlistDefinitionSchema,
         playlistId: z.string().optional(),
+        cards: z.boolean().optional(),
       })
       .parse(request.body);
+    if (input.cards) return library.previewCards(browserOwner(request, reply), input.definition, input.playlistId);
     return library.preview(
       request.user!.id,
       input.definition,
@@ -445,9 +449,9 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     await library.deletePlaylist(request.user!.id, idOf(request));
     return { ok: true };
   });
-  app.get("/api/jobs", async (request, reply) => {
+  app.get<{ Querystring: {active?: string} }>("/api/jobs", async (request, reply) => {
     reply.header("Cache-Control", "private, no-store");
-    return { jobs: await jobs.list(request.user!.id, browserAccess(request)) };
+    return { jobs: await jobs.list(request.user!.id, browserAccess(request), request.query.active === "1") };
   });
   app.post("/api/jobs", (request) => {
     const input = z
@@ -485,12 +489,12 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     return reply.send(createReadStream(path));
   });
   app.get("/api/settings", (request) => library.getSettings(request.user!.id));
-  app.put("/api/settings", (request) =>
-    library.setSettings(
-      request.user!.id,
-      z.record(z.string(), z.unknown()).parse(request.body),
-    ),
-  );
+  app.put("/api/settings", async (request) => {
+    const patch = z.record(z.string(), z.unknown()).parse(request.body);
+    const saved = await library.setSettings(request.user!.id, patch);
+    return (request.query as { patch?: string }).patch === "1"
+      ? Object.fromEntries(Object.keys(patch).map(key => [key, saved[key]])) : saved;
+  });
   app.get("/api/tokens", async (request) => ({
     tokens: await auth.listTokens(request.user!.id),
   }));
@@ -506,46 +510,21 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
     await auth.deleteToken(request.user!.id, idOf(request));
     return { ok: true };
   });
-  app.get("/files/:id", async (request, reply) => {
-    const file = await db.mediaFile.findFirst({
-      where: { id: idOf(request), ownerId: request.user!.id },
+  for (const audio of [false, true]) {
+    app.route({
+      method: ["GET", "HEAD"],
+      url: audio ? "/files/:id/audio" : "/files/:id",
+      async handler(request, reply) {
+        const file = await db.mediaFile.findFirst({
+          where: { id: idOf(request), ownerId: request.user!.id },
+        });
+        invariant(file, 404, "file_not_found", "Файл не найден");
+        reply.header("cache-control", kanameEnabled() ? "private, no-store" : "private, max-age=3600")
+          .header("x-content-type-options", "nosniff");
+        return sendMediaFile(request, reply, storagePath(storageRoot, file.path), file, audio);
+      },
     });
-    invariant(file, 404, "file_not_found", "Файл не найден");
-    const path = storagePath(storageRoot, file.path);
-    const size = (await stat(path)).size;
-    reply
-      .type(file.mime)
-      .header("accept-ranges", "bytes")
-      .header("cache-control", kanameEnabled() ? "private, no-store" : "private, max-age=3600")
-      .header("x-content-type-options", "nosniff");
-    const range = request.headers.range;
-    if (range) {
-      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-      if (!match || (!match[1] && !match[2]))
-        return reply
-          .code(416)
-          .header("content-range", `bytes */${size}`)
-          .send();
-      const start = match[1]
-        ? Number(match[1])
-        : Math.max(0, size - Number(match[2]));
-      const end = match[1]
-        ? Math.min(match[2] ? Number(match[2]) : size - 1, size - 1)
-        : size - 1;
-      if (start >= size || start < 0 || end < start)
-        return reply
-          .code(416)
-          .header("content-range", `bytes */${size}`)
-          .send();
-      reply
-        .code(206)
-        .header("content-range", `bytes ${start}-${end}/${size}`)
-        .header("content-length", end - start + 1);
-      return reply.send(createReadStream(path, { start, end }));
-    }
-    reply.header("content-length", size);
-    return reply.send(createReadStream(path));
-  });
+  }
   registerNotes(app, db);
   registerLibraryPages(app, db, library);
   registerClassification(app, db);
@@ -554,9 +533,15 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
   registerYoutubeSync(app, db, library);
   registerSharing(app, sharing, storageRoot);
   registerMcp(app, s);
-  const webRoot = resolve("apps/web/dist");
+  const webRoot = options.webRoot ?? resolve("apps/web/dist");
   if (existsSync(join(webRoot, "index.html"))) {
-    await app.register(staticFiles, { root: webRoot, prefix: "/" });
+    await app.register(staticFiles, {
+      root: webRoot, prefix: "/", cacheControl: false,
+      setHeaders(response, filePath) {
+        response.header("Cache-Control", filePath.startsWith(join(webRoot, "assets") + "/")
+          ? "public, max-age=31536000, immutable" : "no-cache");
+      },
+    });
     app.setNotFoundHandler((request, reply) => {
       if (
         request.method === "GET" &&
@@ -564,6 +549,7 @@ export async function createApp(options: { db: Db; storageRoot: string }) {
       ) {
         if (request.url.startsWith("/share/")) reply.header("referrer-policy", "strict-origin");
         return reply
+          .header("Cache-Control", "no-cache")
           .type("text/html")
           .send(createReadStream(join(webRoot, "index.html")));
       }

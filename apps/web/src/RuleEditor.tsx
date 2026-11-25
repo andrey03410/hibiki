@@ -1,9 +1,11 @@
 import { useMemo } from "react";
 import { Minus, Plus, X } from "lucide-react";
-import type { LibraryDto, Rule } from "@hibiki/contracts";
+import type { LibraryCardOverviewDto, Rule } from "@hibiki/contracts";
 import { RuleItemPicker } from "./RuleItemPicker";
 import { HISTORY_CONDITIONS, type HistoryRule } from "./playlist-rules";
 import { TagCatalog } from "./taxonomy";
+
+type RuleCatalog = Pick<LibraryCardOverviewDto,"tags"> & {playlists: {id:string;title:string}[]; revision?:string};
 
 function historyRule(condition: HistoryRule["condition"]): HistoryRule {
   if (condition === "skipped-at-least") return { type: "history", condition, count: 2 };
@@ -13,7 +15,7 @@ function historyRule(condition: HistoryRule["condition"]): HistoryRule {
 
 function newRule(
   type: Rule["type"],
-  library: LibraryDto,
+  library: RuleCatalog,
   playlistId?: string,
 ): Rule {
   switch (type) {
@@ -49,7 +51,7 @@ export default function RuleEditor({
   playlistId,
   depth = 0,
 }: {
-  library: LibraryDto;
+  library: RuleCatalog;
   rule: Rule;
   onChange: (rule: Rule) => void;
   playlistId?: string;
@@ -106,7 +108,7 @@ export default function RuleEditor({
           )}
         </div>
       )}
-      {rule.type === "items" && <RuleItemPicker items={library.items} ids={rule.ids}
+      {rule.type === "items" && <RuleItemPicker revision={library.revision} ids={rule.ids}
         onChange={ids => onChange({ type: "items", ids })} />}
       {rule.type === "tag" && <>
         <label>Тег<select value={rule.id} onChange={e => onChange({type:"tag",id:e.target.value})}>

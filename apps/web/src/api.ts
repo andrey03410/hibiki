@@ -39,7 +39,11 @@ export async function api<T = any>(
   const data =
     response.status === 204
       ? undefined
-      : await response.json().catch(() => undefined);
+      : await response.json().catch(() => {
+          signal?.throwIfAborted();
+          if (response.ok) throw new ApiError("BAD_RESPONSE", "Не удалось прочитать ответ сервера. Повторите запрос.", response.status);
+          return undefined;
+        });
   signal?.throwIfAborted();
   if (!response.ok && data?.error?.code === "workspace_changed" && owner === workspaceOwner) window.location.reload();
   if (!response.ok)

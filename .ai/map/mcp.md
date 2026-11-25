@@ -18,7 +18,7 @@ SDK. Транспорт без серверной MCP-сессии, с JSON-от
 | Группа | Имена |
 |---|---|
 | Возможности | `capabilities` |
-| Медиатека | `media_list`, `media_get`, `media_import_youtube`, `media_download`, `media_refresh`, `media_propose_replacement`, `media_import_local`, `media_upload_begin`, `media_update_many`, `media_delete` |
+| Медиатека | `media_list`, `media_get`, `media_import_youtube`, `media_download`, `media_refresh`, `media_propose_replacement`, `media_replace_source`, `media_import_local`, `media_upload_begin`, `media_update_many`, `media_delete` |
 | Теги | `tags_list`, `tag_save`, `tag_delete` |
 | Плейлисты | `playlists_list`, `playlist_get`, `playlist_validate`, `playlist_preview`, `playlist_explain`, `playlist_save`, `playlist_delete` |
 | Доступ по ссылке | `share_create`, `share_list`, `share_set_expiry`, `share_set_reshare`, `share_revoke`, `share_open`, `share_save`, `share_copy` |
@@ -26,10 +26,19 @@ SDK. Транспорт без серверной MCP-сессии, с JSON-от
 | Перенос | `library_export`, `library_import_begin`, `library_import_apply` |
 
 `capabilities` возвращает JSON Schema PlaylistDefinition v1, семантику, пример,
-свои теги/плейлисты и ограничения. Правила сначала validate/preview, затем save.
+свои теги/плейлисты и ограничения. С `includeCatalog: false` агент получает схему и инструкции без справочника. Правила сначала validate/preview, затем save.
 Все виды audio/video допустимы вместе. Вычисление и причины совпадают с UI.
 `media_list` поддерживает query/tagId/kind/cursor и limit до 200; batch updates —
 до 200 изменений, local import — до 50 путей из `LOCAL_MEDIA_DIRS`.
+С `view: "summary"` инструмент `media_list` возвращает только ID, название, тип и длительность.
+`media_get` возвращает полные сведения выбранной записи. При сортировке по дате или длительности
+следующая страница начинается от значения и ID курсора. Для поиска и сортировки по названию
+сервер повторно использует порядок ID в пределах ревизии владельца. Фильтр доступности каждый раз проверяет источники.
+
+`playlist_get` по умолчанию возвращает определение и полный состав с прежними полями.
+Для длинного плейлиста передайте `limit` (1–200) или `offset`. Ответ содержит краткую карточку
+плейлиста, краткие записи в порядке воспроизведения, общее число и `nextOffset` для следующего вызова.
+`null` в `nextOffset` означает конец. Страницы отражают текущий состав по правилам.
 
 В каталоге видны активные теги пяти групп. `tag_save` принимает отображаемое имя,
 группу, псевдонимы и родительские ID. Поиск `media_list` понимает `tagIds`,
@@ -56,6 +65,19 @@ SDK. Транспорт без серверной MCP-сессии, с JSON-от
 доступные записи. Позиция с `shared.delegated` поддерживает только прослушивание.
 Целиком можно сохранить живую подборку. Отдельное сохранение такого трека
 требует своей прямой ссылки автора.
+
+`media_replace_source` принимает `itemId` и ровно одно поле, `url` или `sourceId`.
+Собственный локальный источник можно выбрать по ID из этой или другой своей карточки.
+Hibiki связывает тот же файл с карточкой и возвращает `status: "applied"`, `sourceId`
+и длительность. Для карточки только с YouTube ссылка на один ролик проверяется
+и применяется сразу. Если у карточки есть локальный файл, `url` или ID её
+YouTube-источника запускает загрузку полной замены с правами на скачивание.
+В ответе приходит `jobId`. Проверяйте состояние через `job_get`, при сбое
+используйте `job_retry`. Повтор вызова для ожидающей замены возвращает то же
+задание. Переключение источника, типа медиа и длительности происходит в одной
+транзакции после успешной подготовки. Сбой оставляет прежний источник рабочим.
+ID карточки, название, теги, заметки, история, ссылки и плейлисты сохраняются.
+Прежний локальный файл можно снова выбрать его `sourceId` из `media_get`.
 
 `media_propose_replacement` сохраняет URL одного ролика и объяснение к своей
 записи. Предпросмотр, отклонение и подтверждение доступны в браузерной карточке.

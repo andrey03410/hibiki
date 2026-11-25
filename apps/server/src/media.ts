@@ -15,6 +15,9 @@ import { promisify } from "node:util";
 import ffmpeg from "ffmpeg-static";
 import { HttpError, invariant } from "./errors";
 
+import { inspectPlaybackMetadata, type PlaybackMetadata } from "./media-playback";
+export { inspectPlaybackMetadata } from "./media-playback";
+
 const run = promisify(execFile);
 const mimes: Record<string, string> = {
   ".mp3": "audio/mpeg",
@@ -28,6 +31,7 @@ const mimes: Record<string, string> = {
   ".m4v": "video/mp4",
   ".webm": "video/webm",
   ".mov": "video/quicktime",
+  ".mka": "audio/x-matroska",
   ".mkv": "video/x-matroska",
   ".avi": "video/x-msvideo",
   ".aiff": "audio/aiff",
@@ -47,8 +51,11 @@ export interface MediaInspection {
   audioCodec?: string;
   videoStream?: string;
   audioStream?: string;
+  playback: PlaybackMetadata;
   compatibleVideoCodec: boolean;
   compatibleAudioCodec: boolean;
+  audioBits?: number;
+  float32Audio?: boolean;
 }
 export async function hashFile(path: string, signal?: AbortSignal) {
   signal?.throwIfAborted();
@@ -57,7 +64,7 @@ export async function hashFile(path: string, signal?: AbortSignal) {
     hash.update(chunk);
   return hash.digest("hex");
 }
-async function probeMediaStreams(path: string, signal?: AbortSignal) {
+export async function probeMediaStreams(path: string, signal?: AbortSignal) {
   signal?.throwIfAborted();
   let output = "";
   try {
@@ -86,7 +93,8 @@ async function probeMediaStreams(path: string, signal?: AbortSignal) {
     (stream) =>
       stream.type === "Video" && !stream.details.includes("(attached pic)"),
   );
-  const audio = streams.find((stream) => stream.type === "Audio");
+  const audioTracks = streams.filter(stream => stream.type === "Audio");
+  const audio = audioTracks.find(stream => stream.details.includes("(default)")) ?? audioTracks[0];
   invariant(
     video || audio,
     415,
@@ -94,6 +102,10 @@ async function probeMediaStreams(path: string, signal?: AbortSignal) {
     "В файле нет аудио или видео для воспроизведения",
   );
   return { audio, video, output };
+}
+
+export function mp4CompatibleAudio(codec: string, details: string) {
+  return (codec === "aac" && !/LTP|SSR/.test(details)) || codec === "flac" || codec === "opus";
 }
 
 export async function inspectAudioTrack(path: string, signal?: AbortSignal) {
@@ -138,12 +150,15 @@ export async function inspectFile(
     video?.codec === "h264" &&
     /\byuvj?420p(?:\b|\()/.test(video.details) &&
     !/\byuvj?420p\d/.test(video.details);
-  const compatibleAudioCodec =
-    audio?.codec === "aac" && !/HE-AAC|LTP|SSR/.test(audio.details);
+  const compatibleAudioCodec = Boolean(audio && mp4CompatibleAudio(audio.codec, audio.details));
+  const audioBits = audio ? Number(/\((\d+) bit\)/.exec(audio.details)?.[1] ??
+    /\b(?:u|s)(8|16|24|32|64)p?\b/.exec(audio.details)?.[1] ?? (/\bdblp?\b/.test(audio.details) ? 64 : 32)) : undefined;
+  const float32Audio = !!audio && /\bfltp?\b/.test(audio.details);
   const mp4Audio = !audio || compatibleAudioCodec;
   const browserCompatible =
     kind === "video"
-      ? ([".mp4", ".m4v"].includes(ext) && compatibleVideoCodec && mp4Audio) ||
+      ? (ext === ".mov" && compatibleVideoCodec && audio?.codec === "pcm_f32le") ||
+        ([".mp4", ".m4v"].includes(ext) && compatibleVideoCodec && mp4Audio) ||
         (ext === ".webm" &&
           ["vp8", "vp9", "av1"].includes(video!.codec) &&
           (!audio || ["opus", "vorbis"].includes(audio.codec)))
@@ -181,8 +196,10 @@ export async function inspectFile(
     audioCodec: audio?.codec,
     videoStream: video?.id,
     audioStream: audio?.id,
+    playback: await inspectPlaybackMetadata(path, mime),
     compatibleVideoCodec,
     compatibleAudioCodec,
+    audioBits, float32Audio,
   };
 }
 
@@ -202,10 +219,12 @@ export async function preparePlayback(
   );
   options.signal?.throwIfAborted();
   await mkdir(workDir, { recursive: true });
-  const target = resolve(
-    workDir,
-    `${randomUUID()}${media.kind === "video" ? ".mp4" : ".m4a"}`,
-  );
+  const copyAudio = media.compatibleAudioCodec || (media.kind === "audio" && ["mp3", "vorbis"].includes(media.audioCodec ?? ""));
+  const audioExt: Record<string, string> = { aac: ".m4a", opus: ".ogg", vorbis: ".ogg", mp3: ".mp3", flac: ".flac" };
+  const preserveFloat = !copyAudio && media.float32Audio;
+  const ext = media.kind === "video" ? (preserveFloat ? ".mov" : ".mp4")
+    : copyAudio ? audioExt[media.audioCodec!] : preserveFloat ? ".wav" : ".flac";
+  const target = resolve(workDir, randomUUID() + ext);
   const args = [
     "-hide_banner",
     "-loglevel",
@@ -234,10 +253,19 @@ export async function preparePlayback(
   }
   if (media.audioStream) {
     args.push("-map", media.audioStream);
-    if (media.compatibleAudioCodec) args.push("-c:a", "copy");
-    else args.push("-c:a", "aac", "-b:a", "192k");
+    if (copyAudio) args.push("-c:a", "copy");
+    else if (preserveFloat) args.push("-c:a", "pcm_f32le");
+    else {
+      invariant(media.audioBits && media.audioBits <= 32, 415, "unsupported_precision",
+        "Разрядность звука превышает возможности подготовки в FLAC");
+      const bits = media.audioBits <= 16 ? 16 : media.audioBits <= 24 ? 24 : 32;
+      args.push("-c:a", "flac", "-sample_fmt", bits <= 16 ? "s16" : "s32",
+        "-bits_per_raw_sample", String(bits), "-strict", "experimental");
+    }
   }
-  args.push("-map_metadata", "0", "-movflags", "+faststart", target);
+  args.push("-map_metadata", "0");
+  if (ext === ".mp4" || ext === ".m4a" || ext === ".mov") args.push("-strict", "experimental", "-movflags", "+faststart");
+  args.push(target);
   try {
     await new Promise<void>((resolveProcess, rejectProcess) => {
       const child = spawn(String(ffmpeg), args, {

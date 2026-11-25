@@ -79,3 +79,5 @@ Linux-сборка может завершить muxing до аудио. Под�
 `Dockerfile` собирает Linux-образ hibiki. Workflow `Production` проверяет запуск, публикует тег полного SHA в GHCR и выкатывает его по команде [deploy](../../.claude/skills/deploy/SKILL.md). Данные SQLite и медиа находятся в отдельном каталоге данных на сервере. HTTPS обслуживает Caddy на порту `8443`.
 
 Образ включает режим `PROVISIONED_ACCOUNTS_ONLY=1`. Новые аккаунты создаёт администратор через `scripts/provision-account.ts`. Пароль передаётся через stdin.
+
+Caddy на порту 8443 сжимает JSON, JavaScript и CSS через zstd или gzip. Шаблон конфигурации и порядок обновления приведены в [deploy](../../.claude/skills/deploy/SKILL.md). Файлы Vite в /assets/ кешируются на год, HTML и служебный скрипт плеера проверяются при открытии.

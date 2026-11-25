@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
+import { ItemSelect, useItemNames } from "./ItemPicker";
+import { pollWhileVisible } from "./use-sharing-request";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Bell, ExternalLink, Youtube } from "lucide-react";
 import { Link } from "react-router";
 import type { ItemDto, PlaylistDto, TagDto } from "@hibiki/contracts";
@@ -226,12 +228,10 @@ export function YoutubeLinkedPlaylist({
   libraryRevision,
   tags,
   reload,
-  LocalAdditions = YoutubeLocalAdditions,
 }: {
   playlist: PlaylistDto;
   items?: ItemDto[];
   libraryRevision: string;
-  LocalAdditions?: ComponentType<LocalControls & { items: ItemDto[] }>;
   tags?: TagDto[];
   reload: Reload;
 }) {
@@ -254,9 +254,10 @@ export function YoutubeLinkedPlaylist({
     setPendingTag(null);
     setError("");
     setMessage("");
-    function load() {
+    async function load() {
+      if (document.hidden) return;
       const request = ++requestNumber.current;
-      void api<{ link: YoutubeLinkDto | null }>(path)
+      await api<{ link: YoutubeLinkDto | null }>(path)
         .then(({ link }) => {
           if (!mounted || request !== requestNumber.current) return;
           setState({ playlistId: playlist.id, link });
@@ -267,11 +268,11 @@ export function YoutubeLinkedPlaylist({
         });
     }
     load();
-    const timer = window.setInterval(load, pollInterval);
+    const stop = pollWhileVisible(load, pollInterval);
     window.addEventListener(syncChanged, load);
     return () => {
       mounted = false;
-      window.clearInterval(timer);
+      stop();
       window.removeEventListener(syncChanged, load);
     };
   }, [path, playlist.id]);
@@ -394,7 +395,7 @@ export function YoutubeLinkedPlaylist({
         <YoutubeRemotePositions link={link} items={items} libraryRevision={libraryRevision} busy={busy} edit={edit} />
       </YoutubeSyncDetails>
       <YoutubeSyncDetails summary={`Локальные дополнения (${link.additions.length})`}>
-        <LocalAdditions items={items} link={link} busy={busy} edit={edit}
+        <YoutubeLocalAdditions revision={libraryRevision} link={link} busy={busy} edit={edit}
           selection={selection} setSelection={setSelection} />
       </YoutubeSyncDetails>
       <label>
@@ -487,11 +488,10 @@ function YoutubeRemotePositions({ link, items, libraryRevision, busy, edit }: Pi
   </>;
 }
 
-export function YoutubeLocalAdditions({ items, link, busy, edit, selection, setSelection }: LocalControls & { items: ItemDto[] }) {
-  const byId = new Map(items.map(item => [item.id, item]));
-  const remote = new Set(link.snapshot.map(entry => entry.itemId));
-  const additions = new Set(link.additions);
-  const candidates = items.filter(item => !remote.has(item.id) && !additions.has(item.id));
+function YoutubeLocalAdditions({ revision, link, busy, edit, selection, setSelection }: LocalControls & { revision: string }) {
+  const selected = useItemNames(link.additions, revision);
+  const byId = new Map(selected.names.map(item => [item.id, item]));
+  const excluded = new Set([...link.snapshot.map(entry => entry.itemId), ...link.additions]);
   return <>
     <ul className="youtube-sync-list">
       {link.additions.flatMap((itemId) => {
@@ -514,25 +514,9 @@ export function YoutubeLocalAdditions({ items, link, busy, edit, selection, setS
       })}
     </ul>
     <div className="youtube-sync-add">
-      <label>
-        Запись из медиатеки
-        <select
-          value={selection}
-          disabled={busy || !candidates.length}
-          onChange={(event) => setSelection(event.target.value)}
-        >
-          <option value="">
-            {candidates.length
-              ? "Выберите запись"
-              : "Нет записей для добавления"}
-          </option>
-          {candidates.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.title}
-            </option>
-          ))}
-        </select>
-      </label>
+      {selected.error && <p role="alert">{selected.error} <button type="button" onClick={selected.retry}>Повторить</button></p>}
+      <ItemSelect label="Запись из медиатеки" empty="Выберите запись" value={selection} onChange={setSelection}
+        revision={revision} disabled={busy} excluded={excluded} />
       <button
         type="button"
         className="button subtle"
@@ -556,6 +540,7 @@ export function YoutubeSyncNotifications({ reload }: { reload: Reload }) {
     let mounted = true;
     let latest = 0;
     async function load() {
+      if (document.hidden) return;
       const request = ++latest;
       try {
         const result = await api<{ notices: YoutubeNoticeDto[] }>(
@@ -579,11 +564,11 @@ export function YoutubeSyncNotifications({ reload }: { reload: Reload }) {
       }
     }
     void load();
-    const timer = window.setInterval(load, pollInterval);
+    const stop = pollWhileVisible(load, pollInterval);
     window.addEventListener(syncChanged, load);
     return () => {
       mounted = false;
-      window.clearInterval(timer);
+      stop();
       window.removeEventListener(syncChanged, load);
     };
   }, []);

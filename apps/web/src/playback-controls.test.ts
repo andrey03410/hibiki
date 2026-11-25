@@ -75,3 +75,10 @@ it("shows a volume trigger in the mini-player and a slider with the same level i
   expect(watch).toContain('aria-valuetext="35%"');
   expect(watch).toContain('aria-label="Выключить звук"');
 });
+
+it("merges contiguous decoder and byte coverage and shows all of a fully downloaded track", async () => {
+  const { playbackBuffer } = await import("./PlaybackControls");
+  const partial = { size: 1100, audioStart: 100, ranges: [[0,400],[700,800]] as [number,number][], complete: false };
+  expect(playbackBuffer([[28,35]], partial, 100)).toEqual([[0,35],[60,70]]);
+  expect(playbackBuffer([], {...partial,complete:true}, 100)).toEqual([[0,100]]);
+});

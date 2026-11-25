@@ -11,6 +11,7 @@ model User {
   login String @unique
   passwordHash String
   libraryRevision Int @default(0)
+  overviewRevision Int @default(0)
   createdAt DateTime @default(now())
   kanameIssuer String?
   kanameSubject String?
@@ -109,6 +110,12 @@ model MediaFile {
   kind String
   duration Float?
   hasAudio Boolean?
+  audioStart BigInt?
+  tailStart BigInt?
+  hintsVersion Int @default(0)
+  audioViewStart BigInt?
+  audioViewBytes BigInt?
+  audioViewVersion Int @default(0)
   createdAt DateTime @default(now())
   sources Source[]
   @@unique([ownerId, hash])

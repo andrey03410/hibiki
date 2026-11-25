@@ -27,7 +27,7 @@ interface Preview {
   checkedAt: string;
 }
 
-interface StoredPreview extends Preview {
+export interface StoredPreview extends Preview {
   thumbnail?: string;
 }
 
@@ -53,7 +53,7 @@ function proposalDto(row: SourceProposal) {
   };
 }
 
-function canonicalVideo(value: string) {
+export function canonicalVideo(value: string) {
   try {
     const input = new URL(urlInput.parse(value));
     // A watch link copied while watching a playlist can still name one video.
@@ -84,7 +84,7 @@ export async function proposeReplacement(
   });
 }
 
-async function youtubeCandidate(db: Prisma.TransactionClient, ownerId: string, itemId: string, url: string) {
+export async function youtubeCandidate(db: Prisma.TransactionClient, ownerId: string, itemId: string, url: string) {
   const externalId = new URL(url).searchParams.get("v")!;
   const key = `youtube:${externalId}`;
   const source = await db.source.findUnique({ where: { ownerId_key: { ownerId, key } } });
@@ -93,7 +93,7 @@ async function youtubeCandidate(db: Prisma.TransactionClient, ownerId: string, i
   return { externalId, key, source };
 }
 
-async function previewYoutube(db: Db, ownerId: string, itemId: string, url: string): Promise<StoredPreview> {
+export async function previewYoutube(db: Db, ownerId: string, itemId: string, url: string): Promise<StoredPreview> {
   const { externalId } = await youtubeCandidate(db, ownerId, itemId, url);
   const unavailable = () => new HttpError(422, "replacement_unavailable", "Ролик недоступен");
   const metadata = await refreshYoutube(externalId, AbortSignal.timeout(30_000)).catch((error) => {
@@ -111,6 +111,17 @@ async function previewYoutube(db: Db, ownerId: string, itemId: string, url: stri
     warnings: ["Воспроизведение во встроенном плеере ещё не проверено."],
     checkedAt: new Date().toISOString(),
   };
+}
+
+export async function attachYoutube(tx: Prisma.TransactionClient, ownerId: string, itemId: string, url: string,
+  metadata: { checkedAt: string; thumbnail?: string }) {
+  const { externalId, key, source } = await youtubeCandidate(tx, ownerId, itemId, url);
+  const state = { status: "available", reason: null, checkedAt: new Date(metadata.checkedAt) };
+  const attached = source
+    ? await tx.source.update({ where: { id: source.id, itemId, ownerId }, data: state })
+    : await tx.source.create({data: {id: randomUUID(), ownerId, itemId, key, provider: "youtube", externalId, url,
+        thumbnail: metadata.thumbnail ?? `https://i.ytimg.com/vi/${externalId}/hqdefault.jpg`, ...state}});
+  return attached.id;
 }
 
 function stageDirectory(id: string) {
@@ -287,14 +298,7 @@ export function registerReplacement(app: FastifyInstance, db: Db, library: Libra
         pending(current);
         const { url } = current;
         invariant(url, 400, "replacement_video_required", "Укажите ссылку на ролик YouTube");
-        const { externalId, key, source } = await youtubeCandidate(tx, ownerId, itemId, url);
-        const state = { status: "available", reason: null, checkedAt: new Date(preview.checkedAt) };
-        const { id: sourceId } = source
-          ? await tx.source.update({ where: { id: source.id }, data: state })
-          : await tx.source.create({
-              data: { id: randomUUID(), ownerId, itemId, key, provider: "youtube", externalId, url,
-                thumbnail: preview.thumbnail ?? `https://i.ytimg.com/vi/${externalId}/hqdefault.jpg`, ...state },
-            });
+        const sourceId = await attachYoutube(tx, ownerId, itemId, url, preview);
         await tx.item.update({ where: { id: itemId, ownerId }, data: { preferredSourceId: sourceId } });
         await tx.sourceProposal.update({ where: { id: proposalId }, data: { status: "confirmed" } });
       });

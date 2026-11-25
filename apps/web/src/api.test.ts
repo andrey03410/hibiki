@@ -36,3 +36,8 @@ it("passes library cancellation to the network request", async () => {
   controller.abort();
   expect(read.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
 });
+
+it("rejects a successful response with an interrupted JSON document", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response('{"tags":')));
+  await expect(api("/library/overview")).rejects.toMatchObject({ code: "BAD_RESPONSE", status: 200 });
+});

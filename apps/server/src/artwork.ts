@@ -1,19 +1,20 @@
-import { stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import ffmpeg from "ffmpeg-static";
 import { z } from "zod";
 import { parseFromTokenizer } from "music-metadata";
 import { fromFile } from "strtok3";
 import type { Db } from "./db";
-import { invariant } from "./errors";
+import { HttpError, invariant } from "./errors";
 import { storagePath } from "./media";
 
 const maxArtworkBytes = 5 * 1024 ** 2;
 const maxMetadataBytes = 8 * 1024 ** 2;
 const maxMetadataReads = 4096;
-export const artworkQuery = z.object({ size: z.enum(["thumb", "cover"]).optional() });
+export const artworkQuery = z.object({ size: z.enum(["thumb", "cover"]).optional(), v: z.string().optional() });
 type ArtworkSize = NonNullable<z.infer<typeof artworkQuery>["size"]>;
 const renditions = {
   thumb: { pixels: 96, quality: 72, maxBytes: 32 * 1024 },
@@ -26,6 +27,7 @@ interface Artwork {
   mime: "image/jpeg" | "image/png" | "image/webp";
   bytes: Buffer;
   etag?: string;
+  version?: string;
 }
 
 // The embedded MIME tag is untrusted; only these raster signatures are served.
@@ -50,6 +52,8 @@ function imageMime(bytes: Buffer): Artwork["mime"] | undefined {
 
 async function readArtwork(path: string): Promise<Artwork | undefined> {
   let tokenizer: Awaited<ReturnType<typeof fromFile>> | undefined;
+  let readFailed = false;
+  const ioError = (error: unknown) => error instanceof Error && typeof (error as NodeJS.ErrnoException).syscall === "string";
   try {
     tokenizer = await fromFile(path, {
       regularFileOnly: true,
@@ -76,7 +80,11 @@ async function readArtwork(path: string): Promise<Artwork | undefined> {
           throw new Error("Artwork metadata extraction budget exceeded");
         }
         metadataBytes += length;
-        return read(buffer, options);
+        try { return await read(buffer, options); }
+        catch (error) {
+          if (ioError(error)) readFailed = true;
+          throw error;
+        }
       };
     }
     const metadata = await parseFromTokenizer(tokenizer, {
@@ -85,6 +93,7 @@ async function readArtwork(path: string): Promise<Artwork | undefined> {
       maxMetadataEntries: 128,
     });
     // Some format parsers recover from read errors with partial metadata.
+    if (readFailed) throw new HttpError(503, "artwork_read_failed", "Временно не удалось прочитать обложку");
     if (budgetExceeded) return undefined;
     const pictures = [...(metadata.common.picture ?? [])].sort(
       (a, b) =>
@@ -96,8 +105,9 @@ async function readArtwork(path: string): Promise<Artwork | undefined> {
       const mime = imageMime(bytes);
       if (mime) return { bytes, mime };
     }
-  } catch {
-    // Missing, malformed and oversized metadata all use the player's fallback.
+  } catch (error) {
+    if (readFailed || ioError(error)) throw new HttpError(503, "artwork_read_failed", "Временно не удалось прочитать обложку");
+    // Malformed or oversized metadata uses the player’s fallback.
   } finally {
     await tokenizer?.close();
   }
@@ -173,6 +183,81 @@ export class ArtworkCache {
   }
 }
 
+// The item URL can choose a cover from multiple local files. Its HTTP version
+// must change if any candidate changes, including the preferred original.
+export function artworkVersion(sources: ReadonlyArray<{ file?: { hash: string; kind: string } | null; reason?: string | null }>) {
+  const hashes = sources.filter(s => s.file?.kind === "audio")
+    .map(s => [s.reason === "unsupported_codec" ? 0 : 1, s.file!.hash] as const)
+    .sort(([a, x], [b, y]) => a - b || x.localeCompare(y)).map(([, hash]) => hash);
+  if (hashes.length < 2) return hashes[0];
+  return createHash("sha256").update(hashes.join(":")).digest("hex");
+}
+
+function artworkDirectory(root: string, ownerId: string) {
+  return storagePath(root, join("cache", "artwork", encodeURIComponent(ownerId).replaceAll(".", "%2E")));
+}
+
+async function diskRendition(root: string, ownerId: string, hash: string, size: ArtworkSize, original: () => Promise<Artwork | undefined>) {
+  if (!/^[a-f0-9]{64}$/.test(hash)) {
+    const cover = await original();
+    return cover && makeRendition(cover, size);
+  }
+  const directory = artworkDirectory(root, ownerId);
+  const base = join(directory, hash + "-" + size);
+  try {
+    const bytes = await readFile(base + ".webp");
+    if (imageMime(bytes) === "image/webp") return { mime: "image/webp" as const, bytes,
+      etag: `"${createHash("sha256").update(bytes).digest("base64url")}"` };
+  } catch { /* A missing or evicted cache entry is generated on demand. */ }
+  if (await stat(base + ".none").then(s => s.isFile(), () => false)) return;
+  const cover = await original();
+  const result = cover && await makeRendition(cover, size);
+  if (cover && !result) return; // A transient encoder failure must remain retryable after a restart.
+  const target = base + (result ? ".webp" : ".none");
+  const temp = target + "." + randomUUID() + ".tmp";
+  try {
+    await mkdir(directory, { recursive: true });
+    await writeFile(temp, result?.bytes ?? Buffer.alloc(0), { flag: "wx" });
+    await rename(temp, target);
+  } catch {
+    await rm(temp, { force: true }).catch(() => {});
+  }
+  return result;
+}
+
+export async function removeUnusedArtwork(db: Db, root: string, ownerId: string, hash: string) {
+  if (!/^[a-f0-9]{64}$/.test(hash)) return;
+  if (await db.source.findFirst({ where: { ownerId, file: { ownerId, hash } }, select: {id: true} })) return;
+  const directory = artworkDirectory(root, ownerId);
+  await Promise.all(["thumb.webp", "thumb.none", "cover.webp", "cover.none"].map(suffix =>
+    rm(join(directory, hash + "-" + suffix), { force: true })));
+}
+
+export async function pruneArtworkCache(db: Db, root: string) {
+  const parent = join(root, "cache", "artwork");
+  const owners = await readdir(parent, {withFileTypes: true}).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  for (const folder of owners.filter(d => d.isDirectory())) {
+    const ownerId = decodeURIComponent(folder.name);
+    const directory = artworkDirectory(root, ownerId);
+    const used = new Set((await db.mediaFile.findMany({
+      where: {ownerId, sources: { some: { ownerId } }}, select: {hash: true},
+    })).map(f => f.hash));
+    for (const file of await readdir(directory, {withFileTypes: true})) {
+      if (!file.isFile()) continue;
+      const match = /^([a-f0-9]{64})-(?:thumb|cover)\.(?:webp|none)$/.exec(file.name);
+      if (match && !used.has(match[1]!)) await removeUnusedArtwork(db, root, ownerId, match[1]!);
+      if (file.name.endsWith(".tmp")) {
+        const path = join(directory, file.name);
+        const info = await stat(path).catch(() => undefined);
+        if (info && Date.now() - info.mtimeMs > 86400_000) await rm(path, { force: true });
+      }
+    }
+  }
+}
+
 export class ArtworkService {
   private originals = new ArtworkCache(8, 2);
   private renditions = {
@@ -201,7 +286,7 @@ export class ArtworkService {
     const sources = item.sources.sort(
       (a, b) =>
         Number(b.reason === "unsupported_codec") -
-        Number(a.reason === "unsupported_codec"),
+        Number(a.reason === "unsupported_codec") || (a.file?.hash ?? "").localeCompare(b.file?.hash ?? ""),
     );
     for (const source of sources) {
       const file = source.file;
@@ -212,12 +297,9 @@ export class ArtworkService {
       const key = `${path}:${file.hash}:${info.size}:${info.mtimeMs}`;
       const original = () => this.originals.get(key, () => readArtwork(path));
       const result = size
-        ? await this.renditions[size].get(key, async () => {
-          const cover = await original();
-          return cover && makeRendition(cover, size);
-        })
+        ? await this.renditions[size].get(key, () => diskRendition(this.storageRoot, ownerId, file.hash, size, original))
         : await original();
-      if (result) return result;
+      if (result) return { ...result, version: artworkVersion(sources) };
     }
     invariant(false, 404, "artwork_not_found", "Обложка не найдена");
   }

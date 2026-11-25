@@ -1,20 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 
-const updateInterval = 5000;
+export const overviewInterval = 10_000;
+export const activeJobsInterval = 3_000;
 
-export function pollWhileVisible(read: () => Promise<void>) {
+export function pollWhileVisible(read: () => Promise<void>, interval = 30_000) {
   let running = false;
   function poll() {
     if (running || document.hidden) return;
     running = true;
     void read().catch(() => {}).finally(() => { running = false; });
   }
-  const timer = window.setInterval(poll, updateInterval);
+  const timer = window.setInterval(poll, interval);
   document.addEventListener("visibilitychange", poll);
+  window.addEventListener("focus", poll);
   return () => {
     window.clearInterval(timer);
     document.removeEventListener("visibilitychange", poll);
+    window.removeEventListener("focus", poll);
   };
 }
 
@@ -32,7 +35,7 @@ export function useSharingRequest<T>(path: string) {
     }
   }, [path]);
   useEffect(() => {
-    void refresh();
+    if (!document.hidden) void refresh();
     const stop = pollWhileVisible(refresh);
     return () => {
       ++request.current;
