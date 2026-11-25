@@ -2,7 +2,7 @@
 id: 17
 title: Смешанный плейлист по одной ссылке
 track: product
-stage: plan
+stage: build
 branch: codex/17-mixed-playlist-sharing
 pr:
 started: 2026-11-25
@@ -17,7 +17,7 @@ merged:
 
 - [x] [Бриф](brief.md)
 - [x] [Продуктовая постановка](product.md)
-- [ ] Техника и план
+- [x] [Техника](tech.md) и [план](plan.md)
 - [ ] Реализация и проверка
 - [ ] Приёмка владельцем и вливание
 
