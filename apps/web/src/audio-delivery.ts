@@ -75,6 +75,7 @@ class AudioBytes {
   private filling = false;
   private inspected = false;
   private priority: RequestPriority = "high";
+  private bulkRate?: number;
   private prefix: number;
   readonly decoderStart: number;
   private readonly preparedTagBytes: number;
@@ -244,10 +245,14 @@ class AudioBytes {
       let timer = setTimeout(expire, 10_000);
       try {
         const at = job.cursor;
+        const started = performance.now();
+        const rate = this.filling && priority === "low" ? this.bulkRate : undefined;
         const response = await this.read(this.file.url, {
-          headers: { Range: `bytes=${at}-${openEnded ? "" : job.end - 1}` },
+          headers: { Range: `bytes=${at}-${openEnded ? "" : job.end - 1}`,
+            ...(rate && {"X-Hibiki-Audio-Rate": String(rate)}) },
           signal, cache: "no-store", priority,
         });
+        const headersAt = performance.now();
         if ([401, 403, 404].includes(response.status)) {
           if (response.status === 404 && this.file.url.endsWith("/audio")) {
             const problem = await response.json().catch(() => null);
@@ -282,6 +287,15 @@ class AudioBytes {
         } finally {
           signal.removeEventListener("abort", cancel);
           reader.releaseLock();
+        }
+        const received = job.cursor - at;
+        if (!rate && at === this.decoderStart && received > 0 && job.end <= this.prefix) {
+          const ended = performance.now();
+          // Account for an already buffered first packet on a fast response,
+          // while discounting time spent waiting for an older stream's queue.
+          const elapsed = Math.max(1, ended - headersAt, (ended - started) / 2);
+          const bytesPerSecond = this.file.duration ? (this.file.size - this.audioStart) / this.file.duration : 0;
+          this.bulkRate = Math.ceil(Math.max(64 * 1024, bytesPerSecond * 1.5, received * 800 / elapsed));
         }
         return;
       } catch (error) {

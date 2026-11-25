@@ -367,3 +367,28 @@ it("starts a tagged MP3 at its first MPEG frame and fills a byte-identical origi
   const hash=(b:Uint8Array)=>createHash("sha256").update(b).digest("hex");
   expect(hash(new Uint8Array(await delivery.response("token",null)!.arrayBuffer()))).toBe(hash(raw));
 });
+
+it("uses the observed prefix speed to pace only the continuous background audio request", async () => {
+  let clock = 0;
+  const timer = vi.spyOn(performance, "now").mockImplementation(() => clock);
+  async function rateFor(sampleMs: number) {
+    const server = origin();
+    const hints: (string | null)[] = [];
+    const delivery = new AudioDelivery(async (url, init) => {
+      hints.push(new Headers(init.headers).get("X-Hibiki-Audio-Rate"));
+      clock += sampleMs;
+      return server.fetcher(url, init);
+    });
+    await delivery.prepare(file("song"));
+    delivery.select(file("song"), "play");
+    await delivery.fill();
+    expect(server.ranges).toEqual(["bytes=0-99999","bytes=100000-"]);
+    expect(hints[0]).toBeNull();
+    const hint = Number(hints[1]);
+    expect(hint).toBeGreaterThanOrEqual(65_536);
+    return hint;
+  }
+  try {
+    expect(await rateFor(20)).toBeGreaterThan(5 * await rateFor(200));
+  } finally { timer.mockRestore(); }
+});

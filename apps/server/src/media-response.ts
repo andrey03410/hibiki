@@ -1,6 +1,7 @@
 import { open } from "node:fs/promises";
 import { Readable } from "node:stream";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { bulkAudioStream } from "./audio-pacing";
 import { invariant } from "./errors";
 import { readOnlyMediaFlags } from "./media-playback";
 import { buildAudioView, readAudioRange, type AudioView } from "./mp4-audio";
@@ -69,7 +70,7 @@ export async function sendMediaFile(request: FastifyRequest, reply: FastifyReply
       : handle.createReadStream(range);
     if (view) stream.once("close", () => { void handle.close().catch(() => {}); });
     streaming = true;
-    return reply.send(stream);
+    return reply.send(bulkAudioStream(stream, view ? "audio/mp4" : file.mime, !!range, request.headers["x-hibiki-audio-rate"]));
   } finally {
     if (!streaming) await handle.close();
   }
