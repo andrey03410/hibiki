@@ -3,8 +3,9 @@ id: 16
 title: Производительность прослушивания и основных сценариев
 track: product
 stage: review
-branch: codex/16-production-tuning
-pr: https://github.com/andrey03410/hibiki/pull/22
+branch: codex/16-video-buffer
+pr: https://github.com/andrey03410/hibiki/pull/24
+tuning_pr: https://github.com/andrey03410/hibiki/pull/22
 initial_pr: https://github.com/andrey03410/hibiki/pull/18
 started: 2026-11-25
 merged:
@@ -25,7 +26,8 @@ merged:
 
 Первая реализация вышла в [PR №18](https://github.com/andrey03410/hibiki/pull/18).
 Во [второй итерации](https://github.com/andrey03410/hibiki/pull/22) учтены замеры
-на рабочем аккаунте, стабильность MCP при выкладке и скорости видеорежима.
+на рабочем аккаунте и стабильность MCP при выкладке. Упреждающая загрузка
+оригинала в видеорежиме вынесена в [PR №24](https://github.com/andrey03410/hibiki/pull/24).
 
 ## Стадии
 
