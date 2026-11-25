@@ -1,3 +1,4 @@
+import { accountStorage } from "./account-storage";
 import { kanameEnabled, markActivity, ownerAccess, requireHeavy } from "./kaname";
 import {
   MAX_MEDIA_UPLOAD_BYTES,
@@ -55,11 +56,11 @@ export function registerMcp(app: FastifyInstance, services: Services) {
           id: null,
           error: { code: -32001, message: "Нужен личный MCP-токен Hibiki" },
         });
-    if (kanameEnabled()) {
-      await ownerAccess(services.db, user.id);
+    const access = kanameEnabled() ? await ownerAccess(services.db, user.id) : null;
+    if (access) {
       if ((request.body as { method?: string })?.method === "tools/call") await markActivity(services.db, user.id);
     }
-    const server = buildMcp(user.id, services, pages);
+    const server = buildMcp(user.id, services, pages, access?.limits.storageBytes ?? null);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -83,7 +84,7 @@ export function registerMcp(app: FastifyInstance, services: Services) {
     });
 }
 
-export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages()) {
+export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages(), limitBytes: number | null = null) {
   const server = new McpServer(
     { name: "hibiki", version: "0.1.0" },
     { instructions },
@@ -102,7 +103,7 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
         inputSchema: schema,
         annotations: {
           readOnlyHint: readOnly,
-          destructiveHint: /delete|revoke/.test(name),
+          destructiveHint: /delete|revoke/.test(name) || name === "storage_cleanup",
           idempotentHint: readOnly,
         },
       },
@@ -171,6 +172,7 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
           "media_replace_source применяет выбранный источник к той же карточке; для локальной замены по URL дождитесь job_get. media_propose_replacement оставляет предложение для проверки в карточке.",
         historyRules:
           "Условия и сортировку по личной истории задаёт владелец в браузере. MCP читает состав уже сохранённых плейлистов.",
+        storage: "storage_usage показывает занятое место и объём доступной очистки. По команде владельца storage_cleanup с confirm=true удаляет подходящие ZIP завершённых импортов.",
         portability:
           "library_export → job_get → downloadUrl; library_import_begin → upload → job_get preview → library_import_apply",
         sharing:
@@ -532,6 +534,19 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
     "Повторить своё неудачное/отменённое задание",
     { jobId: id },
     (args) => s.jobs.retry(ownerId, args.jobId),
+  );
+  tool(
+    "storage_usage",
+    "Размер медиа, архивов, временных резервов и объём доступной очистки своего аккаунта в байтах",
+    {},
+    () => accountStorage(s.jobs, ownerId, limitBytes),
+    true,
+  );
+  tool(
+    "storage_cleanup",
+    "Освободить ZIP уже применённых импортов своего аккаунта. Медиа и готовые экспорты сохраняются. Сначала посмотрите оценку в storage_usage.",
+    { confirm: z.literal(true).describe("Подтверждение очистки завершённых импортов") },
+    () => s.jobs.cleanupArchives(ownerId),
   );
   tool(
     "library_export",
