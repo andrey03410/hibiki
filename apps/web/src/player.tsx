@@ -42,6 +42,7 @@ import { fetchItems } from "./library-pages";
 import { completeLibraryOrder, LibraryQueueLoad, QueueCatalog, QueueIntents } from "./queue-catalog";
 import { CompactPlaybackQueue, QueueRows, playbackBuffer, PlaybackSeekBar, PlaybackVolume, type BufferedRanges } from "./PlaybackControls";
 import { AudioDelivery, ownedAudioFile } from "./audio-delivery";
+import { attachM4aSource, canUseM4aSource } from "./audio-mp4";
 import { audioRelayReady, listenForAudioRanges, subscribeAudioRelay } from "./audio-relay";
 import { PlaybackFeedback } from "./playback-feedback";
 import { useListeningAttempt } from "./listening-client";
@@ -435,6 +436,15 @@ export function PlayerProvider({
     if (playing && relayKey && !relayReady) setDirectAudioKey(relayKey);
   }, [playing, relayKey, relayReady]);
   const audioUrl = file && audioToken ? `${file.url}?hibiki-audio=${audioToken}` : source?.streamUrl;
+  const [rangeOnlyToken, setRangeOnlyToken] = useState<string>();
+  const m4a = useRef<ReturnType<typeof attachM4aSource> | undefined>(undefined);
+  const m4aEnabled = !!audioToken && rangeOnlyToken !== audioToken && canUseM4aSource(file);
+  function fallbackToAudioRange() {
+    if (!m4aEnabled || !audioToken || deniedToken.current === audioToken) return false;
+    seekOnLoad.current = readPosition() ?? live.current.position;
+    setRangeOnlyToken(audioToken);
+    return true;
+  }
   useLayoutEffect(() => () => delivery.clear(), [delivery]);
   useLayoutEffect(() => listenForAudioRanges(delivery), [delivery, audioToken]);
   useLayoutEffect(() => {
@@ -465,8 +475,20 @@ export function PlayerProvider({
     completedAudio.current = false;
   }, [delivery, audioToken, sourceKey]);
   useLayoutEffect(() => {
-    if (playing && audioToken) void delivery.start().catch(() => {});
-  }, [delivery, playing, audioToken]);
+    const element = native.current;
+    if (!m4aEnabled || !file || !audioToken || !element) return;
+    try {
+      const session = attachM4aSource(element, file, delivery, audioToken, fallbackToAudioRange);
+      m4a.current = session;
+      return () => { session.close(); m4a.current = undefined; };
+    } catch { fallbackToAudioRange(); }
+  }, [delivery, audioToken, m4aEnabled]);
+  useLayoutEffect(() => {
+    if (playing && audioToken) {
+      void delivery.start().catch(() => {});
+      m4a.current?.start();
+    }
+  }, [delivery, playing, audioToken, m4aEnabled]);
   const mediaKey = useRef(sourceKey);
   const feedback = useMemo(() => new PlaybackFeedback(), [sourceKey]);
   const phase = useSyncExternalStore(feedback.subscribe, feedback.snapshot);
@@ -559,7 +581,7 @@ export function PlayerProvider({
       if (reason instanceof DOMException && reason.name === "NotAllowedError") {
         playIntent(false);
         setError("Нажмите «Воспроизвести», чтобы продолжить.");
-      } else {
+      } else if (!fallbackToAudioRange()) {
         void sourceError();
       }
     });
@@ -1020,7 +1042,19 @@ export function PlayerProvider({
         attempt.progress(...nativePlaybackReading(event.currentTarget));
     },
     onWaiting: nativeWaiting,
-    onSeeking: nativeWaiting,
+    onSeeking(event: SyntheticEvent<HTMLMediaElement>) {
+      const element = event.currentTarget;
+      if (!currentNative(element)) return;
+      const spans = element.buffered;
+      if (m4aEnabled && element.currentTime > 0) {
+        let buffered = false;
+        for (let i = 0; i < spans.length; i++) {
+          if (spans.start(i) <= element.currentTime && element.currentTime <= spans.end(i)) { buffered = true; break; }
+        }
+        if (!buffered) fallbackToAudioRange();
+      }
+      nativeWaiting(event);
+    },
     onSeeked(event: SyntheticEvent<HTMLMediaElement>) {
       const element = event.currentTarget;
       if (!currentNative(element)) return;
@@ -1049,7 +1083,7 @@ export function PlayerProvider({
       if (currentNative(event.currentTarget)) void next(1, true);
     },
     onError(event: SyntheticEvent<HTMLMediaElement>) {
-      if (currentNative(event.currentTarget)) void sourceError();
+      if (currentNative(event.currentTarget) && !fallbackToAudioRange()) void sourceError();
     },
   };
   async function toggle() {
@@ -1327,7 +1361,7 @@ export function PlayerProvider({
       if (playingRef.current) playNative(native.current);
       else native.current.pause();
     }
-  }, [playing, sourceKey, audioUrl]);
+  }, [playing, sourceKey, audioUrl, m4aEnabled]);
   useEffect(() => {
     if (native.current) native.current.volume = settings.volume;
   }, [settings.volume]);
@@ -1963,7 +1997,9 @@ export function PlayerProvider({
     <CardsContext.Provider value={cards}><CommandsContext.Provider value={stableCommands}><PlayerContext.Provider value={controller}>
       {children(player, miniPlayer)}
       {source && presentationKind === "audio" && (
-        <audio key={audioToken ?? sourceKey} ref={attachNative} src={audioUrl} preload={playing ? "auto" : "none"} {...nativeEvents} />
+        <audio key={m4aEnabled ? `mse-${audioToken}` : audioToken ?? sourceKey} ref={attachNative}
+          data-audio-source={audioUrl} src={m4aEnabled ? undefined : audioUrl}
+          preload={playing ? "auto" : "none"} {...nativeEvents} />
       )}
     </PlayerContext.Provider></CommandsContext.Provider></CardsContext.Provider>
   );

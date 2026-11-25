@@ -4,7 +4,7 @@ const MAX_FILE = 128 * 1024 * 1024;
 const MAX_PREFIX = 2 * 1024 * 1024;
 const PAGE = 64 * 1024;
 type ReadFile = (url: string, init: RequestInit) => Promise<Response>;
-type AudioFile = {
+export type AudioFile = {
   url: string; size: number; mime: string; prefix: number; duration?: number | null;
   audioStart?: number; tailStart?: number; shared?: boolean;
 };
