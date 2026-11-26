@@ -58,8 +58,9 @@ function ownedItemInclude(ownerId: string) {
     tags: { ...itemInclude.tags, where: { tag: { ownerId } } },
   };
 }
-type IncludedItem = NonNullable<
-  Awaited<ReturnType<Db["item"]["findFirst"]>>
+type IncludedItem = Pick<Prisma.ItemGetPayload<object>,
+  "id" | "ownerId" | "title" | "originalTitle" | "kind" | "duration" | "favorite" | "preferredSourceId" |
+  "createdAt" | "updatedAt" | "performance" | "voices" | "visualRevision"
 > & { visual?: Prisma.ItemVisualGetPayload<{select: typeof visualSelect}> | null; sources: Array<any>; tags: Array<any> };
 export function itemDto(row: IncludedItem): ItemDto {
   const coverVersion = artworkVersion(row.sources);
@@ -125,10 +126,10 @@ async function batchItems(tx: Prisma.TransactionClient, ownerId: string, ids: st
 }
 
 export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: false): Promise<ItemDto[]>;
-export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: true, library: LibraryService): Promise<ItemDto[]>;
-export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: boolean, library?: LibraryService) {
+export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: true, library: LibraryService, batch?: boolean): Promise<ItemDto[]>;
+export async function hydrateLibraryItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[], includeShared: boolean, library?: LibraryService, batch = ids.length >= 24) {
   if (!ids.length) return [];
-  const owned = ids.length >= 24 ? await batchItems(tx, ownerId, ids) : (await tx.item.findMany({
+  const owned = batch ? await batchItems(tx, ownerId, ids) : (await tx.item.findMany({
     where: { ownerId, id: { in: ids } },
     include: ownedItemInclude(ownerId),
   })).map(itemDto);
@@ -961,10 +962,66 @@ export class LibraryService {
     }
     return true;
   }
+  // Walk the requested IDs first. Without CROSS JOIN, SQLite scans the owner's
+  // library once per visible ID. Simple owned items can read tags, file hints and
+  // playback URLs together; sharing, attached videos and source ordering use
+  // the same live projection as the full library.
+  async itemWindow(tx: Prisma.TransactionClient, ownerId: string, ids: string[]) {
+    if (!ids.length) return [];
+    type WindowRow = Omit<IncludedItem, "sources" | "tags"> & {
+      sourcesJson: string | null; tagsJson: string | null; needsProjection: bigint;
+    };
+    const rows = await tx.$queryRaw<WindowRow[]>`
+      WITH window AS MATERIALIZED (
+        SELECT i.id, i.ownerId, i.title, i.originalTitle, i.kind, i.duration, i.favorite, i.preferredSourceId,
+          i.createdAt, i.updatedAt, i.performance, i.voices, i.visualRevision, member.key AS position,
+          (v.itemId IS NOT NULL OR t.recipientItemId IS NOT NULL OR EXISTS (
+            SELECT 1 FROM Source s WHERE s.itemId = i.id LIMIT 1 OFFSET 1)) AS needsProjection
+        FROM json_each(${JSON.stringify(ids)}) member CROSS JOIN Item i ON i.id = member.value AND i.ownerId = ${ownerId}
+        LEFT JOIN ItemVisual v ON v.itemId = i.id LEFT JOIN SharedTrack t ON t.recipientItemId = i.id
+      ) SELECT i.*, CASE WHEN NOT needsProjection THEN (SELECT json_group_array(json_object('id',s.id,'ownerId',s.ownerId,'provider',s.provider,
+          'externalId',s.externalId,'url',s.url,'status',s.status,'reason',s.reason,'thumbnail',s.thumbnail,
+          'fileId',s.fileId,'file',CASE WHEN f.id IS NOT NULL THEN json_object(
+            'hash',f.hash,'kind',f.kind,'bytes',f.bytes,'mime',f.mime,'hasAudio',
+            json(CASE f.hasAudio WHEN 0 THEN 'false' WHEN 1 THEN 'true' ELSE 'null' END),
+            'audioStart',f.audioStart,'tailStart',f.tailStart,'hintsVersion',f.hintsVersion,
+            'audioViewStart',f.audioViewStart,'audioViewBytes',f.audioViewBytes,'audioViewVersion',f.audioViewVersion) END))
+          FROM Source s LEFT JOIN MediaFile f ON f.id = s.fileId AND f.ownerId = i.ownerId
+          WHERE s.itemId = i.id AND s.ownerId = i.ownerId AND (s.fileId IS NULL OR f.id IS NOT NULL)) END AS sourcesJson,
+        CASE WHEN NOT needsProjection AND ${ids.length >= 24} THEN (SELECT json_group_array(json_object('tag', json_object('id',g.id,'name',g.name,'label',g.label,
+          'color',g.color,'group',g."group",'legacyFlat',g.legacyFlat,'aliases',g.aliases,'parentIds',g.parentIds,
+          'archived',json(CASE WHEN g.archived THEN 'true' ELSE 'false' END))) ORDER BY g.id)
+          FROM ItemTag it JOIN Tag g ON g.id = it.tagId AND g.ownerId = i.ownerId WHERE it.itemId = i.id) END AS tagsJson
+      FROM window i ORDER BY i.position`;
+    const smallTags = new Map<string, IncludedItem["tags"]>();
+    // Match the ORM's assignment order on small pages. Large batches already
+    // order tags by ID in batchItems.
+    if (ids.length < 24 && rows.some(row => row.needsProjection)) {
+      return hydrateLibraryItems(tx, ownerId, ids, true, this);
+    }
+    if (ids.length < 24) {
+      const owned = [...new Set(rows.map(row => row.id))];
+      const assignments = owned.length ? await tx.$queryRaw<(Parameters<typeof tagDto>[0] & {itemId: string})[]>`
+        SELECT it.itemId, g.id, g.name, g.label, g.color, g."group", g.legacyFlat, g.aliases, g.parentIds, g.archived
+        FROM ItemTag it LEFT JOIN Tag g ON g.id = it.tagId
+        WHERE g.ownerId = ${ownerId} AND g.id IS NOT NULL AND it.itemId IN (${Prisma.join(owned)})` : [];
+      for (const entry of assignments) {
+        const assigned = smallTags.get(entry.itemId) ?? [];
+        assigned.push({tag: entry});
+        smallTags.set(entry.itemId, assigned);
+      }
+    }
+    const projected = await hydrateLibraryItems(tx, ownerId, rows.filter(row => row.needsProjection).map(row => row.id), true, this, ids.length >= 24);
+    const byId = new Map(projected.map(item => [item.id, item]));
+    return rows.flatMap(row => row.needsProjection ? byId.get(row.id) ?? [] : itemDto({ ...row,
+      createdAt: new Date(row.createdAt), updatedAt: new Date(row.updatedAt), favorite: Boolean(row.favorite),
+      sources: JSON.parse(row.sourcesJson!), tags: row.tagsJson ? JSON.parse(row.tagsJson) : smallTags.get(row.id) ?? [],
+    }));
+  }
   async playlistPlayback(ownerId: string, id: string): Promise<PlaylistPlaybackDto> {
     return this.db.$transaction(async tx => {
       const ids = await this.playlistIds(tx, ownerId, id);
-      return { ids, items: await hydrateLibraryItems(tx, ownerId, ids.slice(0, 8), true, this) };
+      return { ids, items: await this.itemWindow(tx, ownerId, ids.slice(0, 8)) };
     });
   }
   async playlistIds(tx: Prisma.TransactionClient, ownerId: string, id: string, now = new Date()): Promise<string[]> {
@@ -1123,7 +1180,8 @@ export class LibraryService {
   ) {
     const { result, usesHistory, validUntil } = await this.evaluateRuleRows(tx, ownerId, definition, id);
     const ids = result.items.map(item => item.id);
-    const items = await hydrateLibraryItems(tx, ownerId, limit === undefined ? ids : ids.slice(0, limit), true, this);
+    const items = limit === undefined ? await hydrateLibraryItems(tx, ownerId, ids, true, this)
+      : await this.itemWindow(tx, ownerId, ids.slice(0, limit));
     const cover = limit !== undefined && ids.length > limit && !items.some(i => i.sources.some(s => s.thumbnail))
       ? await this.coverBeyondWindow(tx, ownerId, ids.slice(limit)) : undefined;
     const resolved = { ...result, items, ...(limit !== undefined && { excluded: [] }),
@@ -1155,7 +1213,7 @@ export class LibraryService {
       invariant(work?.changeToken === changeToken && (validUntil === null || +now < validUntil),
         409, "playlist_changed", "Состав плейлиста изменился");
       const ids = await this.playlistIds(tx, ownerId, id, now);
-      return { items: await hydrateLibraryItems(tx, ownerId, ids.slice(offset, offset + 100), true, this) };
+      return { items: await this.itemWindow(tx, ownerId, ids.slice(offset, offset + 100)) };
     });
   }
   async playlistExclusions(ownerId: string, id: string, offset: number) {
