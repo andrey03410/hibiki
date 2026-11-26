@@ -93,25 +93,30 @@ export function VisualEditor({ item, reload }: { item: ItemDto; reload: () => Pr
     const expectedRevision = current.visualRevision ?? current.visual?.revision ?? 0;
     const soundSourceId = soundId || assignedSound?.id;
     try {
-      if (remove) await api(path + "/visual", "DELETE", {expectedRevision});
-      else if (mode === "file" && file) {
+      if (remove) {
+        await api(path + "/visual", "DELETE", {expectedRevision});
+        setUpdated(await api<ItemDto>(path));
+        setEditing(false);
+        setNotice("Оригинал восстановлен.");
+        await reload();
+        return;
+      }
+      const options = {expectedRevision, soundSourceId, ...(streamIndex && {videoStreamIndex: Number(streamIndex)})};
+      let job: JobDto;
+      if (mode === "file") {
+        if (!file) return;
         const form = new FormData();
         form.append("file", file);
         const query = new URLSearchParams({expectedRevision: String(expectedRevision)});
         if (streamIndex) query.set("videoStreamIndex", streamIndex);
         if (soundSourceId) query.set("soundSourceId", soundSourceId);
-        const job = await api<JobDto>(path + "/visual/upload?" + query, "POST", form);
-        sessionStorage.setItem(storageKey, job.id);
-        setJobId(job.id);
-        setPollError(false);
-        return;
+        job = await api<JobDto>(path + "/visual/upload?" + query, "POST", form);
       } else {
-        await api(path + "/visual", "PUT", {expectedRevision, soundSourceId, ...(streamIndex && {videoStreamIndex: Number(streamIndex)}), visualSourceId: visualSourceId || donorSources[0]?.id});
+        job = await api<JobDto>(path + "/visual/prepare", "POST", {...options, visualSourceId: donorSource?.id});
       }
-      setUpdated(await api<ItemDto>(path));
-      setEditing(false);
-      setNotice(remove ? "Оригинал восстановлен." : "Клип обновлён.");
-      await reload();
+      sessionStorage.setItem(storageKey, job.id);
+      setJobId(job.id);
+      setPollError(false);
     } catch (failure) {
       showFailure((failure as Error).message);
       void api<ItemDto>(path).then(setUpdated).catch(() => {});
