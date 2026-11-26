@@ -2,7 +2,7 @@
 id: 21
 title: Быстрый старт, плавное видео и открытие плейлистов
 track: product
-stage: product
+stage: tech
 branch: codex/21-media-playlist-performance
 pr: null
 started: 2026-11-26
@@ -11,7 +11,7 @@ started: 2026-11-26
 # 21. Быстрый старт, плавное видео и открытие плейлистов
 
 - [x] [Бриф](brief.md)
-- [ ] [Продукт](product.md)
+- [x] [Продукт](product.md)
 - [ ] [Техника](tech.md)
 - [ ] [План](plan.md)
 - [ ] [Проверка](verify.md)
