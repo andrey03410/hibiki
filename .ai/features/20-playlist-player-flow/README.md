@@ -2,11 +2,11 @@
 id: 20
 title: Запуск плейлистов и непрерывное воспроизведение
 track: product
-stage: review
+stage: merged
 branch: codex/20-playlist-player-flow
 pr: https://github.com/andrey03410/hibiki/pull/30
 started: 2026-11-26
-merged:
+merged: 2026-11-26
 ---
 
 # 20. Запуск плейлистов и непрерывное воспроизведение
@@ -20,7 +20,7 @@ merged:
 - [x] [Технические решения](tech.md)
 - [x] [План](plan.md)
 - [x] [Реализация и проверка](verify.md)
-- [ ] Приёмка владельцем и вливание
+- [x] Автономная приёмка по поручению владельца и [вливание через PR №30](https://github.com/andrey03410/hibiki/pull/30)
 
 Режим — автономно до деплоя по поручению владельца от 26 ноября 2026 года.
 
