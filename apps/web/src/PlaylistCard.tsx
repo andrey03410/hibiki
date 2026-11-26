@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { Link2, ListMusic, Pencil, Sparkles, Youtube } from "lucide-react";
+import { Link2, ListMusic, Pencil, Play, Sparkles, Youtube } from "lucide-react";
 import type { ItemDto, PlaylistSummaryDto } from "@hibiki/contracts";
 import { mediaWord } from "./api";
 import { ArtworkImage } from "./ItemArtwork";
@@ -32,22 +32,28 @@ export function PlaylistCover({
   );
 }
 
-export function PlaylistCard({ playlist, hasNote, onShare }: {
+export function PlaylistCard({ playlist, hasNote, onShare, onPlay, onEdit }: {
   playlist: PlaylistSummaryDto;
   hasNote: boolean;
   onShare: () => void;
+  onPlay: () => void;
+  onEdit: (trigger: HTMLButtonElement) => void;
 }) {
   return (
     <article className="playlist-card">
-      <Link className="playlist-cover-wrap" to={`/playlists/${playlist.id}?edit=1`}
-        aria-label={`Редактировать плейлист «${playlist.title}»`} title="Редактировать плейлист">
-        <PlaylistCover title={playlist.title} coverUrls={playlist.coverUrls} />
-        <span className="cover-type">
-          {playlist.youtubeLinked ? <Youtube size={13} /> : playlist.manual ? <ListMusic size={13} /> : <Sparkles size={13} />}
-          {playlist.youtubeLinked ? "СВЯЗЬ С YOUTUBE" : playlist.manual ? "ВАШ ВЫБОР" : "ПО ПРАВИЛАМ"}
-        </span>
-        <span className="playlist-cover-edit" aria-hidden="true"><Pencil size={15} /></span>
-      </Link>
+      <div className="playlist-cover-wrap">
+        <button type="button" className="playlist-cover-play" onClick={onPlay}
+          aria-label={`Воспроизвести плейлист «${playlist.title}»`}>
+          <PlaylistCover title={playlist.title} coverUrls={playlist.coverUrls} />
+          <span className="cover-type">
+            {playlist.youtubeLinked ? <Youtube size={13} /> : playlist.manual ? <ListMusic size={13} /> : <Sparkles size={13} />}
+            {playlist.youtubeLinked ? "СВЯЗЬ С YOUTUBE" : playlist.manual ? "ВАШ ВЫБОР" : "ПО ПРАВИЛАМ"}
+          </span>
+          <span className="playlist-play-mark" aria-hidden="true"><Play size={22} fill="currentColor" /></span>
+        </button>
+        <button type="button" className="playlist-cover-edit" aria-label={`Редактировать плейлист «${playlist.title}»`}
+          title="Редактировать плейлист" onClick={event => onEdit(event.currentTarget)}><Pencil size={15} /></button>
+      </div>
       <Link className="playlist-card-title" to={`/playlists/${playlist.id}`} title={playlist.title}>
         {playlist.title}
       </Link>

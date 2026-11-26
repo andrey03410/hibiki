@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { ArrowLeft, Check, Copy, FilePlus2, Headphones, Link2, ListMusic, LoaderCircle, Pause, Play, RefreshCw, Settings2, Trash2, X } from "lucide-react";
+import { ArrowLeft, Check, Copy, FilePlus2, Headphones, Link2, LoaderCircle, Pause, Play, RefreshCw, Settings2, Trash2, X } from "lucide-react";
 import type { ItemDto, PlaybackMode, SavedSharedPlaylistDto, ShareKind, ShareLinkDto, SharedViewDto } from "@hibiki/contracts";
 import { api, formatDuration, mediaWord } from "./api";
 import { ItemArtwork } from "./ItemArtwork";
 import { usePlayer } from "./player";
-import { playbackSources } from "./player-model";
+import { playbackSources, soundUnavailableReason } from "./player-model";
 import { formatShareExpiry, isClosedShare, issueShare, orderedSharedItems, shareExpiry, shareLocalTime, shareStatusLabel, type ShareDuration } from "./sharing-model";
 import { useSharingRequest } from "./use-sharing-request";
 import "./sharing.css";
@@ -300,12 +300,13 @@ export function ShareManager() {
   );
 }
 
-export function SavedSharedPlaylistCard({ playlist }: { playlist: SavedSharedPlaylistDto }) {
+export function SavedSharedPlaylistCard({ playlist, onPlay }: { playlist: SavedSharedPlaylistDto; onPlay: () => void }) {
   return (
     <article className="playlist-card saved-shared-card">
-      <Link className="shared-card-art" to={`/shared-playlists/${encodeURIComponent(playlist.id)}`} aria-label={playlist.title}>
-        <ListMusic size={37} aria-hidden="true" />
-      </Link>
+      <button type="button" className="shared-card-art" onClick={onPlay}
+        aria-label={`Воспроизвести плейлист «${playlist.title}»`}>
+        <span className="playlist-play-mark" aria-hidden="true"><Play size={22} fill="currentColor" /></span>
+      </button>
       <Link className="playlist-card-title" to={`/shared-playlists/${encodeURIComponent(playlist.id)}`}>{playlist.title}</Link>
       <p>Поделился {playlist.sharedBy}</p>
       <span className="small muted">
@@ -354,7 +355,7 @@ function SharedMedia({ path, saved, refreshLibrary }: { path: string; saved?: bo
     }
   }, [path]);
   async function play(itemId?: string, mode: PlaybackMode = "original") {
-    if (itemId && player.sharedId(path, itemId) === player.current?.id && player.playing) {
+    if (data?.kind === "item" && itemId && player.sharedId(path, itemId) === player.current?.id && player.playing) {
       ++playbackRequest.current;
       setPlayingRequest(undefined);
       player.toggle();
@@ -373,7 +374,15 @@ function SharedMedia({ path, saved, refreshLibrary }: { path: string; saved?: bo
         void refresh();
         return;
       }
-      await player.playShared(path, next, index, loadEntries, { mode, isCurrent, activate: !!itemId, openPlayer: mode === "original" && (!!next[index]?.visual || (!itemId && data?.kind === "playlist")) });
+      const fromLibrary = data?.kind === "playlist" && (!!itemId || mode === "audio");
+      if (fromLibrary && itemId && soundUnavailableReason(next[index]!)) {
+        void refresh();
+        return;
+      }
+      await player.playShared(path, next, index, loadEntries, {
+        mode: fromLibrary ? "audio" : mode, isCurrent, fromLibrary, activate: !!itemId,
+        openPlayer: !fromLibrary && mode === "original" && (!!next[index]?.visual || data?.kind === "playlist"),
+      });
     } catch (failure) {
       if (isCurrent()) setActionError((failure as Error).message);
     } finally {
@@ -457,16 +466,18 @@ function SharedMedia({ path, saved, refreshLibrary }: { path: string; saved?: bo
             </li>;
             const active = player.current?.id === player.sharedId(path, item.id) && !!player.current;
             const playing = active && player.playing;
+            const unavailable = soundUnavailableReason(item);
             return <li key={item.id} className="shared-track" aria-current={active || undefined}>
               <button type="button" className="icon-button" onClick={() => void play(item.id)}
                 aria-label={`${playing ? "Приостановить" : "Воспроизвести"} ${item.title}`}
-                disabled={!playbackSources(item).length || playingRequest === item.id}>
+                disabled={!!unavailable || playingRequest === item.id} title={unavailable}>
                 {playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}
               </button>
               <span className={`item-art art-${index % 6}`} aria-hidden="true">
                 <ItemArtwork source={item.sources.find(source => source.thumbnail)} kind={item.kind} />
               </span>
-              <div className="share-link-target"><strong>{item.title}</strong><span className="small muted">{item.kind === "video" ? "Видео" : "Аудио"} · {formatDuration(item.duration)} · {item.shared?.sharedBy ?? data.sharedBy}</span></div>
+              <div className="share-link-target"><strong>{item.title}</strong><span className="small muted">{item.kind === "video" ? "Видео" : "Аудио"} · {formatDuration(item.duration)} · {item.shared?.sharedBy ?? data.sharedBy}</span>
+                {unavailable && <span className="small muted">{unavailable}</span>}</div>
               {!item.shared?.delegated && (savedItems.has(item.id) ? <span className="share-saved-marker" role="status"><Check size={16} />Добавлено</span> :
                 <button type="button" className="button subtle" disabled={saving !== undefined} onClick={() => void save(item.id)}
                   aria-label={`Добавить в медиатеку: ${item.title}`}><FilePlus2 size={16} />{saving === item.id ? "Добавляем…" : "Добавить"}</button>)}

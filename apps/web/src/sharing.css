@@ -136,6 +136,9 @@
   background: radial-gradient(ellipse at 65% 0, #53416f, #292236 78%);
 }
 .shared-card-art {
+  position: relative;
+  width: 100%;
+  border: none;
   aspect-ratio: 1.55;
   margin-bottom: 12px;
 }

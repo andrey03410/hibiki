@@ -124,9 +124,24 @@ it("uses the curator's order for playback and preserves legacy views without a p
   expect(orderedSharedItems({ items: [delegated, direct] })).toEqual([delegated, direct]);
 });
 
-it("shows available and total counts in the saved playlist catalog", () => {
+it("offers a background start on a saved cover and keeps its title linked to the full list", () => {
   const html = renderToStaticMarkup(createElement(MemoryRouter, {}, createElement(SavedSharedPlaylistCard, {
-    playlist: { id: "saved", title: "Подборка", sharedBy: "Составитель", status: "active", trackCount: 2, totalCount: 3 },
+    onPlay: () => {}, playlist: { id: "saved", title: "Подборка", sharedBy: "Составитель", status: "active", trackCount: 2, totalCount: 3 },
   })));
   expect(html).toContain("2 из 3");
+  expect(html).toMatch(/<button[^>]+aria-label="Воспроизвести плейлист «Подборка»"/);
+  expect(html).toMatch(/<a[^>]+href="\/shared-playlists\/saved"[^>]*>Подборка<\/a>/);
+});
+
+it("keeps the order at launch and drops stale metadata when shared positions change", () => {
+  const nowClosed = {...mixed, items: [delegated, direct], positions: [delegated.id, null]};
+  expect(orderedSharedItems(nowClosed, [direct.id, null, delegated.id])).toEqual([null, null, delegated]);
+});
+
+it("explains silent video at its playlist row", () => {
+  const silent = {...direct, kind: "video" as const, sources: [{...direct.sources[0]!, hasAudio: false, mime: "video/mp4"}]};
+  const html = sharedPage({...mixed, items: [silent, delegated]});
+  const row = html.match(/<li\b[^>]*>[\s\S]*?<\/li>/)?.[0];
+  expect(row).toContain("В видео нет звуковой дорожки");
+  expect(row).toMatch(/<button[^>]+disabled/);
 });
