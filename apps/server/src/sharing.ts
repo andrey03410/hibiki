@@ -9,6 +9,8 @@ import type { Db } from "./db";
 import type { LibraryService } from "./library";
 import { HttpError, invariant } from "./errors";
 import { countInputs, upstreamAuthorIds, type ShareTarget, type UpstreamScope } from "./share-playlist-counts";
+import { visualFields, visualSelect } from "./visual-fields";
+import { roleFile, type SharedComposition } from "./visuals";
 import { centralAccess, checkItems, env, kanameEnabled, ownerAccess } from "./kaname";
 
 type Tx = Prisma.TransactionClient;
@@ -16,7 +18,7 @@ type LinkTarget = { title: string };
 type SaveResult = { id: string; kind: ShareKind };
 type ValidLink = { link: ShareLink; target: LinkTarget; sharedBy: string };
 type CopySource =
-  | { provider: "local"; path: string; sourceId: string }
+  | { provider: "local"; path: string; sourceId: string; composition?: SharedComposition }
   | { provider: "youtube"; externalId: string; sourceId: string };
 type AuthorProof = { ownerId: string; issuer: string; subject: string };
 type AuthorAccount = { login: string; kanameIssuer: string | null; kanameSubject: string | null };
@@ -69,6 +71,7 @@ export type SharedMediaRef =
   | { kind: "item"; id: string };
 
 const originSelect = {
+  visualRevision: true, visual: {select:visualSelect},
   id: true,
   ownerId: true,
   title: true,
@@ -120,6 +123,19 @@ const mediaBase = (ref: SharedMediaRef) => {
 };
 
 function projectedSources(item: Origin, ref: SharedMediaRef): SourceDto[] {
+  if (item.visual) {
+    const source = ownedSources(item).find(s => s.id === item.visual!.soundSourceId && s.status === "available");
+    const original = source?.file;
+    const audio = item.visual.soundFile ?? original;
+    if (!source || !original || audio?.ownerId !== item.ownerId || item.visual.visualTrack.ownerId !== item.ownerId) return [];
+    const virtual = !item.visual.soundFile && original.kind === "video";
+    return [{id:sourceKey(source.id),provider:"local",shared:true,status:"available",hasAudio:true,
+      streamUrl:mediaBase(ref) + "/sound/" + item.visualRevision, mime:virtual ? "audio/mp4" : audio.mime,
+      bytes:Number(virtual ? original.audioViewBytes : audio.bytes),
+      ...(virtual && original.audioViewStart != null && {playbackHints:{audioStart:Number(original.audioViewStart)}}),
+      thumbnail:original.kind === "audio" ? mediaBase(ref) + "/artwork" : undefined,
+    }];
+  }
   return ownedSources(item).flatMap((source): SourceDto[] => {
     const id = sourceKey(source.id);
     const status = source.status === "available" || source.status === "unavailable"
@@ -149,6 +165,7 @@ function projectedItem(slot: Extract<Position, { origin: Origin }>, ref: SharedM
   const sources = projectedSources(origin, ref);
   const sharedPreferred = preferredSourceId ? sourceKey(preferredSourceId) : undefined;
   return {
+    ...visualFields(origin,mediaBase(ref),origin.visual && sources.length ? sources[0].id : undefined),
     id, title, originalTitle: title, duration,
     kind: origin.kind === "video" ? "video" : "audio",
     createdAt: sharedAt,
@@ -431,7 +448,10 @@ export async function decorateSharedItems(
     const sources = projectedSources(origin, { kind: "item", id: item.id });
     const preferred = origin.preferredSourceId ? sourceKey(origin.preferredSourceId) : undefined;
     return {
-      ...item, sources: [...item.sources, ...sources],
+      ...item, ...(!item.sources.length && visualFields(origin,mediaBase({kind:"item",id:item.id}),
+        origin.visual && sources.length ? sources[0].id : undefined)),
+      ...(!item.sources.length && {duration:origin.duration,kind:origin.kind === "video" ? "video" as const : "audio" as const}),
+      sources: [...item.sources, ...sources],
       preferredSourceId: item.preferredSourceId ??
         (item.sources.length === 0 ? sources.find(source => source.id === preferred)?.id : undefined),
       shared: { sharedBy, available: true },
@@ -774,11 +794,19 @@ export class ShareService {
   async file(viewerId: string, ref: SharedMediaRef, key: string) {
     return this.withViewer(viewerId, async lookup => {
       const origin = await this.mediaOrigin(lookup, viewerId, ref);
+      requireShared(!origin.visual);
       const source = ownedSources(origin).find(row =>
         row.provider === "local" && row.status !== "unavailable" && sourceKey(row.id) === key);
       const file = requireShared(source?.file);
       return { path: file.path, mime: file.mime, id: file.id, hash: file.hash };
     }, await this.authorizeMedia(viewerId, ref));
+  }
+
+  async role(viewerId: string, ref: SharedMediaRef, revision: number, role: "sound" | "visual") {
+    return this.withViewer(viewerId, async lookup => {
+      const origin = await this.mediaOrigin(lookup,viewerId,ref);
+      return roleFile(lookup.tx,origin.ownerId,origin.id,revision,role);
+    }, await this.authorizeMedia(viewerId,ref));
   }
 
   async artworkOrigin(viewerId: string, ref: SharedMediaRef) {
@@ -791,6 +819,14 @@ export class ShareService {
   async copySource(viewerId: string, itemId: string, tx?: Tx, proof?: AuthorProof | null): Promise<CopySource> {
     const select = async (lookup: ShareLookup): Promise<CopySource> => {
       const item = await this.received(lookup, viewerId, itemId);
+      if (item.visual) {
+        const track = requireShared(await lookup.tx.visualTrack.findFirst({where:{id:item.visual.visualTrack.id,ownerId:item.ownerId}}));
+        const sound = await roleFile(lookup.tx,item.ownerId,item.id,item.visualRevision,"sound");
+        const visual = await roleFile(lookup.tx,item.ownerId,item.id,item.visualRevision,"visual");
+        return {provider:"local",sourceId:item.visual.soundSourceId,path:sound.file.path,composition:{
+          sound,visual, signature:track.signature,duration:track.duration,revision:item.visualRevision,
+        }};
+      }
       const sources = ownedSources(item).filter(source => source.status !== "unavailable");
       sources.sort((a, b) => Number(b.id === item.preferredSourceId) - Number(a.id === item.preferredSourceId));
       for (const source of sources) {

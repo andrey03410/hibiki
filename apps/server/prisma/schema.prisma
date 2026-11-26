@@ -68,6 +68,9 @@ model Item {
   performance String @default("unknown")
   voices String @default("[]")
   note String?
+  visualRevision Int @default(0)
+  visual ItemVisual?
+  visualOperations VisualOperation[]
   preferredSourceId String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -95,6 +98,7 @@ model Source {
   thumbnail String?
   note String?
   item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  visualAssignments ItemVisual[]
   file MediaFile? @relation(fields: [fileId], references: [id], onDelete: Restrict)
   @@index([itemId])
   @@unique([ownerId, key])
@@ -118,6 +122,8 @@ model MediaFile {
   audioViewVersion Int @default(0)
   createdAt DateTime @default(now())
   sources Source[]
+  visualTracks VisualTrack[]
+  visualSounds ItemVisual[]
   @@unique([ownerId, hash])
 }
 
@@ -395,4 +401,51 @@ model SavedSharedPlaylist {
   @@unique([recipientId, shareLinkId])
   @@index([recipientId, createdAt])
   @@index([shareLinkId])
+}
+
+model VisualTrack {
+  id String @id
+  ownerId String
+  signature String
+  fileId String
+  streamIndex Int?
+  duration Float
+  file MediaFile @relation(fields: [fileId], references: [id], onDelete: Restrict)
+  preparations VisualPreparation[]
+  assignments ItemVisual[]
+  @@unique([ownerId, signature])
+  @@index([fileId])
+}
+
+model ItemVisual {
+  itemId String @id
+  soundSourceId String
+  soundFileId String?
+  visualTrackId String
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  soundSource Source @relation(fields: [soundSourceId], references: [id], onDelete: Cascade)
+  soundFile MediaFile? @relation(fields: [soundFileId], references: [id], onDelete: Restrict)
+  visualTrack VisualTrack @relation(fields: [visualTrackId], references: [id], onDelete: Restrict)
+  @@index([visualTrackId])
+  @@index([soundFileId])
+}
+
+model VisualOperation {
+  itemId String
+  key String
+  request String
+  result String
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  @@id([itemId, key])
+}
+
+model VisualPreparation {
+  ownerId String
+  fileHash String
+  streamIndex Int
+  profile Int
+  visualTrackId String
+  visualTrack VisualTrack @relation(fields: [visualTrackId], references: [id], onDelete: Cascade)
+  @@id([ownerId, fileHash, streamIndex, profile])
+  @@index([visualTrackId])
 }

@@ -109,10 +109,10 @@ function writeOffsets(table: Buffer, offsets: ArrayLike<number>, base: number) {
 type Slice = { virtual: number; source: number; length: number };
 export type AudioView = { header: Buffer; slices: Slice[]; bytes: number };
 
-function parseTrack(trak: Box) {
+function parseTrack(trak: Box, handler: string) {
   const track = children(trak.body);
   const mdia = children(child(track, "mdia").body);
-  if (child(mdia, "hdlr").body.toString("ascii", 8, 12) !== "soun") return;
+  if (child(mdia, "hdlr").body.toString("ascii", 8, 12) !== handler) return;
   return { track, mdia, tkhd: child(track, "tkhd").body };
 }
 function movieDuration(mvhd: Buffer, tkhd: Buffer) {
@@ -139,11 +139,13 @@ export function buildHeader(chunkStarts: Float64Array, layout: (table: Buffer) =
   writeOffsets(table, chunkStarts, base);
   return { head: Buffer.concat(parts, base), base };
 }
-function parseMoov(data: Buffer, mdats: BoxHeader[]): AudioView {
+function parseMoov(data: Buffer, mdats: BoxHeader[], videoIndex?: number) {
   const movie = children(data);
   check(!movie.some(b => b.type === "mvex"));
-  const tracks = movie.filter(b => b.type === "trak").map(parseTrack).filter(t => t !== undefined);
-  const selected = tracks.find(t => t.tkhd.readUInt32BE(0) & 1) ?? tracks[0];
+  const traks = movie.filter(b => b.type === "trak");
+  const tracks = traks.map(t => parseTrack(t, videoIndex === undefined ? "soun" : "vide"));
+  const selected = videoIndex === undefined ? tracks.find(t => t && (t.tkhd.readUInt32BE(0) & 1)) ?? tracks.find(Boolean)
+    : tracks[videoIndex];
   check(selected);
   const { track, mdia, tkhd } = selected;
   const minf = children(child(mdia, "minf").body);
@@ -151,7 +153,7 @@ function parseMoov(data: Buffer, mdats: BoxHeader[]): AudioView {
   const stsd = child(stbl, "stsd").body;
   const descriptions = children(stsd.subarray(8));
   check(descriptions.length === stsd.readUInt32BE(4) && descriptions.length > 0 &&
-    descriptions.every(d => supportedEntries.has(d.type) && d.body.readUInt16BE(6) === 1));
+    descriptions.every(d => (videoIndex === undefined ? supportedEntries.has(d.type) : ["avc1", "avc3"].includes(d.type)) && d.body.readUInt16BE(6) === 1));
   // Keep only tracks whose samples refer to the current file.
   const dref = child(children(child(minf, "dinf").body), "dref").body;
   const ref = children(dref.subarray(8))[0];
@@ -202,27 +204,80 @@ function parseMoov(data: Buffer, mdats: BoxHeader[]): AudioView {
   }
   check(sample === samples);
   const mvhd = movieDuration(child(movie, "mvhd").body, tkhd);
-  const ftyp = box("ftyp", [Buffer.from("M4A \0\0\0\0M4A isommp42", "latin1")]);
+  const isVideo = videoIndex !== undefined;
+  const ftyp = box("ftyp", [Buffer.from(isVideo ? "isom\0\0\0\0isomiso2avc1mp41" : "M4A \0\0\0\0M4A isommp42", "latin1")]);
   const mdatHeader = prefix("mdat", payload);
+  const configBoxes = (description: Box) => children(description.body.subarray(78))
+    .filter(b => ["avcC", "pasp", "colr", "clap", "fiel", "mdcv", "clli"].includes(b.type));
+  const keep = (boxes: Box[], types: string[]) => isVideo ? boxes.filter(b => types.includes(b.type)) : boxes;
+  const sampleTable = keep(stbl, ["stsd", "stts", "ctts", "stss", "stsc", "stsz", "stco", "co64", "sdtp", "sgpd", "sbgp"]);
+  const mediaInfoBoxes = keep(minf, ["vmhd", "dinf", "stbl"]);
+  const mediaBoxes = keep(mdia, ["mdhd", "hdlr", "minf"]);
+  const trackBoxes = keep(track, ["tkhd", "edts", "mdia"]).filter(b => b.type !== "tref");
+  if (isVideo) {
+    const sanitize = (boxes: Box[], type: string, body: Buffer[]) => {
+      const index = boxes.findIndex(b => b.type === type);
+      if (index >= 0) boxes[index] = { ...boxes[index], raw: box(type, body) };
+    };
+    const samples = descriptions.map(d => {
+      const fields = Buffer.from(d.body.subarray(0, 78));
+      fields.fill(0, 42, 74); // Optional compressor name is arbitrary donor text.
+      return box(d.type, [fields, ...configBoxes(d).map(b => b.raw)]);
+    });
+    sanitize(sampleTable, "stsd", [stsd.subarray(0,8), ...samples]);
+    sanitize(mediaInfoBoxes, "dinf", [box("dref", [Buffer.from([0,0,0,0,0,0,0,1]), box("url ", [Buffer.from([0,0,0,1])])])]);
+    sanitize(mediaBoxes, "hdlr", [Buffer.alloc(8), Buffer.from("vide"), Buffer.alloc(13)]);
+    const edts = trackBoxes.find(b => b.type === "edts");
+    if (edts) sanitize(trackBoxes, "edts", [child(children(edts.body), "elst").raw]);
+    for (const [boxes,type] of [[trackBoxes,"tkhd"], [mediaBoxes,"mdhd"]] as const) {
+      const fields = Buffer.from(child(boxes,type).body);
+      fields.fill(0,4,fields[0] === 1 ? 20 : 12);
+      sanitize(boxes,type,[fields]);
+    }
+    mvhd.fill(0,12,mvhd[8] === 1 ? 28 : 20);
+  }
   function layout(co: Buffer) {
-    const table = boxParts("stbl", replace(stbl, offsets.type, [co]));
-    const mediaInfo = boxParts("minf", replace(minf, "stbl", table));
-    const media = boxParts("mdia", replace(mdia, "minf", mediaInfo));
-    const audio = boxParts("trak", replace(track.filter(b => b.type !== "tref"), "mdia", media));
-    const moov = boxParts("moov", [mvhd, ...audio, ...movie.filter(b => b.type === "udta").map(b => b.raw)]);
+    const table = boxParts("stbl", replace(sampleTable, offsets.type, [co]));
+    const mediaInfo = boxParts("minf", replace(mediaInfoBoxes, "stbl", table));
+    const media = boxParts("mdia", replace(mediaBoxes, "minf", mediaInfo));
+    const selectedTrack = boxParts("trak", replace(trackBoxes, "mdia", media));
+    const moov = boxParts("moov", [mvhd, ...selectedTrack, ...movie.filter(b => !isVideo && b.type === "udta").map(b => b.raw)]);
     return [ftyp, ...moov, mdatHeader];
   }
   const { head, base } = buildHeader(chunkStarts, layout);
   for (const span of slices) span.virtual += base;
-  return { header: head, slices, bytes: base + payload };
+  const movieHeader = child(movie, "mvhd").body;
+  const timescale = movieHeader.readUInt32BE(movieHeader[0] === 1 ? 20 : 12);
+  const trackDuration = tkhd[0] === 1 ? Number(tkhd.readBigUInt64BE(28)) : tkhd.readUInt32BE(20);
+  const mdhd = child(mdia, "mdhd").body;
+  // Chunk boundaries and offsets change when adding a soundtrack. Sample timing,
+  // presentation geometry and codec configuration identify the displayed video.
+  const identity = isVideo ? [
+    mdhd.subarray(mdhd[0] === 1 ? 20 : 12, mdhd[0] === 1 ? 24 : 16),
+    tkhd.subarray(tkhd[0] === 1 ? 52 : 40),
+    ...descriptions.flatMap(d => [
+      Buffer.from(d.type), d.body.subarray(24,40), d.body.subarray(74,78),
+      ...configBoxes(d).map(b => b.raw),
+    ]),
+    ...["stts","ctts","stss","stsz","sdtp","sgpd","sbgp"].flatMap(t => stbl.filter(b => b.type === t).map(b => b.raw)),
+    ...trackBoxes.filter(b => b.type === "edts").map(b => b.raw),
+    movieHeader.subarray(movieHeader[0] === 1 ? 20 : 12, movieHeader[0] === 1 ? 24 : 16),
+  ] : [];
+  return { header: head, slices, bytes: base + payload, duration: trackDuration / timescale, identity };
 }
 
 export async function buildAudioView(file: FileHandle, size: number, boxes?: BoxHeader[]) {
+  return buildTrackView(file, size, undefined, boxes);
+}
+export async function buildVideoView(file: FileHandle, size: number, streamIndex: number) {
+  return buildTrackView(file, size, streamIndex);
+}
+async function buildTrackView(file: FileHandle, size: number, index?: number, boxes?: BoxHeader[]) {
   const top = boxes ?? await topLevelBoxes(file, size);
   const moov = top.find(b => b.type === "moov");
   if (!moov || moov.end - moov.body > maxMoovBytes || top.some(b => b.type === "moof")) return null;
   try {
-    return parseMoov(await readBytes(file, moov.body, moov.end - moov.body), top.filter(b => b.type === "mdat"));
+    return parseMoov(await readBytes(file, moov.body, moov.end - moov.body), top.filter(b => b.type === "mdat"), index);
   } catch (error) {
     if (error instanceof InvalidMp4 || error instanceof RangeError) return null;
     throw error;

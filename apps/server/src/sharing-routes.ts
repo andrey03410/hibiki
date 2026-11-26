@@ -84,6 +84,15 @@ export function registerSharing(app: FastifyInstance, sharing: ShareService, sto
   });
 
   const registerMedia = (prefix: string, ref: (params: unknown) => SharedMediaRef) => {
+    for (const role of ["sound","visual"] as const) app.route({
+      method:["GET","HEAD"], url:prefix + "/" + role + "/:revision",
+      async handler(request,reply) {
+        sharedResponse(reply);
+        const {revision} = z.object({revision:z.coerce.number().int().nonnegative()}).parse(request.params);
+        const {file,view} = await sharing.role(request.user!.id,ref(request.params),revision,role);
+        return sendMediaFile(request,reply,storagePath(storageRoot,file.path),file,view,role + "-" + revision);
+      },
+    });
     for (const audio of [false, true]) {
       app.route({
         method: ["GET", "HEAD"],

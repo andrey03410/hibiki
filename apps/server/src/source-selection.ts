@@ -3,6 +3,8 @@ import { lstat } from "node:fs/promises";
 import type { Prisma } from "@prisma/client";
 import type { Db } from "./db";
 import { HttpError, invariant } from "./errors";
+import { recoverWriters } from "./storage-writer";
+import { detachForReplacement } from "./visuals";
 import { storagePath } from "./media";
 import { ownerAccess, requireHeavy } from "./kaname";
 import { attachYoutube, canonicalVideo, previewYoutube, youtubeCandidate, type StoredPreview } from "./replacement";
@@ -70,7 +72,7 @@ export async function replaceSource(
   root: string,
   ownerId: string,
   itemId: string,
-  target: { url?: string; sourceId?: string },
+  target: { url?: string; sourceId?: string; clearVisualRevision?: number },
 ) {
   invariant(
     Boolean(target.url) !== Boolean(target.sourceId),
@@ -84,13 +86,19 @@ export async function replaceSource(
     db.$transaction(async (tx) => {
       const item = await tx.item.findFirst({
         where: { id: itemId, ownerId },
-        select: { preferredSourceId: true, kind: true, duration: true },
+        select: { preferredSourceId: true, kind: true, duration: true, visualRevision:true,visual:{select:{itemId:true}} },
       });
       invariant(item, 404, "item_not_found", "Медиа не найдено");
+      invariant(!item.visual || target.clearVisualRevision !== undefined,409,"visual_attached",
+        "У записи есть видеоряд. Для снятия и замены укажите clearVisualRevision с текущей ревизией.");
+      invariant(target.clearVisualRevision === undefined || target.clearVisualRevision === item.visualRevision,
+        409,"visual_revision_conflict","Видеоряд изменился. Откройте запись снова.");
+      const detach = () => detachForReplacement(tx,ownerId,itemId,target.clearVisualRevision);
       const source = target.sourceId && (await tx.source.findFirst({ where: { id: target.sourceId, ownerId } }));
       invariant(!target.sourceId || source, 404, "source_not_found", "Источник не найден");
       if (source && source.provider === "local") {
         const result = await useLocalSource(tx, ownerId, itemId, source.id, root);
+        await detach();
         await supersedeDownloads(tx, ownerId, itemId);
         return result;
       }
@@ -105,6 +113,7 @@ export async function replaceSource(
       if (saved) {
         try {
           const result = await useLocalSource(tx, ownerId, itemId, saved, root);
+          await detach();
           await supersedeDownloads(tx, ownerId, itemId);
           return result;
         } catch (error) {
@@ -121,7 +130,7 @@ export async function replaceSource(
         const active = await tx.sourceProposal.findFirst({
           where: { ownerId, itemId, url, kind: downloadKind, status: "downloading" },
         });
-        if (active) {
+        if (active && JSON.parse(active.metadataJson ?? "{}").clearVisualRevision === target.clearVisualRevision) {
           const job = await tx.job.findUnique({ where: { id: active.id } });
           if (job && !(job.attempt >= 3 && ["failed", "cancelled"].includes(job.state)))
             return { status: job.state, itemId, jobId: job.id };
@@ -136,7 +145,7 @@ export async function replaceSource(
             kind: downloadKind,
             url,
             status: "downloading",
-            metadataJson: JSON.stringify({ previous: item.preferredSourceId }),
+            metadataJson: JSON.stringify({ previous: item.preferredSourceId, clearVisualRevision:target.clearVisualRevision }),
           },
         });
         await tx.job.create({
@@ -154,6 +163,7 @@ export async function replaceSource(
         return { status: "queued", itemId, jobId: id };
       }
       if (candidate.source?.id === item.preferredSourceId && candidate.source?.status === "available") {
+        await detach();
         await supersedeDownloads(tx, ownerId, itemId);
         return { status: "applied", itemId, sourceId: candidate.source.id, duration: item.duration };
       }
@@ -164,6 +174,7 @@ export async function replaceSource(
         "source_changed",
         "Источник записи изменился",
       );
+      await detach();
       const sourceId = await attachYoutube(tx, ownerId, itemId, url, verified.preview);
       const duration = verified.preview.duration;
       await tx.item.update({ where: { id: itemId, ownerId }, data: { preferredSourceId: sourceId, duration } });
@@ -171,9 +182,14 @@ export async function replaceSource(
       return { status: "applied", itemId, sourceId, duration };
     });
   const result = await apply();
-  if (!result.verify) return result;
-  const preview = await previewYoutube(db, ownerId, itemId, result.verify);
-  return apply({ url: result.verify, previous: result.previous, preview });
+  if (result.verify) {
+    const preview = await previewYoutube(db, ownerId, itemId, result.verify);
+    const verified = await apply({ url: result.verify, previous: result.previous, preview });
+    if (target.clearVisualRevision !== undefined) await recoverWriters(db, ownerId);
+    return verified;
+  }
+  if (target.clearVisualRevision !== undefined) await recoverWriters(db, ownerId);
+  return result;
 }
 
 export async function downloadReplacement(
@@ -193,6 +209,7 @@ export async function downloadReplacement(
   return {
     url: row.url,
     previous: state.previous as string | null,
+    clearVisualRevision:state.clearVisualRevision as number | undefined,
     applied: row.status === "applied" ? (state.sourceId as string) : undefined,
   };
 }
@@ -222,6 +239,8 @@ export async function finishDownloadReplacement(
   url: string,
   localSourceId: string,
 ) {
+  const intent = await downloadReplacement(tx,ownerId,itemId,jobId);
+  await detachForReplacement(tx,ownerId,itemId,intent.clearVisualRevision);
   // importLocal has checked the lease and source choice before publishing any file in this same transaction.
   await attachYoutube(tx, ownerId, itemId, url, { checkedAt: new Date().toISOString() });
   const applied = await useLocalSource(tx, ownerId, itemId, localSourceId);

@@ -1,3 +1,4 @@
+import { copyComposition } from "./visuals";
 import { discardReservation } from "./storage-writer";
 import { ownerAccess, requireHeavy, release, retain, reserve, kanameEnabled, startHeavyStorage, finishHeavyStorage } from "./kaname";
 import { MAX_ARCHIVE_UPLOAD_BYTES } from "./upload-policy";
@@ -640,13 +641,19 @@ export class JobsService {
       return async (tx: Prisma.TransactionClient) => {
         signal.throwIfAborted();
         const current = await this.sharing.copySource(job.ownerId, input.itemId, tx, proof);
-        invariant(current.sourceId === shared.sourceId && current.provider === shared.provider,
+        invariant(current.sourceId === shared.sourceId && current.provider === shared.provider &&
+          (current.provider !== "local" || shared.provider !== "local" || current.composition?.revision === shared.composition?.revision),
           409, "source_changed", "Источник изменился. Запустите копирование снова");
         invariant(await tx.job.findFirst({ where: {
           id: job.id, state: "running", attempt: job.attempt, cancelRequested: false, leaseUntil: { gt: new Date() },
         }, select: { id: true } }), 409, "job_state", "Задание отменено или уже выполняется повторно");
       };
     });
+    if (shared?.provider === "local" && shared.composition) {
+      const result = await copyComposition(this.db,this.storageRoot,job.ownerId,input.itemId,shared.composition,job.id,signal,prepareValidateAccess!);
+      await save(result,1,1);
+      return result;
+    }
     if (shared?.provider === "local") {
       const sourcePath = storagePath(this.storageRoot, shared.path);
       const info = await lstat(sourcePath).catch(() => undefined);

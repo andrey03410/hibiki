@@ -20,6 +20,7 @@ export interface TagDto {
   legacyFlat?: boolean;
 }
 export interface SourceDto {
+  videoStreams?: Array<{index:number;codec:string}>;
   id: string;
   provider: "youtube" | "local";
   shared?: true;
@@ -41,6 +42,8 @@ export interface SourceDto {
   audioViewStart?: number;
 }
 export interface ItemDto {
+  visualRevision?: number;
+  visual?: { available?: boolean; streamUrl: string; duration: number; soundSourceId: string; revision: number };
   id: string;
   title: string;
   originalTitle: string;

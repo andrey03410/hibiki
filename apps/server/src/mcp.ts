@@ -220,7 +220,7 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
     { itemId: id },
     async ({itemId}) => {
       await s.sharing.prefetchForViewer(ownerId, [itemId]);
-      return s.library.getItem(ownerId, itemId);
+      return s.library.getItem(ownerId, itemId, true);
     },
     true,
   );
@@ -239,7 +239,7 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
   tool(
     "media_replace_source",
     "Сменить источник своей карточки. Укажите URL одного ролика YouTube или ID собственного источника. Для замены локальной версии по URL вернётся jobId.",
-    { itemId: id, url: z.string().max(4000).url().optional(), sourceId: id.optional() },
+    { itemId: id, url: z.string().max(4000).url().optional(), sourceId: id.optional(), clearVisualRevision:z.number().int().nonnegative().optional() },
     args => replaceSource(s.db, s.storageRoot, ownerId, args.itemId, args),
   );
   tool(

@@ -66,11 +66,14 @@ export async function hashFile(path: string, signal?: AbortSignal) {
     hash.update(chunk);
   return hash.digest("hex");
 }
-export async function probeMediaStreams(path: string, signal?: AbortSignal) {
+// Standalone containers only: a multipart clip must not be interpreted as a playlist.
+export const localContainerInput = ["-protocol_whitelist","file,pipe","-format_whitelist",
+  "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,asf,mp3,wav,flac,ogg,aac,aiff"];
+export async function probeMediaStreams(path: string, signal?: AbortSignal, standalone = false) {
   signal?.throwIfAborted();
   let output = "";
   try {
-    await run(String(ffmpeg), ["-hide_banner", "-nostdin", "-i", path], {
+    await run(String(ffmpeg), ["-hide_banner", "-nostdin", ...(standalone ? localContainerInput : []), "-i", path], {
       timeout: 30_000,
       maxBuffer: 1_048_576,
       signal,
@@ -103,7 +106,7 @@ export async function probeMediaStreams(path: string, signal?: AbortSignal) {
     "invalid_media",
     "В файле нет аудио или видео для воспроизведения",
   );
-  return { audio, video, output };
+  return { audio, video, videos: streams.filter(s => s.type === "Video" && !s.details.includes("(attached pic)")), output };
 }
 
 export function mp4CompatibleAudio(codec: string, details: string) {

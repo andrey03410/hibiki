@@ -32,6 +32,7 @@ import { registerReplacement } from "./replacement";
 import { registerHistory } from "./history";
 import { registerYoutubeSync } from "./youtube-sync";
 import { ShareService } from "./sharing";
+import { registerVisuals } from "./visual-routes";
 import { registerSharing } from "./sharing-routes";
 
 declare module "fastify" {
@@ -157,7 +158,7 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
     if (request.user && kanameEnabled()) {
       request.access = await ownerAccess(db, request.user.id);
       const path = request.url.split("?")[0];
-      const sharedStream = /^\/api\/shared(?:-items|-playlists)?\/.*\/sources\//.test(path);
+      const sharedStream = /^\/api\/(?:shared(?:-items|-playlists)?|items)\/.*\/(?:sources|sound|visual)\//.test(path);
       const libraryReading = /^\/api\/(library(?:\/(?:page|ids))?|items(?:\/[^/]+)?|playlists\/(?:preview|[^/]+\/(?:playback|resolve|detail|rows)))$/.test(path);
       if (libraryReading) await sharing.prefetchForViewer(request.user.id);
       if (path.startsWith("/files/") || sharedStream || path === "/api/settings" || !["GET", "HEAD", "OPTIONS"].includes(request.method))
@@ -237,7 +238,7 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
     });
   });
   app.get("/api/items/:id", (request) =>
-    library.getItem(request.user!.id, idOf(request)),
+    library.getItem(request.user!.id, idOf(request), true),
   );
   app.post("/api/items/:id/shared-copy", (request) => {
     const options = z.object({ mode: z.enum(["audio", "video"]).optional() }).strict().parse(request.body ?? {});
@@ -546,6 +547,7 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
   registerHistory(app, db);
   registerYoutubeSync(app, db, library);
   registerSharing(app, sharing, storageRoot);
+  registerVisuals(app, storageRoot);
   registerMcp(app, s);
   const webRoot = options.webRoot ?? resolve("apps/web/dist");
   if (existsSync(join(webRoot, "index.html"))) {
