@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { ItemDto } from "@hibiki/contracts";
 import { afterEach, expect, it, vi } from "vitest";
 import { ScopedPlaylistPage } from "./PlaylistLibrary";
-import { readPlaylistScope, readOwnedRows, type PlaylistScope } from "./playlist-library";
+import { readPlaylistScope, readOwnedRows, watchPlaylistEnd, type PlaylistScope } from "./playlist-library";
 
 vi.mock("./player", () => ({
   usePlayerCommands: () => ({sharedId: () => undefined}),
@@ -21,6 +21,14 @@ it("hides cached shared titles until the reopened library has checked the saved 
   const html = renderToStaticMarkup(createElement(ScopedPlaylistPage, {scope, clear: () => {}}));
   expect(html).not.toContain("Трек private");
   expect(html).toContain("Проверяем доступ");
+});
+
+it("renders the already authorized rows on the initial saved launch", () => {
+  const scope: PlaylistScope = { kind: "saved", id: "list", title: "Подборка", order: ["visible", null],
+    initialRows: [track("visible"), null] };
+  const html = renderToStaticMarkup(createElement(ScopedPlaylistPage, {scope, firstVisit: {current: scope}, clear: () => {}}));
+  expect(html).toContain("Трек visible");
+  expect(html).toContain("Запись недоступна");
 });
 
 it("keeps missing places in a large snapshot and reads only enough rows to start it", async () => {
@@ -47,4 +55,26 @@ it("hydrates the ordered page by id and marks removed rows unavailable", async (
     return Response.json({items: [track("a"), track("b")]});
   });
   expect((await readOwnedRows(["b","gone","a"])).map(item => item?.id ?? null)).toEqual(["b",null,"a"]);
+});
+
+it("observes the next page in a resting viewport and releases its delayed observer on navigation", () => {
+  vi.useFakeTimers();
+  const observe = vi.fn();
+  vi.stubGlobal("window", Object.assign(new EventTarget(), {scrollY: 0, setTimeout, clearTimeout}));
+  vi.stubGlobal("document", new EventTarget());
+  vi.stubGlobal("IntersectionObserver", class { observe = observe; disconnect() {} });
+  try {
+    const target = {} as Element;
+    const cancel = watchPlaylistEnd(target, vi.fn());
+    vi.advanceTimersByTime(100);
+    expect(observe).not.toHaveBeenCalled();
+    cancel();
+    vi.advanceTimersByTime(3000);
+    expect(observe).not.toHaveBeenCalled();
+    const stop = watchPlaylistEnd(target, vi.fn());
+    vi.advanceTimersByTime(3000);
+    window.dispatchEvent(new Event("scroll"));
+    expect(observe.mock.calls).toEqual([[target]]);
+    stop();
+  } finally { vi.useRealTimers(); }
 });

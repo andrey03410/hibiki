@@ -565,7 +565,7 @@ function Workspace({
             <Routes>
               <Route path="/player" element={<ErrorBoundary label="Не удалось показать плеер.">{watchPlayer}</ErrorBoundary>} />
               <Route path="/" element={playlistLibrary.scope
-                ? <ScopedPlaylistPage scope={playlistLibrary.scope} clear={playlistLibrary.clear} />
+                ? <ScopedPlaylistPage key={playlistLibrary.scope.id} scope={playlistLibrary.scope} firstVisit={playlistLibrary.firstVisit} clear={playlistLibrary.clear} />
                 : <LibraryPage userId={user.id} search={librarySearch} />} />
               <Route
                 path="/playlists"
