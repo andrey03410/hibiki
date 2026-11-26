@@ -2,7 +2,7 @@
 id: 19
 title: Свой видеоряд, быстрый старт и каталог тегов
 track: product
-stage: plan
+stage: build
 branch: codex/19-media-visuals-startup-tags
 pr:
 started: 2026-11-26
@@ -16,7 +16,7 @@ merged:
 - [x] [Бриф](brief.md)
 - [x] [Продуктовая спецификация](product.md) и [макет каталога](tags.png) — согласовано
 - [x] [Техническая спецификация](tech.md) — согласовано
-- [ ] План
+- [x] [План](plan.md)
 - [ ] Реализация и проверка
 - [ ] Приёмка владельцем
 - [ ] Вливание
