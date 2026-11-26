@@ -2,7 +2,7 @@
 id: 20
 title: Запуск плейлистов и непрерывное воспроизведение
 track: product
-stage: plan
+stage: build
 branch: codex/20-playlist-player-flow
 pr:
 started: 2026-11-26
@@ -18,7 +18,7 @@ merged:
 - [x] [Бриф владельца](brief.md)
 - [x] [Продуктовые решения и приёмка](product.md) — согласовано
 - [x] [Технические решения](tech.md)
-- [ ] План
+- [x] [План](plan.md)
 - [ ] Реализация и проверка
 - [ ] Приёмка владельцем и вливание
 
