@@ -48,9 +48,11 @@ export function ClipVideo({ url, audio, running, onClick, file, loop = true, onF
     const opened = performance.now();
     let held = false, presented = false, waitingForData = false;
     let heldAt = 0;
+    let bufferStartedAt: number | undefined;
     function hold(value: boolean) {
       if (!leader || !gate.current || value === held) return;
       held = value;
+      bufferStartedAt = undefined;
       if (held) { heldAt = performance.now(); setState("loading"); }
       gate.current(leader, value);
     }
@@ -93,7 +95,9 @@ export function ClipVideo({ url, audio, running, onClick, file, loop = true, onF
           // Native preload keeps reading while paused. Leave enough frames for
           // a sustained restart; the managed range loader pumps while playing.
           const span = Math.min(1.5, Math.max(0, duration - picture.currentTime - .05));
-          buffering = !stream && now - heldAt < 4500 && clipBufferAhead(picture.buffered, picture.currentTime) < span;
+          // Network time before the first aligned frame cannot fill the buffer.
+          bufferStartedAt ??= now;
+          buffering = !stream && now - bufferStartedAt < 4500 && clipBufferAhead(picture.buffered, picture.currentTime) < span;
           if (!buffering) hold(false);
         } else if (offset < -.12 || offset > .6) align = true;
       }
@@ -102,6 +106,7 @@ export function ClipVideo({ url, audio, running, onClick, file, loop = true, onF
         const target = clipSyncTarget(leader.currentTime, picture, loop, align, now - lastSeek);
         if (target !== undefined) {
           lastSeek = now;
+          bufferStartedAt = undefined;
           picture.currentTime = target;
         }
         const rate = clipPlaybackRate(leader.currentTime, picture.currentTime, duration, loop, leader.playbackRate);
@@ -122,7 +127,7 @@ export function ClipVideo({ url, audio, running, onClick, file, loop = true, onF
       if (!picture.seeking && picture.readyState >= 3) waitingForData = false;
       follow();
     };
-    const userSeek = () => { waitingForData = false; align(); };
+    const userSeek = () => { waitingForData = false; bufferStartedAt = undefined; align(); };
     const pause = () => sync(!held);
     const loading = () => { if (!picture.error) { setState("loading"); follow(); } };
     for (const name of ["canplay", "loadeddata", "seeked", "playing"]) picture.addEventListener(name, ready);
