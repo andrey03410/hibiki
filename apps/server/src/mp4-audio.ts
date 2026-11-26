@@ -175,6 +175,7 @@ function parseMoov(data: Buffer, mdats: BoxHeader[], videoIndex?: number) {
   let sample = 0, payload = 0, mdat = 0;
   const chunkStarts = new Float64Array(count);
   const slices: Slice[] = [];
+  const descriptionRuns: Array<{ description: number; samples: number }> = [];
   const sizes = new DataView(stsz.buffer, stsz.byteOffset, stsz.byteLength);
   const positions = new DataView(offsets.body.buffer, offsets.body.byteOffset, offsets.body.byteLength);
   for (let row = 0; row < rows; row++) {
@@ -184,6 +185,14 @@ function parseMoov(data: Buffer, mdats: BoxHeader[], videoIndex?: number) {
     const description = stsc.readUInt32BE(16 + row * 12);
     check(first >= 0 && end > first && end <= count && n > 0 && n * (end - first) <= samples - sample &&
       description >= 1 && description <= descriptions.length);
+    // MP4 can switch codec configuration between samples. Describe the run in
+    // samples, not chunks, so audio interleaving does not affect video identity.
+    if (videoIndex !== undefined && descriptions.length > 1) {
+      const length = n * (end - first);
+      const last = descriptionRuns.at(-1);
+      if (last?.description === description) last.samples += length;
+      else descriptionRuns.push({ description, samples: length });
+    }
     for (let i = first; i < end; i++) {
       let length = n * fixed;
       if (!fixed) {
@@ -259,6 +268,7 @@ function parseMoov(data: Buffer, mdats: BoxHeader[], videoIndex?: number) {
       Buffer.from(d.type), d.body.subarray(24,40), d.body.subarray(74,78),
       ...configBoxes(d).map(b => b.raw),
     ]),
+    ...(descriptionRuns.length ? [Buffer.from(JSON.stringify(descriptionRuns))] : []),
     ...["stts","ctts","stss","stsz","sdtp","sgpd","sbgp"].flatMap(t => stbl.filter(b => b.type === t).map(b => b.raw)),
     ...trackBoxes.filter(b => b.type === "edts").map(b => b.raw),
     movieHeader.subarray(movieHeader[0] === 1 ? 20 : 12, movieHeader[0] === 1 ? 24 : 16),

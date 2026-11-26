@@ -208,6 +208,13 @@ export async function inspectFile(
   };
 }
 
+export function flacPrecision(media: Pick<MediaInspection, "audioBits">) {
+  invariant(media.audioBits && media.audioBits <= 32, 415, "unsupported_precision",
+    "Разрядность звука превышает возможности подготовки в FLAC");
+  const bits = media.audioBits <= 16 ? 16 : media.audioBits <= 24 ? 24 : 32;
+  return ["-sample_fmt", bits <= 16 ? "s16" : "s32", "-bits_per_raw_sample", String(bits), "-strict", "experimental"];
+}
+
 /** Generate a playback derivative; the caller owns and removes the returned temporary file. */
 export async function preparePlayback(
   path: string,
@@ -261,11 +268,7 @@ export async function preparePlayback(
     if (copyAudio) args.push("-c:a", "copy");
     else if (preserveFloat) args.push("-c:a", "pcm_f32le");
     else {
-      invariant(media.audioBits && media.audioBits <= 32, 415, "unsupported_precision",
-        "Разрядность звука превышает возможности подготовки в FLAC");
-      const bits = media.audioBits <= 16 ? 16 : media.audioBits <= 24 ? 24 : 32;
-      args.push("-c:a", "flac", "-sample_fmt", bits <= 16 ? "s16" : "s32",
-        "-bits_per_raw_sample", String(bits), "-strict", "experimental");
+      args.push("-c:a", "flac", ...flacPrecision(media));
     }
   }
   args.push("-map_metadata", "0");

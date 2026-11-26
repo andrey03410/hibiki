@@ -10,7 +10,7 @@ import type { ItemDto } from "@hibiki/contracts";
 import ffmpeg from "ffmpeg-static";
 import type { Db } from "./db";
 import { HttpError, invariant } from "./errors";
-import { hashFile, inspectFile, localContainerInput, storagePath, type MediaInspection } from "./media";
+import { flacPrecision, hashFile, inspectFile, localContainerInput, storagePath, type MediaInspection } from "./media";
 import { readOnlyMediaFlags } from "./media-playback";
 import { buildAudioView, buildVideoView, readAudioRange } from "./mp4-audio";
 import { inspectVisualPath, selectVideoStream } from "./visual-media";
@@ -426,19 +426,18 @@ export async function setVisual(
         opus: ".ogg",
         vorbis: ".ogg",
         pcm_f32le: ".wav",
+        pcm_u8: ".wav",
+        pcm_s16le: ".wav",
+        pcm_s24le: ".wav",
+        pcm_s32le: ".wav",
       };
       const ext = extensions[media.audioCodec!] ?? (media.float32Audio ? ".wav" : ".flac");
-      invariant(
-        extensions[media.audioCodec!] || media.float32Audio || (media.audioBits ?? 64) <= 32,
-        415,
-        "unsupported_precision",
-        "Невозможно сохранить исходную разрядность звука",
-      );
       const codec = extensions[media.audioCodec!] ? "copy" : media.float32Audio ? "pcm_f32le" : "flac";
+      const precision = codec === "flac" ? flacPrecision(media) : [];
       const path = join(work, "sound" + ext);
       await externalExtraction(
         soundPath,
-        ["-map", media.audioStream, "-vn", "-sn", "-dn", "-c:a", codec],
+        ["-map", media.audioStream, "-vn", "-sn", "-dn", "-c:a", codec, ...precision],
         path,
         codec !== "copy",
       );
@@ -607,7 +606,9 @@ export async function copyComposition(
   ]);
   async function stage(role: "sound" | "visual") {
     const { file, view } = composition[role];
-    const handle = await open(storagePath(root, file.path), readOnlyMediaFlags);
+    const handle = await open(storagePath(root, file.path), readOnlyMediaFlags).catch(() => {
+      throw new HttpError(404, "shared_file_unreadable", "Исходная дорожка недоступна");
+    });
     try {
       const size = (await handle.stat()).size;
       const index =
@@ -637,6 +638,10 @@ export async function copyComposition(
       const path = join("media", ownerId, info.hash + ext);
       await reserve(db, ownerId, 0, access, hold, storagePath(root, path));
       return { full, info, path };
+    } catch (error) {
+      signal.throwIfAborted();
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(422, "shared_file_unreadable", "Не удалось прочитать общую дорожку");
     } finally {
       await handle.close();
     }

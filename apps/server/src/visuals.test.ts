@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
-import { writeFile } from "node:fs/promises";
+import { rename, writeFile } from "node:fs/promises";
 import ffmpeg from "ffmpeg-static";
 import { testContext, wav } from "./test-utils";
 import { createApp } from "./app";
@@ -88,6 +88,15 @@ it("streams a silent video role through an older share, keeps the original sound
   expect((await app.inject({ url: item.sources[0].streamUrl!, cookies: bob })).rawPayload).toEqual(wav(3));
   const saved = await app.inject({ method: "POST", url: sharedUrl + "/save", cookies: bob, payload: {} });
   const savedId = saved.json().id;
+  const backing = await ctx.db.mediaFile.findUniqueOrThrow({ where: { id: donor.sources[0].fileId } });
+  const offline = join(ctx.root, "offline.mp4");
+  await rename(join(ctx.root, backing.path), offline);
+  const unavailable = await app.jobs.create(ctx.otherUserId, "shared-copy", { itemId: savedId });
+  await app.jobs.runOnce();
+  const failed = await app.jobs.get(ctx.otherUserId, unavailable.id);
+  expect(failed.state).toBe("failed");
+  expect(failed.error).not.toContain(backing.path);
+  await rename(offline, join(ctx.root, backing.path));
   const job = await app.jobs.create(ctx.otherUserId, "shared-copy", { itemId: savedId });
   await app.jobs.runOnce();
   expect((await app.jobs.get(ctx.otherUserId, job.id)).state).toBe("done");
@@ -217,4 +226,77 @@ it("lists actual video stream indexes and preserves the prior composition when p
   expect((await ctx.library.getItem(ctx.userId, song.id)).visual).toEqual(result.visual);
   expect(await ctx.db.visualTrack.count()).toBe(1);
   expect(await ctx.db.kanameStorage.count()).toBe(0);
+});
+
+it("retains every audio sample when a legacy video needs a separate 32-bit sound role", async () => {
+  const { setVisual, roleFile } = await import("./visuals");
+  const { inspectFile } = await import("./media");
+  const path = join(ctx.root, "legacy.mov"),
+    clip = join(ctx.root, "picture.mp4");
+  const raw = join(ctx.root, "sound.pcm");
+  const data = Buffer.alloc(16000 * 4);
+  for (let i = 0; i < data.length; i += 4) data.writeUInt32LE(Math.imul(i, 16777619) >>> 0, i);
+  await writeFile(raw, data);
+  await run([
+    "-f",
+    "lavfi",
+    "-i",
+    "color=s=32x32:d=1",
+    "-f",
+    "s32le",
+    "-ar",
+    "16000",
+    "-ac",
+    "1",
+    "-i",
+    raw,
+    "-map",
+    "0:v",
+    "-map",
+    "1:a",
+    "-c:v",
+    "libx264",
+    "-c:a",
+    "pcm_s32be",
+    path,
+  ]);
+  await run(["-i", path, "-map", "0:v", "-c:v", "copy", clip]);
+  const inspected = await inspectFile(path);
+  // Local files stored before playback indexing may have an available source and no audio view.
+  await ctx.db.mediaFile.create({
+    data: {
+      id: "old-file",
+      ownerId: ctx.userId,
+      hash: inspected.hash,
+      path: "legacy.mov",
+      mime: "video/quicktime",
+      bytes: inspected.bytes,
+      kind: "video",
+      duration: 1,
+      hasAudio: true,
+    },
+  });
+  await ctx.db.item.create({
+    data: {
+      id: "old-item",
+      ownerId: ctx.userId,
+      title: "Legacy",
+      originalTitle: "Legacy",
+      kind: "video",
+      sources: {
+        create: {
+          id: "old-source",
+          ownerId: ctx.userId,
+          key: "old",
+          provider: "local",
+          status: "available",
+          fileId: "old-file",
+        },
+      },
+    },
+  });
+  await setVisual(ctx.db, ctx.root, ctx.userId, "old-item", { uploadPath: clip, expectedRevision: 0 });
+  const { file } = await roleFile(ctx.db, ctx.userId, "old-item", 1, "sound");
+  const hash = (file: string) => run(["-i", file, "-map", "0:a", "-c:a", "pcm_s32le", "-f", "hash", "-"]);
+  expect((await hash(join(ctx.root, file.path))).stdout).toBe((await hash(path)).stdout);
 });
