@@ -6,7 +6,7 @@ import { formatDuration } from "./api";
 import { ItemArtwork } from "./ItemArtwork";
 import { usePlayerCard, usePlayerCommands } from "./player";
 import { soundUnavailableReason } from "./player-model";
-import { availableRows, currentSharedEntries, readOwnedRows, readPlaylistScope, readSharedRows, savedPlaylistPath,
+import { availableRows, currentSharedEntries, readOwnedRows, readPlaylistScope, readSharedRows, savedPlaylistPath, watchPlaylistEnd,
   type PlaylistScope, type PlaylistTarget } from "./playlist-library";
 import { isClosedShare } from "./sharing-model";
 import { pollWhileVisible } from "./use-sharing-request";
@@ -16,6 +16,7 @@ type Commands = ReturnType<typeof usePlayerCommands>;
 
 export function usePlaylistLibrary() {
   const [scope, setScope] = useState<PlaylistScope>();
+  const firstVisit = useRef<PlaylistScope | undefined>(undefined);
   const [pending, setPending] = useState<PlaylistTarget>();
   const [error, setError] = useState("");
   const command = useRef<AbortController | undefined>(undefined);
@@ -40,6 +41,7 @@ export function usePlaylistLibrary() {
       const next = await readPlaylistScope(target, controller.signal);
       if (!isCurrent()) return;
       reading.current = undefined;
+      firstVisit.current = next;
       setScope(next);
       navigate("/");
       window.scrollTo(0, 0);
@@ -63,7 +65,7 @@ export function usePlaylistLibrary() {
     setPending(undefined);
     setError("");
   }
-  return {scope, launch, pending, error, cancelPending, clear: () => setScope(undefined)};
+  return {scope, firstVisit, launch, pending, error, cancelPending, clear: () => setScope(undefined)};
 }
 
 function ScopeRow({item, index, playerId, playlistId, play}: {
@@ -86,11 +88,18 @@ function ScopeRow({item, index, playerId, playlistId, play}: {
   </li>;
 }
 
-export function ScopedPlaylistPage({scope, clear}: {scope: PlaylistScope; clear: () => void}) {
+export function ScopedPlaylistPage({scope, clear, firstVisit}: {
+  scope: PlaylistScope; clear: () => void; firstVisit?: React.RefObject<PlaylistScope | undefined>;
+}) {
   const player = usePlayerCommands();
   const {overview} = useData();
   const saved = scope.kind === "saved";
-  const [rows, setRows] = useState(saved ? [] : scope.initialRows);
+  const [fresh] = useState(firstVisit?.current === scope);
+  // The launch already checked these rows. Returning via navigation is a new access check.
+  useLayoutEffect(() => { if (firstVisit?.current === scope) firstVisit.current = undefined; }, [firstVisit, scope]);
+  const [rows, setRows] = useState(() => fresh ? scope.initialRows :
+    saved ? [] : scope.initialRows.map(item => item?.shared ? null : item));
+  const firstRevision = useRef(overview.revision);
   const visibleRows = useRef(rows);
   visibleRows.current = rows;
   const [closed, setClosed] = useState(scope.closed);
@@ -129,10 +138,10 @@ export function ScopedPlaylistPage({scope, clear}: {scope: PlaylistScope; clear:
 
   useEffect(() => {
     if (!saved) return;
-    void refreshShared();
+    if (!fresh) void refreshShared();
     const stop = pollWhileVisible(async () => { await refreshShared(); });
     return () => { verifying.current?.abort(); verifying.current = undefined; stop(); };
-  }, [saved, refreshShared]);
+  }, [saved, fresh, refreshShared]);
   useEffect(() => {
     if (scope.kind !== "own") return;
     const controller = new AbortController();
@@ -147,12 +156,15 @@ export function ScopedPlaylistPage({scope, clear}: {scope: PlaylistScope; clear:
       }));
     }
     // Local edits can delete a visible row, yet the snapshot keeps its place.
-    void refreshRows(availableRows(visibleRows.current).map(item => item.id)).catch(failure => {
+    const ids = fresh && overview.revision === firstRevision.current
+      ? availableRows(visibleRows.current).filter(item => item.shared).map(item => item.id)
+      : scope.order.slice(0, visibleRows.current.length);
+    void refreshRows(ids).catch(failure => {
       if (!controller.signal.aborted) setError(failure.message);
     });
     const stop = pollWhileVisible(() => refreshRows(availableRows(visibleRows.current).filter(item => item.shared).map(item => item.id)));
     return () => { controller.abort(); stop(); };
-  }, [scope, overview.revision]);
+  }, [scope, fresh, overview.revision]);
   useEffect(() => () => { ++action.current; more.current?.abort(); }, []);
   const hasMore = !saved && rows.length < scope.order.length;
   async function loadMore() {
@@ -173,11 +185,7 @@ export function ScopedPlaylistPage({scope, clear}: {scope: PlaylistScope; clear:
   }
   useEffect(() => {
     if (!sentinel.current || !hasMore || loading || error) return;
-    const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) void loadMore();
-    }, { rootMargin: "400px" });
-    observer.observe(sentinel.current);
-    return () => observer.disconnect();
+    return watchPlaylistEnd(sentinel.current, () => void loadMore());
   }, [rows.length, hasMore, loading, error]);
 
   async function play(id: string, pauseCurrent: boolean) {

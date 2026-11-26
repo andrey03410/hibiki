@@ -404,10 +404,9 @@ it.each([["audio_view_missing", "unsupported"], ["file_not_found", "denied"]])(
     expect(delivery.response("token",null)).toBeUndefined();
   });
 
-it("starts a tagged MP3 at its first MPEG frame and fills a byte-identical original for offline playback", async () => {
+it.each([33_764, 2_680_000])("starts an MP3 with a %i-byte tag at its first MPEG frame and retains the byte-identical original", async (audioStart) => {
   const raw = new Uint8Array(4 * 1024 * 1024);
   for (let i=0; i<raw.length; i++) raw[i]=i%251;
-  const audioStart = 2_680_000;
   const ranges: string[]=[];
   const delivery = new AudioDelivery(async (_, init) => {
     const range=new Headers(init.headers).get("Range")!;

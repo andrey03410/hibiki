@@ -18,6 +18,7 @@
 | [18. Освобождение места после импорта медиатеки](18-import-storage/README.md) | `merged` | [Учёт квоты и очистка входных ZIP с сайта и через MCP](18-import-storage/verify.md) |
 | [19. Свой видеоряд, быстрый старт и каталог тегов](19-media-visuals-startup-tags/README.md) | `product` | Продуктовая и техническая спецификации на обсуждении, подготовлен макет каталога |
 | [20. Запуск плейлистов и непрерывное воспроизведение](20-playlist-player-flow/README.md) | `merged` | [PR №30](https://github.com/andrey03410/hibiki/pull/30), [проверка очереди, непрерывности звука и управления](20-playlist-player-flow/verify.md) |
+| [21. Быстрый старт, плавное видео и открытие плейлистов](21-media-playlist-performance/README.md) | `merged` | [PR №31](https://github.com/andrey03410/hibiki/pull/31), [замеры звука, движения видео и поиска](21-media-playlist-performance/verify.md) |
 
 Процесс — [feature](../../.claude/skills/feature/SKILL.md).
 

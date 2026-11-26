@@ -7,6 +7,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ItemDto, PlaylistDefinition, PlaylistSummaryDto, Rule } from "@hibiki/contracts";
 import { createApp } from "./app";
+import { hydrateLibraryItems } from "./library";
 import { testContext } from "./test-utils";
 
 let ctx: Awaited<ReturnType<typeof testContext>>;
@@ -723,6 +724,52 @@ it("conditionally reads the overview after changes by other writers", async () =
     token = result.json().overviewToken;
   }
   expect((await conditional(token)).body).toBe("");
+});
+
+it("preserves the complete library projection and owner checks in a playlist or search window", async () => {
+  const { db, library, userId: ownerId, otherUserId } = ctx;
+  const ids = Array.from({ length: 105 }, (_, i) => `row-${i}`);
+  await db.item.createMany({ data: ids.map(id => ({...track(id), note: "private", favorite: true})) });
+  await db.item.create({data: track("foreign-item", otherUserId)});
+  await db.tag.createMany({ data: [
+    {id: "tag-z", ownerId, name: "old", label: "Алиас", archived: true, aliases: '["Alias"]', parentIds: '["tag-a"]'},
+    {id: "tag-a", ownerId, name: "Родитель", legacyFlat: true}, {id: "tag-x", ownerId: otherUserId, name: "Чужой"},
+  ] });
+  await db.itemTag.createMany({data: ["tag-z", "tag-a", "tag-x"].map(tagId => ({itemId: ids[0]!, tagId}))});
+  const file = { ownerId, id: "music", hash: "a".repeat(64), path: "unused", mime: "audio/mpeg", kind: "audio",
+    bytes: 2048n, hintsVersion: 1, audioStart: 13n, tailStart: 120n, hasAudio: true };
+  await db.mediaFile.createMany({data: [file, {...file, id: "foreign-file", ownerId: otherUserId}]});
+  const source = {itemId: ids[0]!, ownerId, provider: "local", status: "available"};
+  await db.source.createMany({data: [
+    {...source, id: "s-z", key: "linked", provider: "youtube", externalId: "abcdefghijk", thumbnail: "image"},
+    {...source, id: "s-a", key: "local", fileId: file.id},
+    {...source, id: "s-foreign-file", key: "wrong-file", fileId: "foreign-file"},
+    {...source, id: "s-foreign", key: "foreign", ownerId: otherUserId},
+    {...source, itemId: ids[1]!, id: "plain", key: "plain", fileId: file.id},
+    {...source, itemId: ids[2]!, id: "attached", key: "attached", fileId: file.id},
+    {...source, itemId: ids[3]!, id: "detached", key: "detached", fileId: "foreign-file"},
+  ]});
+  await db.itemTag.createMany({data: ["tag-a", "tag-z", "tag-x"].map(tagId => ({itemId: ids[1]!, tagId}))});
+  await db.visualTrack.create({data: {id: "clip", ownerId, signature: "test", fileId: file.id, duration: 8}});
+  await db.itemVisual.create({data: {itemId: ids[2]!, soundSourceId: "attached", soundFileId: file.id, visualTrackId: "clip"}});
+  const list = await library.savePlaylist(ownerId, {title: "Window", definition: {version: 1, sort: "source", rule: {type: "items", ids}}});
+  const expected = (await library.resolve(ownerId, list.id)).items;
+  expect(expected[0]?.sources.map(s => s.id).sort()).toEqual(["s-a", "s-z"]);
+  expect(expected[0]?.tags.map(t => t.id)).toEqual(["tag-a", "tag-z"]);
+  expect(expected[1]?.sources[0]).toMatchObject({bytes: 2048, hasAudio: true, hash: file.hash});
+  expect(expected[2]?.visual?.soundSourceId).toBe("attached");
+  expect(expected[3]?.sources).toEqual([]);
+  const wire = (value: unknown) => JSON.parse(JSON.stringify(value));
+  expect(wire((await library.playlistDetail(ownerId, list.id, true, 24)).resolved.items)).toEqual(wire(expected.slice(0,24)));
+  const small = await db.$transaction(tx => hydrateLibraryItems(tx, ownerId, ids.slice(0, 8), true, library));
+  expect(wire((await library.playlistPlayback(ownerId, list.id)).items)).toEqual(wire(small));
+  const duplicates = [ids[2]!, "foreign-item", ids[1]!, ids[2]!, "missing"];
+  const previous = await db.$transaction(tx => hydrateLibraryItems(tx, ownerId, duplicates, true, library));
+  expect((await post("items", {ids: duplicates})).json().items).toEqual(wire(previous));
+  const first = (await post("page", { filters: {} })).json().items as ItemDto[];
+  expect(first).toHaveLength(100);
+  const byId = new Map(expected.map(item => [item.id, item]));
+  expect(first).toEqual(wire(first.map(item => byId.get(item.id))));
 });
 
 it("reuses counts across tag choices and sends compact cards with playback metadata", async () => {

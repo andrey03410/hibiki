@@ -112,12 +112,14 @@ export function syncYoutubePicture(
   },
   audio: Pick<HTMLMediaElement, "currentTime" | "paused" | "seeking">,
   running: boolean,
+  userSeek = false,
 ) {
   const state = player.getPlayerState();
   const duration = player.getDuration();
   const target = duration > 0 ? Math.min(audio.currentTime, duration) : audio.currentTime;
   if (!player.isMuted()) player.mute();
-  if (Math.abs(target - player.getCurrentTime()) > 0.5) player.seekTo(target, true);
+  // While the iframe buffers it may still expose its old position.
+  if ((userSeek || (!audio.seeking && state !== 3)) && Math.abs(target - player.getCurrentTime()) > 0.5) player.seekTo(target, true);
   if (running && !audio.paused && !audio.seeking && (!duration || audio.currentTime < duration)) {
     if (state !== 1 && state !== 3) player.playVideo();
   } else if (state === 1 || state === 3) player.pauseVideo();

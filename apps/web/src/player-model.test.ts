@@ -860,3 +860,37 @@ it("advances failed companion pictures without dropping their working audio or r
   expect(exhausted.source?.id).toBe("movie");
   expect(exhausted.video).toBeUndefined();
 });
+
+it("catches up a playing companion without seeking for decoder latency, including across a loop", async () => {
+  const { clipPlaybackRate } = await import("./clip-clock");
+  expect(clipPlaybackRate(12.18, 12, 30, false, 1)).toBeGreaterThan(1);
+  expect(clipPlaybackRate(12, 12.15, 30, false, 1)).toBeLessThan(1);
+  expect(clipPlaybackRate(30.01, 29.99, 30, true, 1.25)).toBe(1.25);
+  expect(clipPlaybackRate(12, 0, 30, false, 1)).toBe(1.5);
+});
+
+it("lets a cold companion seek finish and re-aligns only inside a buffered second until the user seeks again", async () => {
+  const { clipSyncTarget } = await import("./clip-clock");
+  const picture = { currentTime: 20, duration: 90, seeking: false, buffered: {length: 1, start: () => 20, end: () => 23} };
+  expect(clipSyncTarget(20.24, picture, false, false, 2000)).toBeUndefined();
+  expect(clipSyncTarget(32, picture, false, false, 2000)).toBeUndefined();
+  expect(clipSyncTarget(21.5, picture, false, false, 100)).toBeUndefined();
+  expect(clipSyncTarget(22.3, picture, false, false, 2000)).toBeUndefined();
+  expect(clipSyncTarget(21.5, picture, false, false, 2000)).toBe(21.5);
+  expect(clipSyncTarget(21.5, {...picture, seeking: true}, false, false, 2000)).toBeUndefined();
+  expect(clipSyncTarget(61, {...picture, seeking: true}, false, true, 20)).toBe(61);
+});
+
+it("lets a buffering YouTube companion finish its seek until the listener explicitly changes position", async () => {
+  const { syncYoutubePicture } = await import("./player-model");
+  const seeks: number[] = [];
+  const picture = {
+    getPlayerState: () => 3, getDuration: () => 90, getCurrentTime: () => 12, isMuted: () => true,
+    mute() {}, seekTo: (time: number) => seeks.push(time), playVideo() {}, pauseVideo() {},
+  };
+  syncYoutubePicture(picture, { currentTime: 15, paused: false, seeking: false }, true);
+  expect(seeks).toEqual([]);
+  syncYoutubePicture(picture, { currentTime: 62, paused: false, seeking: true }, true, true);
+  syncYoutubePicture(picture, { currentTime: 62, paused: false, seeking: true }, true);
+  expect(seeks).toEqual([62]);
+});

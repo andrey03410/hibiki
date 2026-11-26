@@ -90,9 +90,9 @@ class AudioBytes {
 
   constructor(readonly file: AudioFile, private read: ReadFile) {
     this.audioStart = file.audioStart ?? 0;
-    // Large ID3v2 artwork can occupy megabytes before the first MPEG frame.
-    // The decoder gets the unchanged MPEG payload; the tab also retains the full original.
-    this.decoderStart = file.mime === "audio/mpeg" && this.audioStart >= PAGE ? this.audioStart : 0;
+    // Even a small embedded cover can make Chromium scan most of an MP3 before playing.
+    // Feed the indexed MPEG frames directly and still retain the tag with the original.
+    this.decoderStart = file.mime === "audio/mpeg" ? this.audioStart : 0;
     const payloadPrefix = this.decoderStart ? prefixBytes(file.size - this.decoderStart, 0, file.duration) : file.prefix;
     this.preparedTagBytes = Math.min(this.decoderStart, MAX_PREFIX - payloadPrefix);
     this.prefix = this.decoderStart + payloadPrefix;

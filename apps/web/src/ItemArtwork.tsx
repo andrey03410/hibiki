@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useState } from "react";
+import { watchArtwork } from "./artwork-requests";
 import { Music2, Video } from "lucide-react";
 import type { ItemDto, SourceDto } from "@hibiki/contracts";
 
@@ -18,50 +19,27 @@ function artworkUrl(source: Props["source"], size: NonNullable<Props["size"]>) {
     return `${source.thumbnail}${source.thumbnail.includes("?") ? "&" : "?"}size=${size}`;
 }
 
-const nearbyArtwork = new WeakMap<Element, () => void>();
-let observer: IntersectionObserver | undefined;
-function watchArtwork(element: Element, load: () => void) {
-  // Browser lazy loading can schedule dozens of covers well beyond the viewport,
-  // ahead of a newly selected media file on the same connection pool.
-  observer ??= new IntersectionObserver(entries => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      nearbyArtwork.get(entry.target)?.();
-      nearbyArtwork.delete(entry.target);
-      observer!.unobserve(entry.target);
-    }
-  }, { rootMargin: "96px" });
-  nearbyArtwork.set(element, load);
-  observer.observe(element);
-  return () => {
-    nearbyArtwork.delete(element);
-    observer!.unobserve(element);
-  };
-}
-
-function useNearbyArtwork() {
-  const [nearby, setNearby] = useState(() => typeof IntersectionObserver === "undefined");
-  const attach = useCallback((element: Element | null) => {
-    if (element && !nearby) return watchArtwork(element, () => setNearby(true));
-  }, [nearby]);
-  return { nearby, attach };
-}
-
 const youtubeSdCover = /^https:\/\/i\.ytimg\.com\/vi\/[\w-]{11}\/sddefault\.jpg$/;
 
 export function ArtworkImage({ urls, fallback = null }: { urls: (string | undefined)[]; fallback?: ReactNode }) {
   const [failed, setFailed] = useState<string[]>([]);
-  const { nearby, attach } = useNearbyArtwork();
   const url = urls.flatMap(candidate => {
     if (!candidate) return [];
     return youtubeSdCover.test(candidate) ? [candidate, candidate.replace("sddefault.jpg", "hqdefault.jpg")] : [candidate];
   }).find(candidate => !failed.includes(candidate));
+  const observed = typeof IntersectionObserver !== "undefined";
+  const attach = useCallback((element: HTMLImageElement | null) => {
+    if (observed && element && url) return watchArtwork(element, url);
+  }, [url, observed]);
   if (!url) return fallback;
   const tryNext = () => setFailed(previous => [...previous, url]);
-  return <img key={url} ref={attach} src={nearby ? url : undefined} alt="" loading="lazy" decoding="async" fetchPriority="low"
-    onError={tryNext} onLoad={youtubeSdCover.test(url) ? event => {
+  return <img key={url} ref={attach} src={observed ? undefined : url} alt="" loading="lazy" decoding="async" fetchPriority="low"
+    onError={event => {
+      const image = event.currentTarget;
+      if (image.hasAttribute("src") && image.complete && !image.naturalWidth) tryNext();
+    }} onLoad={youtubeSdCover.test(url) ? event => {
       // Some unavailable YouTube sizes return a 120px placeholder with HTTP 200.
-      if (event.currentTarget.naturalWidth <= 120) tryNext();
+      if (event.currentTarget.naturalWidth > 0 && event.currentTarget.naturalWidth <= 120) tryNext();
     } : undefined} />;
 }
 

@@ -97,7 +97,7 @@ it("aborts an obsolete network read while debouncing the next text request", asy
     expect(signal.aborted).toBe(true);
     await vi.advanceTimersByTimeAsync(100);
     pages.open({ ...query, query: "ab" }, query);
-    await vi.advanceTimersByTimeAsync(149);
+    await vi.advanceTimersByTimeAsync(109);
     expect(read).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(read).toHaveBeenCalledTimes(2);
@@ -169,7 +169,7 @@ it("debounces single-character insertions and deletions at any position", async 
       await vi.advanceTimersByTimeAsync(100);
       expect(read).not.toHaveBeenCalled();
     }
-    await vi.advanceTimersByTimeAsync(50);
+    await vi.advanceTimersByTimeAsync(10);
     expect(read).toHaveBeenCalledOnce();
   } finally { vi.useRealTimers(); }
 });

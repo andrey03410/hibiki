@@ -66,3 +66,36 @@ export async function currentSharedEntries(scope: PlaylistScope) {
     throw error;
   }
 }
+
+export function watchPlaylistEnd(target: Element, load: () => void) {
+  const observer = new IntersectionObserver(entries => {
+    if (entries.some(entry => entry.isIntersecting)) load();
+  }, { rootMargin: "400px" });
+  // A tall viewport can fit the entire launch window. Give the first sound a
+  // head start, then let the observer fill the viewport even without scrolling.
+  let timer: number;
+  function stopWaiting() {
+    window.clearTimeout(timer);
+    window.removeEventListener("scroll", observe);
+    document.removeEventListener("playing", afterSound, true);
+  }
+  function observe() {
+    stopWaiting();
+    observer.observe(target);
+  }
+  function afterSound(event: Event) {
+    if (event.target instanceof HTMLMediaElement && !event.target.muted) {
+      document.removeEventListener("playing", afterSound, true);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(observe, 120);
+    }
+  }
+  if (window.scrollY > 0) observe();
+  else {
+    window.addEventListener("scroll", observe, { once: true, passive: true });
+    document.addEventListener("playing", afterSound, true);
+    // Paused, silent or unavailable media may never emit a playing event.
+    timer = window.setTimeout(observe, 1_800);
+  }
+  return () => { stopWaiting(); observer.disconnect(); };
+}
