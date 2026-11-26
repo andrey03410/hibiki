@@ -33,7 +33,7 @@ export function normalize(value: string) {
 export function groupOf(tag: TagDto): TagGroup {
   return tag.group ?? "extra";
 }
-const order = new Intl.Collator("ru", { sensitivity: "base", numeric: true });
+export const tagNameOrder = new Intl.Collator("ru", { sensitivity: "base", numeric: true });
 
 export class TagCatalog {
   readonly active: TagDto[];
@@ -42,7 +42,7 @@ export class TagCatalog {
   private pathCache = new Map<string, string[]>();
 
   constructor(tags: readonly TagDto[]) {
-    this.active = tags.filter((t) => !t.archived).sort((a, b) => order.compare(a.name, b.name));
+    this.active = tags.filter((t) => !t.archived).sort((a, b) => tagNameOrder.compare(a.name, b.name));
     this.byId = new Map(this.active.map((t) => [t.id, t]));
     for (const tag of this.active) {
       if (groupOf(tag) !== "source") continue;

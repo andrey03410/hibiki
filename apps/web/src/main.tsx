@@ -77,13 +77,14 @@ import { ruleDescription } from "./playlist-rules";
 import { LibraryPages, LibraryCardReader, fetchItems, searchBody, validateOverview } from "./library-pages";
 import { PlayerProvider, usePlayerCommands, usePlayerCard, useHasPlayer, useQueueEditable } from "./player.tsx";
 import { missingClassification } from "@hibiki/contracts/classification";
+import type { DirectoryVisit } from "./tag-directory";
 import { TagNavigation } from "./TagNavigation";
 import { GroupSelect, TagPicker, PerformanceEditor } from "./ClassificationEditor";
 import { batchTagChanges, compositionDelta, groupKeys, groups, groupOf, itemPerformance, missingLabels, TagCatalog,
   type BatchMode, type Performance, type PerformanceFilter, type TagGroup, type Voice } from "./taxonomy";
 import { ItemTagList } from "./LibraryItemControls.tsx";
 import { playbackSources } from "./player-model.ts";
-import { resetLibraryFilters, librarySourceBadges, matchesSearch, sourceAvailability, type LibraryView } from "./library-search.ts";
+import { librarySearchForTag, librarySourceBadges, matchesSearch, sourceAvailability, type LibraryView } from "./library-search.ts";
 import { LibrarySearchControls, useLibrarySearch } from "./LibrarySearchControls.tsx";
 import { NoteEditor, NoteIndicator, NotesContext, NotesLoadError, useNotes, useNotesController } from "./NoteEditor.tsx";
 import { noteFor } from "./note-model.ts";
@@ -102,7 +103,7 @@ const JobsPage = lazyView(() => import("./JobsPage"));
 const SettingsPage = lazyView(() => import("./SettingsPage"));
 const KanameSettings = lazyView(() => import("./KanameSettings").then(m => ({default:m.KanameSettings})));
 const YoutubeLinkedPlaylist = lazyView(() => import("./YoutubeSync").then(m => ({default:m.YoutubeLinkedPlaylist})));
-const ClassificationMigration = lazyView(() => import("./ClassificationMigration").then(m => ({default:m.ClassificationMigration})));
+const TagsPage = lazyView(() => import("./TagsPage"));
 const SourceReplacement = lazyView(() => import("./SourceReplacement").then(m => ({default:m.SourceReplacement})));
 const RuleEditor = lazyView(() => import("./RuleEditor"));
 const loadSharing = () => import("./Sharing");
@@ -314,8 +315,8 @@ function Workspace({
     [importOpen, setImportOpen] = useState(false),
     [createOpen, setCreateOpen] = useState(false),
     [importSettingsLoading, setImportSettingsLoading] = useState(false),
-    [playlistQuery, setPlaylistQuery] = useState(""),
-    [tagQuery, setTagQuery] = useState("");
+    [playlistQuery, setPlaylistQuery] = useState("");
+  const tagVisits = useRef(new Map<string, DirectoryVisit>());
   const library: LibraryDto = useMemo(() => ({items: [], playlists: [], tags: overview.tags, jobs: overview.jobs}), [overview.tags, overview.jobs]);
   const request = useRef(0);
   const overviewToken = useRef("");
@@ -325,7 +326,7 @@ function Workspace({
   const seenImports = useRef<Set<string> | null>(null);
   const navigate = useNavigate();
   function browseTag(id: string) {
-    librarySearch[1]((old) => ({ ...resetLibraryFilters(old), query: "", tagIds: [id] }));
+    librarySearch[1]((old) => librarySearchForTag(old, id));
     navigate("/");
     window.scrollTo(0, 0);
   }
@@ -563,7 +564,7 @@ function Workspace({
                 element={<PlaylistsPage query={playlistQuery} onQuery={setPlaylistQuery} onCreate={() => setCreateOpen(true)} />}
               />
               <Route path="/playlists/:id" element={<PlaylistRoute onBrowseTag={browseTag} />} />
-              <Route path="/tags" element={<TagsPage query={tagQuery} onQuery={setTagQuery} onBrowse={browseTag} />} />
+              <Route path="/tags" element={<TagsPage key={location.key} userId={user.id} visits={tagVisits.current} onBrowse={browseTag} />} />
               {kaname && <Route path="/admin" element={<KanameSettings userId={user.id} adminPage />} />}
               <Route path="/jobs" element={<JobsPage />} />
               <Route path="/share-links" element={<ShareManager />} />
@@ -2178,244 +2179,6 @@ function PlaylistEditor({
         </div>
       </form>
     </Modal>
-  );
-}
-const TAG_COLORS = [
-  "#b6a0ed",
-  "#92b8a5",
-  "#ddb18a",
-  "#8faed3",
-  "#d494a8",
-  "#c4bd80",
-  "#7cbcb8",
-  "#b5b5bc",
-];
-function TagsPage({ query, onQuery, onBrowse }: {
-  query: string;
-  onQuery: (query: string) => void;
-  onBrowse: (id: string) => void;
-}) {
-  const { library, overview, refresh, notify } = useData(),
-    [edit, setEdit] = useState<TagDto | "new" | null>(null),
-    [name, setName] = useState(""),
-    [group,setGroup] = useState<TagGroup>("extra"), [aliases,setAliases] = useState(""),
-    [parents,setParents] = useState<string[]>([]), [section,setSection] = useState<TagGroup|"">(""),
-    [color, setColor] = useState(TAG_COLORS[0]!),
-    [error, setError] = useState(""),
-    [busy, setBusy] = useState(false),
-    [remove, setRemove] = useState<TagDto | null>(null);
-  const { notes } = useNotes();
-  const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
-  const tags = catalog.active.filter(tag => (!section || groupOf(tag) === section) && matchesSearch(query, tag.name, ...(tag.aliases ?? []), ...catalog.paths(tag.id), noteFor(notes,"tag",tag.id)));
-  const counts = useMemo(() => new Map(Object.entries(overview.tagCounts)), [overview.tagCounts]);
-  function open(tag: TagDto | "new") {
-    setEdit(tag);
-    setGroup(tag === "new" ? section || "extra" : groupOf(tag));
-    setAliases(tag === "new" ? "" : (tag.aliases ?? []).join("\n"));
-    setParents(tag === "new" ? [] : tag.parentIds ?? []);
-    setName(tag === "new" ? "" : tag.name);
-    setColor(tag === "new" ? TAG_COLORS[0]! : tag.color);
-    setError("");
-  }
-  return (
-    <>
-      <div className="title-row library-title-row">
-        <h1>Теги</h1>
-        <Button className="primary" onClick={() => open("new")} aria-label="Новый тег" title="Новый тег">
-          <Plus size={17} />
-          <span>Новый тег</span>
-        </Button>
-      </div>
-      <div className="section-heading">
-        <h2>Найдено <span>{tags.length}</span></h2>
-        <select aria-label="Раздел каталога" value={section} onChange={e => setSection(e.target.value as typeof section)}>
-          <option value="">Все разделы</option>{groupKeys.map(key => <option key={key} value={key}>{groups[key]}</option>)}
-        </select>
-        <label className="search-input">
-          <Search size={16} />
-          <input
-            type="search"
-            aria-label="Поиск тегов"
-            placeholder="Название или псевдоним…"
-            value={query}
-            onChange={(event) => onQuery(event.target.value)}
-          />
-        </label>
-      </div>
-      <React.Suspense fallback={<div role="status">Загружаем настройки классификации…</div>}>
-        <ClassificationMigration reload={refresh}/>
-      </React.Suspense>
-      <NotesLoadError />
-      <div className="tag-grid tag-directory">
-        {tags.map((tag) => {
-          const count = counts.get(tag.id) ?? 0;
-          return (
-            <article className="tag-card" key={tag.id}>
-              <button className="tag-browse" type="button" onClick={() => onBrowse(tag.id)}
-                aria-label={`Открыть записи с тегом ${tag.name}`} title={tag.name}>
-                <span className="tag-card-icon" style={{ "--tag": tag.color } as React.CSSProperties}>
-                  <Tags size={17} aria-hidden="true" />
-                </span>
-                <span className="tag-browse-description">
-                  <span className="tag-browse-name">{tag.name}{noteFor(notes, "tag", tag.id) && <NoteIndicator />}</span>
-                  <small>{catalog.paths(tag.id).map(p => p.includes(" › ") ? p.slice(0,p.lastIndexOf(" › ")) : groups[groupOf(tag)]).join(" / ")} · {count} {mediaWord(count)}</small>
-                </span>
-                <ChevronRight size={15} aria-hidden="true" />
-              </button>
-              <button
-                className="icon-button"
-                aria-label={`Изменить тег ${tag.name}`}
-                onClick={() => open(tag)}
-              >
-                <Pencil size={15} />
-              </button>
-              <button
-                className="icon-button"
-                aria-label={`Удалить тег ${tag.name}`}
-                onClick={() => {
-                  setRemove(tag);
-                  setError("");
-                }}
-              >
-                <Trash2 size={15} />
-              </button>
-            </article>
-          );
-        })}
-      </div>
-      {library.tags.length > 0 && !tags.length && (
-        <EmptyState title="Тег не найден" text="Измените запрос или очистите поиск." icon={<Tags size={28} />} />
-      )}
-      {!library.tags.length && (
-        <EmptyState
-          title="Найдите свои связи"
-          text="Создайте первый тег и отмечайте им записи. Плейлисты по тегу будут обновляться сами."
-          action={
-            <Button className="primary" onClick={() => open("new")}>
-              Создать тег
-            </Button>
-          }
-          icon={<Tags size={28} />}
-        />
-      )}
-      {edit && (
-        <Modal
-          title={edit === "new" ? "Новый тег" : "Изменить тег"}
-          close={() => setEdit(null)}
-        >
-          <form
-            onSubmit={async (event) => {
-              event.preventDefault();
-              setBusy(true);
-              setError("");
-              try {
-                await api(
-                  edit === "new" ? "/tags" : `/tags/${edit.id}`,
-                  edit === "new" ? "POST" : "PATCH",
-                  { name, color, group, aliases: aliases.split(/\r?\n/).map(a => a.trim()).filter(Boolean), parentIds: group === "source" ? parents : [] },
-                );
-                await refresh();
-                notify(edit === "new" ? "Тег создан" : "Тег обновлён");
-                setEdit(null);
-              } catch (e) {
-                setError((e as Error).message);
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            <label>
-              Название
-              <input
-                value={name}
-                maxLength={200}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Например, Для работы"
-                required
-                autoFocus
-              />
-            </label>
-            <GroupSelect value={group} onChange={g => {if(g !== "performance") setGroup(g);}}/>
-            <label>Псевдонимы (по одному на строку)<textarea rows={3} value={aliases} onChange={e => setAliases(e.target.value)}/></label>
-            {group === "source" && <details className="edit-group"><summary>Родители в дереве <span>{parents.length}</span></summary>
-              <TagPicker catalog={catalog} ids={parents} group="source" excludeId={edit === "new" ? undefined : edit.id} onChange={setParents}/>
-            </details>}
-            <label>Цвет</label>
-            <div className="color-picker">
-              {TAG_COLORS.map((c) => (
-                <button
-                  type="button"
-                  key={c}
-                  aria-label={`Цвет ${c}`}
-                  aria-pressed={color === c}
-                  style={{ background: c }}
-                  onClick={() => setColor(c)}
-                >
-                  {color === c && <Check size={17} />}
-                </button>
-              ))}
-              <input
-                type="color"
-                aria-label="Другой цвет тега"
-                value={
-                  color.startsWith("#") && color.length === 7
-                    ? color
-                    : "#b6a0ed"
-                }
-                onChange={(e) => setColor(e.target.value)}
-              />
-            </div>
-            <ErrorMessage error={error} />
-            <div className="modal-actions">
-              <Button
-                type="button"
-                className="subtle"
-                onClick={() => setEdit(null)}
-              >
-                Отмена
-              </Button>
-              <Button type="submit" className="primary" busy={busy}>
-                Сохранить
-              </Button>
-            </div>
-          </form>
-          {edit !== "new" && <NoteEditor key={edit.id} kind="tag" id={edit.id} />}
-        </Modal>
-      )}
-      {remove && (
-        <Modal
-          title="Удалить тег?"
-          subtitle={`Тег «${remove.name}» исчезнет у записей. Зависимые плейлисты нужно сначала изменить.`}
-          close={() => setRemove(null)}
-        >
-          <ErrorMessage error={error} />
-          <div className="modal-actions">
-            <Button className="subtle" onClick={() => setRemove(null)}>
-              Отмена
-            </Button>
-            <Button
-              className="danger"
-              busy={busy}
-              onClick={async () => {
-                setBusy(true);
-                try {
-                  await api(`/tags/${remove.id}`, "DELETE");
-                  await refresh();
-                  notify("Тег удалён");
-                  setRemove(null);
-                } catch (e) {
-                  setError((e as Error).message);
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              Удалить
-            </Button>
-          </div>
-        </Modal>
-      )}
-    </>
   );
 }
 createRoot(document.getElementById("root")!).render(

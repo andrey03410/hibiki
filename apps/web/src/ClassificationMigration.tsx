@@ -39,8 +39,8 @@ export function SkippedChanges({ skipped, changes }: { skipped?: number; changes
   );
 }
 
-export function ClassificationMigration({ reload }: { reload: () => Promise<void> }) {
-  const [open, setOpen] = useState(false),
+export function ClassificationMigration({ reload, initiallyOpen = false }: { reload: () => Promise<void>; initiallyOpen?: boolean }) {
+  const [open, setOpen] = useState(initiallyOpen),
     [batch, setBatch] = useState<Batch | null>(null);
   const [file, setFile] = useState<File | null>(null),
     [error, setError] = useState(""),
@@ -83,7 +83,7 @@ export function ClassificationMigration({ reload }: { reload: () => Promise<void
     }
   }
   return (
-    <details className="classification-migration" onToggle={(e) => setOpen(e.currentTarget.open)}>
+    <details open={open} className="classification-migration" onToggle={(e) => setOpen(e.currentTarget.open)}>
       <summary>Перенос разметки</summary>
       {open && (
         <div className="migration-body">

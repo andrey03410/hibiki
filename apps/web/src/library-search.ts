@@ -186,6 +186,11 @@ export function resetLibraryFilters({ query, sort, previousSort, randomSeed }: L
   return { ...defaultLibrarySearch, query, sort, previousSort, randomSeed };
 }
 
+export function librarySearchForTag(current: LibrarySearch, id: string): LibrarySearch {
+  const sort = current.sort === "recent" ? current.previousSort ?? "added-desc" : current.sort;
+  return { ...resetLibraryFilters(current), query: "", tagIds: [id], sort };
+}
+
 export function selectLibraryResults(selected: string[], items: ItemDto[], checked: boolean) {
   const ids = new Set(items.map(({ id }) => id));
   return checked ? [...new Set([...selected, ...ids])] : selected.filter((id) => !ids.has(id));
