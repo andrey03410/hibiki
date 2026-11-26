@@ -120,7 +120,7 @@ export async function inspectAudioTrack(path: string, signal?: AbortSignal) {
 
 export async function inspectFile(
   path: string,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; standalone?: boolean } = {},
 ): Promise<MediaInspection> {
   options.signal?.throwIfAborted();
   const ext = extname(path).toLowerCase();
@@ -149,7 +149,7 @@ export async function inspectFile(
   } catch {
     /* FFmpeg probes video and formats without music tags. */
   }
-  const { audio, video, output } = await probeMediaStreams(path, options.signal);
+  const { audio, video, output } = await probeMediaStreams(path, options.signal, options.standalone);
   const kind = video ? "video" : "audio";
   const compatibleVideoCodec =
     video?.codec === "h264" &&
