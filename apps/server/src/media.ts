@@ -66,11 +66,14 @@ export async function hashFile(path: string, signal?: AbortSignal) {
     hash.update(chunk);
   return hash.digest("hex");
 }
-export async function probeMediaStreams(path: string, signal?: AbortSignal) {
+// Standalone containers only: a multipart clip must not be interpreted as a playlist.
+export const localContainerInput = ["-protocol_whitelist","file,pipe","-format_whitelist",
+  "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,asf,mp3,wav,flac,ogg,aac,aiff"];
+export async function probeMediaStreams(path: string, signal?: AbortSignal, standalone = false) {
   signal?.throwIfAborted();
   let output = "";
   try {
-    await run(String(ffmpeg), ["-hide_banner", "-nostdin", "-i", path], {
+    await run(String(ffmpeg), ["-hide_banner", "-nostdin", ...(standalone ? localContainerInput : []), "-i", path], {
       timeout: 30_000,
       maxBuffer: 1_048_576,
       signal,
@@ -103,7 +106,7 @@ export async function probeMediaStreams(path: string, signal?: AbortSignal) {
     "invalid_media",
     "В файле нет аудио или видео для воспроизведения",
   );
-  return { audio, video, output };
+  return { audio, video, videos: streams.filter(s => s.type === "Video" && !s.details.includes("(attached pic)")), output };
 }
 
 export function mp4CompatibleAudio(codec: string, details: string) {
@@ -117,7 +120,7 @@ export async function inspectAudioTrack(path: string, signal?: AbortSignal) {
 
 export async function inspectFile(
   path: string,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; standalone?: boolean } = {},
 ): Promise<MediaInspection> {
   options.signal?.throwIfAborted();
   const ext = extname(path).toLowerCase();
@@ -146,7 +149,7 @@ export async function inspectFile(
   } catch {
     /* FFmpeg probes video and formats without music tags. */
   }
-  const { audio, video, output } = await probeMediaStreams(path, options.signal);
+  const { audio, video, output } = await probeMediaStreams(path, options.signal, options.standalone);
   const kind = video ? "video" : "audio";
   const compatibleVideoCodec =
     video?.codec === "h264" &&
@@ -205,6 +208,13 @@ export async function inspectFile(
   };
 }
 
+export function flacPrecision(media: Pick<MediaInspection, "audioBits">) {
+  invariant(media.audioBits && media.audioBits <= 32, 415, "unsupported_precision",
+    "Разрядность звука превышает возможности подготовки в FLAC");
+  const bits = media.audioBits <= 16 ? 16 : media.audioBits <= 24 ? 24 : 32;
+  return ["-sample_fmt", bits <= 16 ? "s16" : "s32", "-bits_per_raw_sample", String(bits), "-strict", "experimental"];
+}
+
 /** Generate a playback derivative; the caller owns and removes the returned temporary file. */
 export async function preparePlayback(
   path: string,
@@ -258,11 +268,7 @@ export async function preparePlayback(
     if (copyAudio) args.push("-c:a", "copy");
     else if (preserveFloat) args.push("-c:a", "pcm_f32le");
     else {
-      invariant(media.audioBits && media.audioBits <= 32, 415, "unsupported_precision",
-        "Разрядность звука превышает возможности подготовки в FLAC");
-      const bits = media.audioBits <= 16 ? 16 : media.audioBits <= 24 ? 24 : 32;
-      args.push("-c:a", "flac", "-sample_fmt", bits <= 16 ? "s16" : "s32",
-        "-bits_per_raw_sample", String(bits), "-strict", "experimental");
+      args.push("-c:a", "flac", ...flacPrecision(media));
     }
   }
   args.push("-map_metadata", "0");

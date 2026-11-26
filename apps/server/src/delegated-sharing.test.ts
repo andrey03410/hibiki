@@ -138,6 +138,35 @@ describe("delegated playlist listening", () => {
     await expect(shares.file(listener, savedRef, source.id)).rejects.toMatchObject({ status: 404 });
   });
 
+  it("resolves only the current composition through both playlist grants and closes both roles on withdrawal", async () => {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const ffmpeg = (await import("ffmpeg-static")).default;
+    const { setVisual } = await import("./visuals");
+    const { author, original, borrowed, grant, link } = await mixed();
+    const path = join(ctx.root, "visual.mp4");
+    await promisify(execFile)(String(ffmpeg), ["-v", "error", "-f", "lavfi", "-i", "color=red:s=32x32:d=0.5", path]);
+    await setVisual(ctx.db, ctx.root, author, original.id, { expectedRevision: 0, uploadPath: path });
+    await shares.updateLink(author, grant.id, { allowReshare: true });
+    const outer = token(link);
+    const saved = await shares.save(listener, outer);
+    const refs = [
+      { kind: "link" as const, token: outer, itemId: borrowed.id },
+      { kind: "playlist" as const, id: saved.id, itemId: borrowed.id },
+    ];
+    for (const [index, view] of [await shares.open(listener, outer), await shares.openSaved(listener, saved.id)].entries()) {
+      const entry = view.items.find(row => row.id === borrowed.id)!;
+      expect(entry.visual?.soundSourceId).toBe(entry.sources[0].id);
+      expect(entry.sources).toHaveLength(1);
+      for (const secret of [original.id, original.sources[0].id, token(grant), "/files/"])
+        expect(JSON.stringify(entry)).not.toContain(secret);
+      for (const role of ["visual", "sound"] as const) expect((await shares.role(listener, refs[index], 1, role)).file.ownerId).toBe(author);
+    }
+    await shares.updateLink(author, grant.id, { allowReshare: false });
+    for (const ref of refs) for (const role of ["visual", "sound"] as const)
+      await expect(shares.role(listener, ref, 1, role)).rejects.toMatchObject({status:404});
+  });
+
   it("uses any permitted direct grant, follows both playlist memberships, and counts missing originals", async () => {
     const { author, curator, original, first, last, upstream, grant, borrowed, mix, link } = await mixed();
     const published = token(link);

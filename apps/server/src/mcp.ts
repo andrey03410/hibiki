@@ -4,6 +4,8 @@ import {
   MAX_MEDIA_UPLOAD_BYTES,
   MAX_ARCHIVE_UPLOAD_BYTES,
 } from "./upload-policy";
+import { checkVisualTarget, existingVisualUpload, visualGrant, type VisualUpload } from "./visual-upload";
+import { clearVisual } from "./visuals";
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -166,6 +168,7 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
           },
         ],
         upload: "media_upload_begin → multipart POST на uploadUrl",
+        visuals: "media_get возвращает visualRevision (для исходной записи 0). media_set_visual готовит видеопоток своего источника в задании job_get, media_visual_upload_begin принимает отдельный файл без новой карточки. Передайте expectedRevision. Статус загрузки — job_get, снятие — media_clear_visual.",
         youtube:
           "media_import_youtube → job_get; импорт не скачивает файлы автоматически",
         replacement:
@@ -220,7 +223,7 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
     { itemId: id },
     async ({itemId}) => {
       await s.sharing.prefetchForViewer(ownerId, [itemId]);
-      return s.library.getItem(ownerId, itemId);
+      return s.library.getItem(ownerId, itemId, true);
     },
     true,
   );
@@ -239,7 +242,7 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
   tool(
     "media_replace_source",
     "Сменить источник своей карточки. Укажите URL одного ролика YouTube или ID собственного источника. Для замены локальной версии по URL вернётся jobId.",
-    { itemId: id, url: z.string().max(4000).url().optional(), sourceId: id.optional() },
+    { itemId: id, url: z.string().max(4000).url().optional(), sourceId: id.optional(), clearVisualRevision:z.number().int().nonnegative().optional() },
     args => replaceSource(s.db, s.storageRoot, ownerId, args.itemId, args),
   );
   tool(
@@ -274,7 +277,7 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
       return { items, failed };
     },
   );
-  const beginUpload = async (archive: boolean) => {
+  const beginUpload = async (archive: boolean, visual?: VisualUpload) => {
     for (const [key, grant] of s.uploadGrants)
       if (grant.expires < Date.now()) s.uploadGrants.delete(key);
     invariant(
@@ -285,16 +288,42 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
     );
     const key = randomBytes(32).toString("base64url");
     const expires = Date.now() + 15 * 60000;
-    s.uploadGrants.set(key, { ownerId, expires, archive });
+    s.uploadGrants.set(key, { ownerId, expires, archive, visual });
     return {
       uploadUrl: `${process.env.PUBLIC_URL ?? "http://localhost:8790"}/api/uploads/${key}`,
       method: "POST",
       maxBytes: archive ? MAX_ARCHIVE_UPLOAD_BYTES : MAX_MEDIA_UPLOAD_BYTES,
       field: "file",
       expiresAt: new Date(expires).toISOString(),
-      purpose: archive ? "library import preview" : "media upload",
+      purpose: visual ? "item visual" : archive ? "library import preview" : "media upload",
+      ...(visual && { jobId: visual.jobId, operationId: visual.operationId }),
     };
   };
+  const visualMutation = {
+    itemId: id,
+    expectedRevision: z.number().int().nonnegative(),
+    operationId: id.optional(),
+  };
+  const visualInputs = {
+    ...visualMutation,
+    soundSourceId: id.optional(),
+    videoStreamIndex: z.number().int().nonnegative().optional(),
+  };
+  tool("media_set_visual", "Взять только видеопоток своего источника и привязать его к звуку выбранной песни",
+    { ...visualInputs, visualSourceId: id }, async ({ itemId, visualSourceId, expectedRevision, ...rest }) => {
+      const job = await s.jobs.createVisualSource(ownerId, itemId, { ...rest, visualSourceId, expectedRevision });
+      return { ...job, jobId: job.id };
+    });
+  tool("media_clear_visual", "Снять назначенный видеоряд песни и вернуть исходное отображение",
+    visualMutation, ({ itemId, ...input }) => clearVisual(s.db, s.storageRoot, ownerId, itemId, input));
+  tool("media_visual_upload_begin", "Загрузить один клип по ссылке и связать его с песней. Отправьте multipart-поле file и проверьте job_get",
+    visualInputs, async (input) => {
+      const grant = visualGrant(ownerId, input.itemId, input);
+      const job = await existingVisualUpload(s.db, ownerId, grant);
+      if (job) return { jobId: job.id, operationId: grant.operationId, state: job.state, result: job.result };
+      await checkVisualTarget(s.db, ownerId, input.itemId, input.expectedRevision);
+      return beginUpload(false, grant);
+    });
   tool(
     "media_upload_begin",
     "Одноразовая multipart-ссылка загрузки аудио/видео в свою медиатеку",

@@ -23,6 +23,7 @@ import { HttpError, invariant } from "./errors";
 import { allowedLocalPath, storagePath } from "./media";
 import { sendMediaFile } from "./media-response";
 import { registerMcp } from "./mcp";
+import { receiveVisualUpload, visualGrant, visualUploadOptions, type VisualUpload } from "./visual-upload";
 import { uploadPolicy } from "./upload-policy";
 import { artworkQuery, ArtworkService } from "./artwork";
 import { browserOwner, registerNotes } from "./notes";
@@ -32,6 +33,7 @@ import { registerReplacement } from "./replacement";
 import { registerHistory } from "./history";
 import { registerYoutubeSync } from "./youtube-sync";
 import { ShareService } from "./sharing";
+import { registerVisuals } from "./visual-routes";
 import { registerSharing } from "./sharing-routes";
 
 declare module "fastify" {
@@ -49,6 +51,7 @@ export interface UploadGrant {
   ownerId: string;
   expires: number;
   archive: boolean;
+  visual?: VisualUpload;
 }
 export interface Services {
   db: Db;
@@ -157,7 +160,7 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
     if (request.user && kanameEnabled()) {
       request.access = await ownerAccess(db, request.user.id);
       const path = request.url.split("?")[0];
-      const sharedStream = /^\/api\/shared(?:-items|-playlists)?\/.*\/sources\//.test(path);
+      const sharedStream = /^\/api\/(?:shared(?:-items|-playlists)?|items)\/.*\/(?:sources|sound|visual)\//.test(path);
       const libraryReading = /^\/api\/(library(?:\/(?:page|ids))?|items(?:\/[^/]+)?|playlists\/(?:preview|[^/]+\/(?:playback|resolve|detail|rows)))$/.test(path);
       if (libraryReading) await sharing.prefetchForViewer(request.user.id);
       if (path.startsWith("/files/") || sharedStream || path === "/api/settings" || !["GET", "HEAD", "OPTIONS"].includes(request.method))
@@ -237,7 +240,7 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
     });
   });
   app.get("/api/items/:id", (request) =>
-    library.getItem(request.user!.id, idOf(request)),
+    library.getItem(request.user!.id, idOf(request), true),
   );
   app.post("/api/items/:id/shared-copy", (request) => {
     const options = z.object({ mode: z.enum(["audio", "video"]).optional() }).strict().parse(request.body ?? {});
@@ -356,6 +359,8 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
     );
     return archive ? archiveJob : { items };
   };
+  app.post("/api/items/:id/visual/upload", (request) => receiveVisualUpload(request, s, request.user!.id,
+    visualGrant(request.user!.id, idOf(request), visualUploadOptions.parse(request.query))));
   app.post("/api/items/upload", (request) =>
     receiveUpload(request, request.user!.id),
   );
@@ -384,6 +389,7 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
       "Ссылка загрузки истекла",
     );
     await ownerAccess(db, grant.ownerId);
+    if (grant.visual) return receiveVisualUpload(request, s, grant.ownerId, grant.visual);
     return receiveUpload(request, grant.ownerId, grant.archive);
   });
   app.get("/api/tags", async (request) => ({
@@ -546,6 +552,7 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
   registerHistory(app, db);
   registerYoutubeSync(app, db, library);
   registerSharing(app, sharing, storageRoot);
+  registerVisuals(app, storageRoot);
   registerMcp(app, s);
   const webRoot = options.webRoot ?? resolve("apps/web/dist");
   if (existsSync(join(webRoot, "index.html"))) {

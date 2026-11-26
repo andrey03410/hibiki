@@ -45,6 +45,7 @@ import { attachVideoStream, videoFile } from "./video-stream";
 import { AudioDelivery, ownedAudioFile } from "./audio-delivery";
 import { attachM4aSource, canUseM4aSource } from "./audio-mp4";
 import { audioRelayReady, listenForAudioRanges, subscribeAudioRelay } from "./audio-relay";
+import { ClipVideo } from "./ClipVideo";
 import { PlaybackFeedback } from "./playback-feedback";
 import { useListeningAttempt } from "./listening-client";
 import "./queue.css";
@@ -95,6 +96,7 @@ interface Controller {
   loadingLabel: string;
   mode: PlaybackMode;
   start: (items: ItemDto[], index?: number, playlistId?: string, options?: StartOptions) => Promise<void>;
+  warmCover: (item?: ItemDto) => void;
   activateItem: (items: ItemDto[], index: number, playlistId?: string, options?: StartOptions) => void;
   playShared: (path: string, items: ItemDto[], index: number, load: () => Promise<ItemDto[]>, options: SharedStartOptions) => Promise<void>;
   sharedId: (path: string, id: string) => string | undefined;
@@ -114,7 +116,7 @@ type StartOptions = {
 type SharedStartOptions = Pick<StartOptions, "mode" | "isCurrent" | "openPlayer"> & { activate?: boolean };
 const PlayerContext = createContext<Controller | null>(null);
 export const usePlayer = () => useContext(PlayerContext)!;
-type PlayerCommands = Pick<Controller, "start" | "activateItem" | "playShared" | "sharedId" | "toggle" | "watchCurrent" | "enqueue" | "playNext">;
+type PlayerCommands = Pick<Controller, "start" | "activateItem" | "playShared" | "sharedId" | "warmCover" | "toggle" | "watchCurrent" | "enqueue" | "playNext">;
 const CommandsContext = createContext<PlayerCommands | null>(null);
 const CardsContext = createContext<PlayerCards | null>(null);
 export const usePlayerCommands = () => useContext(CommandsContext)!;
@@ -421,8 +423,38 @@ export function PlayerProvider({
   const needsVideoForPlayback = !!videoSource && settings.mode === "audio" && !source;
   const waitingForVideo = !onPlayerScreen && (!!source && presentationKind === "video" || needsVideoForPlayback);
   const identity = { itemId: current?.id, sourceId: source?.id };
-  const sourceKey = JSON.stringify([identity, presentationKind, waitingForVideo]);
+  const sourceKey = JSON.stringify([identity, source?.streamUrl, presentationKind, waitingForVideo]);
   const delivery = useMemo(() => new AudioDelivery(), [userId]);
+  const warmTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const warmCandidate = useRef<string>(undefined);
+  function warmCover(item?: ItemDto) {
+    if (item && item.id === warmCandidate.current) return;
+    clearTimeout(warmTimer.current);
+    delivery.cancelIntent();
+    warmCandidate.current = item?.id;
+    if (!item || item.shared || !audioRelayReady() || item.id === live.current.queue[live.current.queueIndex]) return;
+    const file = ownedAudioFile(playbackSources(item, "audio")[0], item.duration);
+    if (file && !file.shared) warmTimer.current = setTimeout(() => { void delivery.prepareIntent(file); }, 180);
+  }
+  useEffect(() => {
+    const cancel = () => warmCover();
+    document.addEventListener("visibilitychange", cancel);
+    const scrolled = () => {
+      const focus = document.activeElement;
+      if (focus instanceof HTMLButtonElement && focus.matches(".entry-cover:focus-visible")) {
+        const bounds = focus.getBoundingClientRect();
+        if (bounds.bottom > 0 && bounds.top < window.innerHeight) return;
+      }
+      cancel();
+    };
+    window.addEventListener("scroll", scrolled, true);
+    return () => {
+      clearTimeout(warmTimer.current);
+      delivery.cancelIntent();
+      document.removeEventListener("visibilitychange", cancel);
+      window.removeEventListener("scroll", scrolled, true);
+    };
+  }, [delivery, routeKey, revision]);
   const [audioReplay, setAudioReplay] = useState(0);
   const [directAudioKey, setDirectAudioKey] = useState("");
   const completedAudio = useRef(false);
@@ -732,6 +764,11 @@ export function PlayerProvider({
     const token = intent.command();
     const isCurrent = () => token === intent.selection && options.isCurrent?.() !== false;
     setSelectionFailure(undefined);
+    clearTimeout(warmTimer.current);
+    warmCandidate.current = undefined;
+    const clicked = entries[index];
+    if (options.fromLibrary && clicked && !clicked.shared && audioRelayReady())
+      void delivery.beginSelection(ownedAudioFile(playbackSources(clicked, "audio")[0], clicked.duration));
     catalog.put(entries);
     let selected: ItemDto | undefined = entries[index];
     if (!selected) return;
@@ -793,7 +830,7 @@ export function PlayerProvider({
     const entry = itemsById.get(state.queue[playable]!)!;
     const chosenSource = playbackSources(entry, mode)[0];
     const opensPlayer = mode === "original" &&
-      (!!playlistId || options.openPlayer || entry.kind === "video" || playbackKind(entry, chosenSource, mode) === "video");
+      (!!playlistId || options.openPlayer || !!entry.visual || entry.kind === "video" || playbackKind(entry, chosenSource, mode) === "video");
     intent.advance(); // Ignore old automatic navigation once the new queue takes over.
     firstSound.current?.();
     firstSound.current = undefined;
@@ -835,7 +872,12 @@ export function PlayerProvider({
   async function playShared(path: string, items: ItemDto[], index: number, load: () => Promise<ItemDto[]>, options: SharedStartOptions) {
     if (options.isCurrent?.() === false) return;
     const entries = catalog.sharedEntries(path, items, load);
-    if (options.activate) activateItem(entries, index, undefined, options);
+    const chosen = entries[index];
+    if (options.activate && chosen?.visual && chosen.id === current?.id && options.mode === "original" &&
+        live.current.mode === "original" && !onPlayerScreen && !playingRef.current) {
+      await toggle();
+      if (options.isCurrent?.() !== false && playingRef.current) navigate("/player");
+    } else if (options.activate) activateItem(entries, index, undefined, options);
     else await start(entries, index, undefined, options);
   }
   async function findNext(direction: 1 | -1, state: PlaybackSettings, token: number, retry = false, wrap = state.repeat === "all", onError = setError, active = () => intent.navigation === token) {
@@ -1030,7 +1072,7 @@ export function PlayerProvider({
     if (!currentNative(event.currentTarget) || !playingRef.current) return;
     feedback.wait();
     const position = nativePosition.current.read(event.currentTarget);
-    if (position !== undefined) confirmPosition(position, event.currentTarget.playbackRate);
+    if (position !== undefined && nativeStarted.current.has(event.currentTarget)) confirmPosition(position, event.currentTarget.playbackRate);
     attempt.paused();
   }
   const nativeEvents = {
@@ -1065,7 +1107,7 @@ export function PlayerProvider({
       const element = event.currentTarget;
       if (!currentNative(element) || element.seeking || scrub.current || nativePosition.current.read(element) === undefined) return;
       const reading = nativePlaybackReading(element);
-      confirmPosition(reading[0], reading[2]);
+      if (nativeStarted.current.has(element) && feedback.snapshot() === "playing") confirmPosition(reading[0], reading[2]);
       const restart = nativeRestart.current;
       if (restart?.element === element && playingRef.current && nativeRestartHasProgress(element, restart.position)) {
         nativeRestart.current = null;
@@ -1187,7 +1229,20 @@ export function PlayerProvider({
     navigate("/player");
   }
   async function watchCurrent() {
-    if (!current || !videoSource) return;
+    if (!current) return;
+    if (current.visual) {
+      if (catalog.rechecksPlayback(current.id)) {
+        const token = intent.command();
+        const latest = await reloadPlaybackEntry(current.id, token);
+        if (!latest || token !== intent.navigation) return;
+        if (!latest.sources.length) { setError("Доступ к записи закрыт."); return; }
+        if (!latest.visual && !playableVideoSource(latest)) { setError("Клип больше недоступен."); return; }
+      }
+      patch({mode: "original"});
+      openAndPlay(current.id);
+      return;
+    }
+    if (!videoSource) return;
     if (settings.mode === "original" && source?.id === videoSource.id) {
       if (catalog.rechecksPlayback(current.id)) {
         const token = intent.command();
@@ -1251,7 +1306,7 @@ export function PlayerProvider({
     const canPlay = canAutoplayPlayback(item, candidate, mode, onPlayerScreen);
     playIntent((activate || playingRef.current) && canPlay);
     patch({ mode, position });
-    if (activate && !canPlay && mode === "original") openAndPlay(current.id);
+    if (activate && (!canPlay || item.visual) && mode === "original" && !onPlayerScreen) openAndPlay(current.id);
   }
   async function watchQueueVideo(index: number) {
     const token = intent.command();
@@ -1639,7 +1694,8 @@ export function PlayerProvider({
   };
   const artwork = playbackArtwork(current, source);
   const showArtwork = artwork && failedArtwork !== artwork;
-  const audioFallback = current?.kind === "video" && settings.mode === "original" &&
+  const watchClip = source && settings.mode === "original" && current?.visual;
+  const audioFallback = !current?.visual && current?.kind === "video" && settings.mode === "original" &&
     source && presentationKind === "audio";
   const sourceLabel = source?.shared ? "Источник по ссылке" : isYoutube ? "YouTube" : source ? "Локальный файл" : "Источник недоступен";
   const rowCommands = useRef({switchTo, watchQueueVideo, reorder, removeFromQueue});
@@ -1762,7 +1818,7 @@ export function PlayerProvider({
             <div className="watch-main">
               <div
                 ref={stage}
-                className={`watch-stage ${presentationKind === "audio" ? "is-audio" : ""} ${youtubeId ? "is-youtube" : ""} ${viewportFullscreen ? "is-viewport-fullscreen" : ""} ${fullscreen && controlsIdle ? "is-controls-idle" : ""}`}
+                className={`watch-stage ${presentationKind === "audio" && !watchClip ? "is-audio" : ""} ${youtubeId ? "is-youtube" : ""} ${viewportFullscreen ? "is-viewport-fullscreen" : ""} ${fullscreen && controlsIdle ? "is-controls-idle" : ""}`}
                 aria-label="Сцена воспроизведения"
                 tabIndex={-1}
                 onPointerMove={(event) => {
@@ -1864,6 +1920,10 @@ export function PlayerProvider({
                       {!source && <span className="audio-scene-label">Источник недоступен</span>}
                     </div>
                   )}
+                  {watchClip && <ClipVideo key={(relayKey ?? sourceKey) + watchClip.streamUrl} url={watchClip.streamUrl} audio={native}
+                    running={playing && phase === "playing"} onClick={event => {
+                      videoClick.click(event.detail, toggle, () => { void toggleFullscreen(); });
+                    }} />}
                 </div>
                 {loadingLabel && <div className="playback-loading" role="status">{loadingLabel}</div>}
                 <div className="watch-controls">
@@ -1906,7 +1966,7 @@ export function PlayerProvider({
               </div>
               <div className="watch-metadata">
                 <span className="watch-kind-icon">{presentationKind === "video" ? <Video size={20} /> : <Music2 size={20} />}</span>
-                <div><h2>{current.title}</h2><p>{audioFallback ? "Доступен только звук" : presentationKind === "video" ? "Видео" : "Аудио"}<span>·</span>{sourceLabel}{current.tags.slice(0, 2).map((tag) => <span className="watch-tag" key={tag.id}>{tag.name}</span>)}</p></div>
+                <div><h2>{current.title}</h2><p>{watchClip ? "Клип" : audioFallback ? "Доступен только звук" : presentationKind === "video" ? "Видео" : "Аудио"}<span>·</span>{sourceLabel}{current.tags.slice(0, 2).map((tag) => <span className="watch-tag" key={tag.id}>{tag.name}</span>)}</p></div>
               </div>
               <p className="watch-shortcuts"><kbd>K</kbd> пауза <span>·</span> <kbd>← →</kbd> 5 с <span>·</span> <kbd>J L</kbd> 10 с <span>·</span> <kbd>0–9</kbd> позиция <span>·</span> <kbd>↑ ↓</kbd> громкость <span>·</span> <kbd>F</kbd> полный экран</p>
             </div>
@@ -1986,7 +2046,7 @@ export function PlayerProvider({
               <small role="status">{loadingLabel || (needsVideoForPlayback ? soundUnavailableReason(current) ?? "Источник звука недоступен"
                 : waitingForVideo ? "Видео готово к просмотру"
                 : audioFallback ? "Доступен только звук"
-                : playing && phase === "playing" ? "Сейчас играет" : playing ? "Только звук" : "На паузе")}</small>
+                : playing && phase === "playing" ? "Сейчас играет" : playing ? "" : "На паузе")}</small>
             </span>
           </Link>
           <div className="mini-player-transport">
@@ -1998,8 +2058,8 @@ export function PlayerProvider({
                 {playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}
               </button>
             )}
-            {videoSource && (
-              <button type="button" className="icon-button" aria-label="Открыть видео" title="Открыть видео" onClick={watchCurrent}>
+            {(current.visual || videoSource) && (
+              <button type="button" className="icon-button" aria-label={current.visual ? "Смотреть клип" : "Открыть видео"} title={current.visual ? "Смотреть клип" : "Открыть видео"} onClick={watchCurrent}>
                 <Video size={18} aria-hidden="true" />
               </button>
             )}
@@ -2018,9 +2078,10 @@ export function PlayerProvider({
   ) : null;
   // Media time updates are frequent. Library rows subscribe only to changes
   // that affect their buttons and cover, while commands use the latest state.
-  const commands = useRef({start, activateItem, playShared, toggle, watchCurrent, addToQueue});
-  useLayoutEffect(() => {commands.current = {start, activateItem, playShared, toggle, watchCurrent, addToQueue};});
+  const commands = useRef({start, warmCover, activateItem, playShared, toggle, watchCurrent, addToQueue});
+  useLayoutEffect(() => {commands.current = {start, warmCover, activateItem, playShared, toggle, watchCurrent, addToQueue};});
   const stableCommands = useMemo<PlayerCommands>(() => ({
+    warmCover: (item) => commands.current.warmCover(item),
     start: (...args) => commands.current.start(...args),
     activateItem: (...args) => commands.current.activateItem(...args),
     playShared: (...args) => commands.current.playShared(...args),

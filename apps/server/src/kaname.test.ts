@@ -314,3 +314,30 @@ it("measures growing external-tool output before completion and closes it once",
     await expect(lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
   } finally { await f.close(); }
 });
+
+it("allows a quota-limited listener to remux a clip, bounds the output and gates actual transcoding", async () => {
+  const f = await fixture();
+  try {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const ffmpeg = (await import("ffmpeg-static")).default;
+    const { setVisual } = await import("./visuals");
+    const songPath = path.join(f.root,"song.wav"), clip = path.join(f.root,"clip.mkv"), vp8 = path.join(f.root,"vp8.webm");
+    await writeFile(songPath,wav());
+    const song = (await f.library.importLocal(f.userId,songPath)).item;
+    const make = (codec:string,out:string) => promisify(execFile)(String(ffmpeg),["-hide_banner","-loglevel","error","-f","lavfi","-i",
+      "testsrc2=s=64x64:r=25:d=1","-c:v",codec,out]);
+    await make("libx264",clip);
+    await make("libvpx",vp8);
+    const attach = (uploadPath:string) => setVisual(f.db,f.root,f.userId,song.id,{expectedRevision:0,uploadPath});
+    await expect(attach(vp8)).rejects.toMatchObject({code:"heavy_forbidden"});
+    f.grants.get("alice")!.storageBytes = wav().length + 500;
+    await expect(attach(clip)).rejects.toMatchObject({code:"kaname_storage_quota"});
+    expect(await f.db.kanameStorage.count()).toBe(0);
+    expect(await f.db.visualTrack.count()).toBe(0);
+    f.grants.get("alice")!.storageBytes = wav().length + 50_000;
+    expect((await attach(clip)).visual?.duration).toBeCloseTo(1);
+    expect(await f.db.mediaFile.count()).toBe(2);
+    expect(await f.db.kanameStorage.count()).toBe(0);
+  } finally { await f.close(); }
+});

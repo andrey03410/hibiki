@@ -515,11 +515,11 @@
   padding: 4px 10px 4px 0;
 }
 @media (min-width: 621px) and (max-width: 1000px) {
-  .app-shell:has(.tag-navigation) .sidebar {
+  .app-shell:has(.tag-navigation, .directory-page) .sidebar {
     width: 64px;
     padding: 20px 7px 0;
   }
-  .app-shell:has(.tag-navigation)
+  .app-shell:has(.tag-navigation, .directory-page)
     .sidebar
     :is(
       .brand > span:last-child,
@@ -532,23 +532,23 @@
     ) {
     display: none;
   }
-  .app-shell:has(.tag-navigation) .sidebar :is(.main-nav a, .settings-link, .brand, .user-card) {
+  .app-shell:has(.tag-navigation, .directory-page) .sidebar :is(.main-nav a, .settings-link, .brand, .user-card) {
     justify-content: center;
   }
-  .app-shell:has(.tag-navigation) .settings-link {
+  .app-shell:has(.tag-navigation, .directory-page) .settings-link {
     font-size: 0;
     gap: 0;
   }
-  .app-shell:has(.tag-navigation) .youtube-sync-notices > summary {
+  .app-shell:has(.tag-navigation, .directory-page) .youtube-sync-notices > summary {
     justify-content: center;
   }
-  .app-shell:has(.tag-navigation) .youtube-sync-notices > summary > span:not(.youtube-sync-count) {
+  .app-shell:has(.tag-navigation, .directory-page) .youtube-sync-notices > summary > span:not(.youtube-sync-count) {
     display: none;
   }
-  .app-shell:has(.tag-navigation) .user-card {
+  .app-shell:has(.tag-navigation, .directory-page) .user-card {
     flex-wrap: wrap;
   }
-  .app-shell:has(.tag-navigation) .main-content {
+  .app-shell:has(.tag-navigation, .directory-page) .main-content {
     margin-left: 64px;
     width: calc(100% - 64px);
     padding: 0 15px;

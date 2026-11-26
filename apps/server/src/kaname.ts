@@ -130,6 +130,7 @@ export async function storageBreakdown(db: Db, ownerId: string, storageRoot: str
     const add = (id: string, bytes: bigint) => {
       if (id.startsWith("job-")) result.importBytes += Number(bytes);
       else if (id.startsWith("export-")) result.exportBytes += Number(bytes);
+      else if (id.startsWith("visual-input-")) result.temporaryBytes += Number(bytes);
       else result.otherBytes += Number(bytes);
     };
     for (const row of held) {
@@ -193,6 +194,23 @@ export async function usage(db: Db, ownerId?: string) {
 }
 // Commit the reservation before a writer can create bytes. Time alone cannot prove
 // that a file was removed or that its writer died.
+// Give a seekable stream-copy writer a hard byte ceiling from the remaining quota.
+// FFmpeg may seek back to write its container header; the OS enforces this ceiling.
+export async function reserveOutput(db: Db, ownerId: string, estimate: number, access: Access | null, id: string) {
+  return db.$transaction(async tx => {
+    await lockStorage(tx);
+    const limit = access?.limits.storageBytes;
+    const bytes = limit == null ? estimate : Math.min(estimate,limit - await mediaBytes(tx,ownerId) - await heldBytes(tx,ownerId,false));
+    invariant(bytes > 0,413,"kaname_storage_quota","Недостаточно места для дорожки");
+    await tx.kanameStorage.update({where:{id,ownerId},data:{bytes:{increment:BigInt(bytes)}}});
+    return bytes;
+  });
+}
+export async function recheckStorage(tx: Tx, ownerId: string, access: Access | null) {
+  const limit = access?.limits.storageBytes;
+  if (limit != null) invariant(await mediaBytes(tx,ownerId) + await heldBytes(tx,ownerId,false) <= limit,
+    413,"kaname_storage_quota","Изменился доступный объём хранилища");
+}
 export async function reserve(db: Db, ownerId: string, bytes: number, access: Access | null,
   id = randomUUID() as string, workPath?: string | string[]) {
   await recoverWriters(db, ownerId);

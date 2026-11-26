@@ -83,7 +83,7 @@ function singleCharacterEdit(oldText: string, newText: string) {
 }
 
 export class LibraryPages {
-  private state = {...emptyPage, loading: true, error: ""};
+  private state = {...emptyPage, loading: true, appending: false, error: ""};
   private listeners = new Set<() => void>();
   private pageCount = 0;
   private failedAppend = false;
@@ -108,8 +108,8 @@ export class LibraryPages {
     if (previous && filters.query.trim() && singleCharacterEdit(previous.query, filters.query)) {
       this.cancel();
       this.timer = setTimeout(() => void this.refresh(), 150);
-    } else if (this.state.selectionId) {
-      void this.restart();
+    } else if (this.state.selectionId && filters !== previous) {
+      void this.restart(false);
     } else {
       void this.refresh();
     }
@@ -119,10 +119,11 @@ export class LibraryPages {
     this.controller = new AbortController();
     return this.controller.signal;
   }
-  private restart(): Promise<void> {
-    this.pageCount = 0;
-    this.update({ ...emptyPage, tagCounts: undefined, selectionId: undefined, loading: true, error: "" });
-    return this.refresh();
+  private restart(keepDepth = true): Promise<void> {
+    if (!keepDepth) this.pageCount = 0;
+    // Keep the mounted rows until a complete replacement arrives.
+    this.update({ nextCursor: null, selectionId: undefined, loading: true, appending: false, error: "" });
+    return this.refresh(false, false);
   }
   async fullOrder(selectionId: string | undefined, load: (id?: string) => Promise<string[]>): Promise<string[]> {
     try {
@@ -141,11 +142,11 @@ export class LibraryPages {
     this.listeners.forEach(listener => listener());
   }
 
-  async refresh(background = false): Promise<void> {
+  async refresh(background = false, retryRevision = true): Promise<void> {
     if (background && (this.state.loading || this.state.error)) return;
     const signal = this.begin();
     if (!background) {
-      this.update({loading: true, error: ""});
+      this.update({loading: true, appending: false, error: ""});
       this.failedAppend = false;
     }
     try {
@@ -161,11 +162,21 @@ export class LibraryPages {
       }
       if (signal.aborted) return;
       this.pageCount = count;
-      this.update({...page, items, tagCounts, selectionId, loading: false});
+      this.update({...page, items, tagCounts, selectionId, loading: false, appending: false});
     } catch (error) {
       if (signal.aborted) return;
-      if (error instanceof ApiError && error.code === "library_changed" && this.pageCount > 0) return this.restart();
+      if (retryRevision && error instanceof ApiError && error.code === "library_changed" && this.pageCount > 0) return this.restart();
       if (!background) this.update({loading: false, error: (error as Error).message});
+    }
+  }
+
+  favoriteChanged(id: string, favorite: boolean, favoritesOnly: boolean) {
+    const item = this.state.items.find(row => row.id === id);
+    if (!item || !!item.favorite === favorite) return;
+    if (favoritesOnly && !favorite) {
+      this.update({items: this.state.items.filter(row => row.id !== id), total: Math.max(0, this.state.total - 1)});
+    } else {
+      this.update({items: this.state.items.map(row => row.id === id ? {...row, favorite} : row)});
     }
   }
 
@@ -187,7 +198,7 @@ export class LibraryPages {
     const {nextCursor, loading} = this.state;
     if (loading || !nextCursor) return;
     const signal = this.begin();
-    this.update({loading: true, error: ""});
+    this.update({loading: true, appending: true, error: ""});
     try {
       const page = await this.fetch(nextCursor, signal);
       if (signal.aborted) return;

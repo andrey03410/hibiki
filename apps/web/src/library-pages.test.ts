@@ -124,17 +124,18 @@ it("keeps the page selection for subsequent pages, revalidation and the full-ord
   expect(body.filters).not.toHaveProperty("previousSort");
 });
 
-it("discards all stale pages and starts again at page one when a snapshot expires", async () => {
+it("refetches the loaded depth with one current snapshot when the old snapshot expires", async () => {
   const read = vi.fn().mockResolvedValueOnce({ ...first, selectionId: "old" })
     .mockResolvedValueOnce({ ...first, nextCursor: "200" })
     .mockRejectedValueOnce(new ApiError("library_changed", "expired", 409))
-    .mockResolvedValueOnce({ ...first, items: rows(500, 100), selectionId: "new" });
+    .mockResolvedValueOnce({ ...first, items: rows(500, 100), selectionId: "new" })
+    .mockResolvedValueOnce({ items: rows(600, 100), total: 300, nextCursor: "200" });
   const pages = new LibraryPages(read);
   await pages.refresh();
   await pages.more();
   await pages.more();
-  expect(read).toHaveBeenCalledTimes(4);
-  expect(pages.snapshot()).toMatchObject({ selectionId: "new", items: rows(500, 100), nextCursor: "100", error: "" });
+  expect(read).toHaveBeenCalledTimes(5);
+  expect(pages.snapshot()).toMatchObject({ selectionId: "new", items: rows(500, 200), nextCursor: "200", error: "" });
 });
 
 it("recovers the full queue from a new first page when its original snapshot expired", async () => {
@@ -171,4 +172,35 @@ it("debounces single-character insertions and deletions at any position", async 
     await vi.advanceTimersByTimeAsync(50);
     expect(read).toHaveBeenCalledOnce();
   } finally { vi.useRealTimers(); }
+});
+
+it("keeps mounted rows and loaded depth while a favorite change replaces a ranked selection", async () => {
+  const next = {items: rows(101, 2), total: 102, nextCursor: null};
+  let deliver!: (value: typeof first & {selectionId: string}) => void;
+  const read = vi.fn().mockResolvedValueOnce({...first, selectionId: "before"})
+    .mockResolvedValueOnce(next)
+    .mockImplementationOnce(() => new Promise(resolve => { deliver = resolve; }))
+    .mockResolvedValueOnce(next);
+  const pages = new LibraryPages(read);
+  await pages.refresh();
+  await pages.more();
+  const filters = {...defaultLibrarySearch, sort: "popular" as const};
+  pages.open(filters, filters);
+  expect(pages.snapshot().items).toHaveLength(102);
+  deliver({...first, items: first.items.map((row, i) => i ? row : {...row, favorite:true}), selectionId: "after"});
+  await vi.waitFor(() => expect(pages.snapshot().selectionId).toBe("after"));
+  expect(pages.snapshot().items).toHaveLength(102);
+  expect(pages.snapshot().items[0]?.favorite).toBe(true);
+});
+
+it("updates only the affected row and removes it from a favorites-only result", async () => {
+  const pages = new LibraryPages(vi.fn().mockResolvedValue(first));
+  await pages.refresh();
+  const [before, other] = pages.snapshot().items;
+  pages.favoriteChanged(before!.id, true, false);
+  expect(pages.snapshot().items[0]).toMatchObject({ id: before!.id, favorite: true });
+  expect(pages.snapshot().items[1]).toBe(other);
+  pages.favoriteChanged(before!.id, false, true);
+  expect(pages.snapshot().items[0]).toBe(other);
+  expect(pages.snapshot().total).toBe(first.total - 1);
 });

@@ -757,3 +757,26 @@ it("prefers the selected full video with sound over an earlier short local audio
   const short = {...movie,id:"short",streamUrl:"/files/short",mime:"audio/mpeg"};
   expect(playbackSources({kind:"video",sources:[short,movie],preferredSourceId:"movie"},"audio")[0]).toBe(movie);
 });
+
+it("keeps the assigned sound of a composition as the same audio engine in both modes", () => {
+  const item = { ...video, visual: { soundSourceId: "concert" }, sources: [
+    {id:"other", provider:"youtube", status:"available", externalId:"different"},
+    {id:"concert", provider:"local", status:"available", streamUrl:"/files/concert", mime:"video/mp4", hasAudio:true,
+      audioStreamUrl:"/files/concert/audio", audioMime:"audio/mp4", audioBytes:100},
+  ] };
+  for (const mode of ["original", "audio"] as const) {
+    const source = playbackSourceForAttempt(item, new Set(), undefined, mode);
+    expect(source?.streamUrl).toBe("/files/concert/audio");
+    expect(playbackKind(item, source, mode)).toBe("audio");
+    expect(playbackSourceForAttempt(item, new Set(["concert", "concert:audio"]), undefined, mode)).toBeUndefined();
+  }
+});
+
+it("corrects the clip to the leading audio phase and tolerates adjacent frames across a wrap", async () => {
+  const { clipSeekTime } = await import("./clip-clock");
+  expect(clipSeekTime(80, 4, 30)).toBe(20);
+  expect(clipSeekTime(60.01, 29.99, 30)).toBeUndefined();
+  expect(clipSeekTime(3, 0, NaN)).toBeUndefined();
+  expect(clipSeekTime(3, 0, 0)).toBeUndefined();
+  expect(clipSeekTime(60, 0.13, 30)).toBe(0);
+});

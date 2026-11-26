@@ -11,6 +11,8 @@ const JOB_NAMES: Record<string, string> = {
   "shared-copy": "Создание локальной копии",
   export: "Экспорт медиатеки",
   import: "Импорт архива",
+  "visual-set": "Назначение видеоряда",
+  "visual-attach": "Подготовка видеоряда",
   "import-preview": "Проверка архива",
   "import-apply": "Применение архива",
 };
@@ -248,7 +250,7 @@ export default function JobsPage() {
                     Отменить
                   </Button>
                 )}
-                {(job.state === "failed" || job.state === "cancelled") && (
+                {job.kind !== "visual-attach" && (job.state === "failed" || job.state === "cancelled") && (
                   <Button
                     className="subtle compact"
                     busy={pending === `${job.id}:retry`}

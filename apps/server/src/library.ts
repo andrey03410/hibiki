@@ -1,8 +1,11 @@
 import { canRunHeavy, ownerAccess, checkItems, startHeavyStorage, finishHeavyStorage, requireHeavy, moveReservedFile, reserve, release } from "./kaname";
-import { discardReservation, lockStorage } from "./storage-writer";
+import { discardReservation, lockStorage, recoverWriters } from "./storage-writer";
 import { randomUUID } from "node:crypto";
 import { rm, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
+import { videoStreams } from "./visual-media";
+import { visualFields, visualSelect } from "./visual-fields";
+import { cleanupPreviousVisual } from "./visuals";
 import { playbackFields } from "./media-playback";
 import type { Db } from "./db";
 import { Prisma } from "@prisma/client";
@@ -37,6 +40,7 @@ import { listTags, tagDto, saveTag } from "./taxonomy";
 import { decorateSharedItems } from "./sharing";
 
 export const itemInclude = {
+  visual: { select: visualSelect },
   sources: { include: { file: true } },
   tags: { include: { tag: true } },
 } as const;
@@ -49,16 +53,18 @@ export function requireHistoryAccess(definition: PlaylistDefinition, browser: bo
 }
 function ownedItemInclude(ownerId: string) {
   return {
+    visual: itemInclude.visual,
     sources: { ...itemInclude.sources, where: { ownerId, OR: [{ fileId: null }, { file: { ownerId } }] } },
     tags: { ...itemInclude.tags, where: { tag: { ownerId } } },
   };
 }
 type IncludedItem = NonNullable<
   Awaited<ReturnType<Db["item"]["findFirst"]>>
-> & { sources: Array<any>; tags: Array<any> };
+> & { visual?: Prisma.ItemVisualGetPayload<{select: typeof visualSelect}> | null; sources: Array<any>; tags: Array<any> };
 export function itemDto(row: IncludedItem): ItemDto {
   const coverVersion = artworkVersion(row.sources);
   return {
+    ...visualFields(row, "/api/items/" + row.id, row.sources.find(s => s.id === row.visual?.soundSourceId && s.ownerId === row.ownerId)?.id),
     id: row.id,
     title: row.title,
     originalTitle: row.originalTitle,
@@ -89,6 +95,9 @@ export function itemDto(row: IncludedItem): ItemDto {
       hasAudio:
         source.provider === "local" ? (source.file?.hasAudio ?? undefined) : undefined,
       ...(source.file && playbackFields(source.file, `/files/${source.fileId}`)),
+      ...(row.visual?.soundFile?.ownerId === row.ownerId && row.visual.soundSourceId === source.id && {
+        audioStreamUrl: "/api/items/" + row.id + "/sound/" + row.visualRevision, audioMime: row.visual.soundFile.mime, audioBytes: Number(row.visual.soundFile.bytes),
+      }),
       streamUrl: source.fileId ? `/files/${source.fileId}` : undefined,
     })),
   };
@@ -97,7 +106,7 @@ export function itemDto(row: IncludedItem): ItemDto {
 // decode each owned tag once instead of materializing one joined row per use.
 async function batchItems(tx: Prisma.TransactionClient, ownerId: string, ids: string[]) {
   const [rows, groups] = await Promise.all([
-    tx.item.findMany({where:{ownerId,id:{in:ids}}, include:{sources:ownedItemInclude(ownerId).sources}}),
+    tx.item.findMany({where:{ownerId,id:{in:ids}}, include:{visual:itemInclude.visual,sources:ownedItemInclude(ownerId).sources}}),
     tx.$queryRaw<{itemId:string; assigned:string}[]>`
       SELECT itemId, json_group_array(tagId ORDER BY tagId) AS assigned FROM ItemTag
       WHERE itemId IN (SELECT value FROM json_each(${JSON.stringify(ids)}))
@@ -313,8 +322,20 @@ export class LibraryService {
       jobs: jobs.map(jobDto),
     };
   }
-  async getItem(ownerId: string, id: string) {
-    return this.db.$transaction(tx => this.ownedItem(tx, ownerId, id));
+  async getItem(ownerId: string, id: string, includeStreams = false) {
+    const item = await this.db.$transaction(tx => this.ownedItem(tx, ownerId, id));
+    if (includeStreams && item.sources.some(source => !source.shared && source.fileId && source.mime?.startsWith("video/"))) {
+      const sources = await this.db.source.findMany({
+        where:{itemId:id,ownerId,provider:"local",file:{ownerId,kind:"video",NOT:{path:{startsWith:"missing/"}}}},
+        select:{id:true,file:{select:{path:true}}},
+      });
+      for (const row of sources) {
+        const source = item.sources.find(s => s.id === row.id);
+        if (row.file && source) source.videoStreams = await videoStreams(storagePath(this.storageRoot,row.file.path))
+          .then(streams => streams.map(({index,codec}) => ({index,codec}))).catch(() => []);
+      }
+    }
+    return item;
   }
   private async ownedItem(tx: Prisma.TransactionClient, ownerId: string, id: string) {
     const [item] = await hydrateLibraryItems(tx, ownerId, [id], true, this);
@@ -776,7 +797,9 @@ export class LibraryService {
           },
         });
       }
+      const oldVisual = await tx.itemVisual.findUnique({where:{itemId:id}});
       await tx.item.delete({ where: { id } });
+      await cleanupPreviousVisual(tx, ownerId, oldVisual);
       const settings = await tx.setting.findUnique({
         where: { userId: ownerId },
       });
@@ -784,6 +807,7 @@ export class LibraryService {
         await this.writeSettings(ownerId, JSON.parse(settings.json), tx);
       return snapshot.items.find(item => item.id === id)!.sources.flatMap(source => source.hash ?? []);
     });
+    await recoverWriters(this.db, ownerId);
     // Worker maintenance retries after a transient filesystem failure.
     await Promise.all(removedHashes.map(hash => removeUnusedArtwork(this.db, this.storageRoot, ownerId, hash).catch(() => {})));
   }

@@ -373,7 +373,7 @@ function SharedMedia({ path, saved, refreshLibrary }: { path: string; saved?: bo
         void refresh();
         return;
       }
-      await player.playShared(path, next, index, loadEntries, { mode, isCurrent, activate: !!itemId, openPlayer: !itemId && data?.kind === "playlist" });
+      await player.playShared(path, next, index, loadEntries, { mode, isCurrent, activate: !!itemId, openPlayer: mode === "original" && (!!next[index]?.visual || (!itemId && data?.kind === "playlist")) });
     } catch (failure) {
       if (isCurrent()) setActionError((failure as Error).message);
     } finally {

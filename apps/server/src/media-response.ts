@@ -4,7 +4,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { mediaRangeStream } from "./media-pacing";
 import { invariant } from "./errors";
 import { readOnlyMediaFlags } from "./media-playback";
-import { buildAudioView, readAudioRange, type AudioView } from "./mp4-audio";
+import { buildAudioView, buildVideoView, readAudioRange, type AudioView } from "./mp4-audio";
 
 type CachedView = { loading: Promise<AudioView | null>; weight: number };
 const views = new Map<string, CachedView>();
@@ -43,7 +43,7 @@ function byteRange(header: string, size: number) {
 }
 
 export async function sendMediaFile(request: FastifyRequest, reply: FastifyReply, path: string,
-  file: { id: string; hash: string; mime: string }, audio: boolean, etag = file.hash) {
+  file: { id: string; hash: string; mime: string }, audio: boolean | number, etag = file.hash) {
   const handle = await open(path, readOnlyMediaFlags).catch(() => undefined);
   invariant(handle, 404, "file_not_found", "Файл не найден");
   let streaming = false;
@@ -51,16 +51,21 @@ export async function sendMediaFile(request: FastifyRequest, reply: FastifyReply
     const info = await handle.stat();
     invariant(info.isFile(), 404, "file_not_found", "Файл не найден");
     let view: AudioView | null = null;
-    if (audio) {
+    if (typeof audio === "number") {
+      view = await cachedView(JSON.stringify(["video", file.id, file.hash, info.size, info.mtimeMs, audio]),
+        () => buildVideoView(handle, info.size, audio));
+      invariant(view, 404, "visual_view_missing", "Видеоряд недоступен");
+    } else if (audio) {
       invariant(file.mime === "video/mp4", 404, "audio_view_missing", "Звуковая дорожка недоступна");
       view = await cachedView(JSON.stringify([file.id, file.hash, info.size, info.mtimeMs]),
         () => buildAudioView(handle, info.size));
       invariant(view, 404, "audio_view_missing", "Звуковая дорожка недоступна");
       reply.header("etag", `"${etag}-a1"`);
     }
+    if (typeof audio === "number" || (!audio && etag !== file.hash)) reply.header("etag", '"' + etag + '"');
     const size = view?.bytes ?? info.size;
     const range = request.headers.range ? byteRange(request.headers.range, size) : undefined;
-    const mime = view ? "audio/mp4" : file.mime;
+    const mime = typeof audio === "number" ? "video/mp4" : view ? "audio/mp4" : file.mime;
     reply.type(mime).header("accept-ranges", "bytes");
     if (range === null) return reply.code(416).header("content-range", `bytes */${size}`).send();
     if (range) reply.code(206).header("content-range", `bytes ${range.start}-${range.end}/${size}`);

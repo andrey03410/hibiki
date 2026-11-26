@@ -10,6 +10,8 @@ import { z } from "zod";
 import type { Db } from "./db";
 import { HttpError, invariant } from "./errors";
 import type { LibraryService } from "./library";
+import { recoverWriters } from "./storage-writer";
+import { detachForReplacement } from "./visuals";
 import { inspectFile, storagePath } from "./media";
 import { uploadPolicy } from "./upload-policy";
 import { normalizeYoutubeUrl, refreshYoutube, YoutubeProviderError } from "./youtube";
@@ -284,6 +286,7 @@ export function registerReplacement(app: FastifyInstance, db: Db, library: Libra
   });
 
   app.post(`${base}/:proposalId/confirm`, async (request) => {
+    const {clearVisualRevision} = z.object({clearVisualRevision:z.number().int().nonnegative().optional()}).parse(request.body ?? {});
     const { ownerId, itemId } = await scope(request);
     const proposalId = proposalIdOf(request);
     const row = await findProposal(db, ownerId, itemId, proposalId);
@@ -298,11 +301,14 @@ export function registerReplacement(app: FastifyInstance, db: Db, library: Libra
         pending(current);
         const { url } = current;
         invariant(url, 400, "replacement_video_required", "Укажите ссылку на ролик YouTube");
+        await detachForReplacement(tx,ownerId,itemId,clearVisualRevision);
         const sourceId = await attachYoutube(tx, ownerId, itemId, url, preview);
         await tx.item.update({ where: { id: itemId, ownerId }, data: { preferredSourceId: sourceId } });
         await tx.sourceProposal.update({ where: { id: proposalId }, data: { status: "confirmed" } });
       });
     } else {
+      const composition = await db.item.findFirstOrThrow({where:{id:itemId,ownerId},select:{visualRevision:true,visual:{select:{itemId:true}}}});
+      invariant(!composition.visual || composition.visualRevision === clearVisualRevision,409,"visual_attached","Сначала подтвердите снятие текущего видеоряда");
       const claimed = await db.sourceProposal.updateMany({
         where: { id: proposalId, ownerId, itemId, status: "pending" },
         data: { status: "applying" },
@@ -320,6 +326,7 @@ export function registerReplacement(app: FastifyInstance, db: Db, library: Libra
         await library.importLocal(ownerId, staged, {
           itemId, uploadReservation: "stage-" + proposalId,
           applyReplacement: async (tx: Prisma.TransactionClient, sourceId: string) => {
+            await detachForReplacement(tx,ownerId,itemId,clearVisualRevision);
             await tx.sourceProposal.update({
               where: { id: proposalId, ownerId, itemId, status: "applying" },
               data: { status: "confirmed", stagedPath: null },
@@ -338,6 +345,7 @@ export function registerReplacement(app: FastifyInstance, db: Db, library: Libra
         active.delete(proposalId);
       }
     }
+    if (clearVisualRevision !== undefined) await recoverWriters(db, ownerId);
     return { ok: true };
   });
 
