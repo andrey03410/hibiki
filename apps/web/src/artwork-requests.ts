@@ -19,25 +19,39 @@ export function watchArtwork(image: HTMLImageElement, url: string) {
     admit();
   }, { rootMargin: "96px" });
   function start() {
-    observer!.unobserve(image);
-    near.delete(image);
     loading.add(image);
     image.src = url;
   }
   function release() {
     if (loading.delete(image)) queueMicrotask(admit);
   }
-  near.set(image, visible => { if (visible) waiting.add(start); else waiting.delete(start); });
-  image.addEventListener("load", release);
-  image.addEventListener("error", release);
+  function finish() {
+    // A cancelled request can deliver a late event after scrolling back.
+    if (image.hasAttribute("src") && image.complete) {
+      near.delete(image);
+      observer!.unobserve(image);
+      release();
+    }
+  }
+  function leave() {
+    waiting.delete(start);
+    if (!loading.has(image)) return;
+    if (image.complete) { finish(); return; }
+    image.removeAttribute("src");
+    release();
+  }
+  near.set(image, visible => {
+    if (!visible) leave();
+    else if (!loading.has(image)) waiting.add(start);
+  });
+  image.addEventListener("load", finish);
+  image.addEventListener("error", finish);
   observer.observe(image);
   return () => {
     near.delete(image);
-    waiting.delete(start);
     observer!.unobserve(image);
-    image.removeEventListener("load", release);
-    image.removeEventListener("error", release);
-    if (loading.has(image) && image.complete === false) image.removeAttribute("src");
-    release();
+    image.removeEventListener("load", finish);
+    image.removeEventListener("error", finish);
+    leave();
   };
 }

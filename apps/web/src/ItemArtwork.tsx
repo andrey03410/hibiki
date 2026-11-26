@@ -34,9 +34,12 @@ export function ArtworkImage({ urls, fallback = null }: { urls: (string | undefi
   if (!url) return fallback;
   const tryNext = () => setFailed(previous => [...previous, url]);
   return <img key={url} ref={attach} src={observed ? undefined : url} alt="" loading="lazy" decoding="async" fetchPriority="low"
-    onError={tryNext} onLoad={youtubeSdCover.test(url) ? event => {
+    onError={event => {
+      const image = event.currentTarget;
+      if (image.hasAttribute("src") && image.complete && !image.naturalWidth) tryNext();
+    }} onLoad={youtubeSdCover.test(url) ? event => {
       // Some unavailable YouTube sizes return a 120px placeholder with HTTP 200.
-      if (event.currentTarget.naturalWidth <= 120) tryNext();
+      if (event.currentTarget.naturalWidth > 0 && event.currentTarget.naturalWidth <= 120) tryNext();
     } : undefined} />;
 }
 
