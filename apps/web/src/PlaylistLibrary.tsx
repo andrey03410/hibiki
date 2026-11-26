@@ -67,12 +67,12 @@ export function usePlaylistLibrary() {
 }
 
 function ScopeRow({item, index, playerId, playlistId, play}: {
-  item: ItemDto; index: number; playerId: string; playlistId?: string; play: () => void;
+  item: ItemDto; index: number; playerId: string; playlistId?: string; play: (pauseCurrent: boolean) => void;
 }) {
   const {active, playing} = usePlayerCard(playerId, playlistId);
   const unavailable = soundUnavailableReason(item);
   return <li className="shared-track" aria-current={active || undefined}>
-    <button type="button" className="icon-button" disabled={!!unavailable} onClick={play} title={unavailable}
+    <button type="button" className="icon-button" disabled={!playing && !!unavailable} onClick={() => play(playing)} title={unavailable}
       aria-label={`${playing ? "Приостановить" : "Воспроизвести"} ${item.title}`}>
       {playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}
     </button>
@@ -180,8 +180,12 @@ export function ScopedPlaylistPage({scope, clear}: {scope: PlaylistScope; clear:
     return () => observer.disconnect();
   }, [rows.length, hasMore, loading, error]);
 
-  async function play(id: string) {
+  async function play(id: string, pauseCurrent: boolean) {
     const sequence = ++action.current;
+    if (pauseCurrent) {
+      player.toggle();
+      return;
+    }
     const isCurrent = () => sequence === action.current;
     if (saved) {
       const live = await refreshShared(true);
@@ -212,7 +216,7 @@ export function ScopedPlaylistPage({scope, clear}: {scope: PlaylistScope; clear:
     {!!rows.length && <ol className="shared-tracks" aria-label="Состав плейлиста">
       {rows.map((item, index) => item
         ? <ScopeRow key={item.id} item={item} index={index} playlistId={saved ? undefined : scope.id} playerId={saved ? player.sharedId(path, item.id) ?? "" : item.id}
-            play={() => void play(item.id).catch(failure => setError(failure.message))} />
+            play={pauseCurrent => void play(item.id, pauseCurrent).catch(failure => setError(failure.message))} />
         : <li key={index} className="shared-track shared-track-closed"><span aria-hidden="true">{index + 1}</span>Запись недоступна</li>)}
     </ol>}
     {hasMore && <div ref={sentinel}>

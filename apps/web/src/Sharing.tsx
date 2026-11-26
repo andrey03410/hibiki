@@ -355,7 +355,7 @@ function SharedMedia({ path, saved, refreshLibrary }: { path: string; saved?: bo
     }
   }, [path]);
   async function play(itemId?: string, mode: PlaybackMode = "original") {
-    if (data?.kind === "item" && itemId && player.sharedId(path, itemId) === player.current?.id && player.playing) {
+    if (itemId && player.sharedId(path, itemId) === player.current?.id && player.playing) {
       ++playbackRequest.current;
       setPlayingRequest(undefined);
       player.toggle();
@@ -470,7 +470,7 @@ function SharedMedia({ path, saved, refreshLibrary }: { path: string; saved?: bo
             return <li key={item.id} className="shared-track" aria-current={active || undefined}>
               <button type="button" className="icon-button" onClick={() => void play(item.id)}
                 aria-label={`${playing ? "Приостановить" : "Воспроизвести"} ${item.title}`}
-                disabled={!!unavailable || playingRequest === item.id} title={unavailable}>
+                disabled={!playing && (!!unavailable || playingRequest === item.id)} title={unavailable}>
                 {playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}
               </button>
               <span className={`item-art art-${index % 6}`} aria-hidden="true">
