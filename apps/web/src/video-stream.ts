@@ -206,15 +206,16 @@ export function attachVideoStream(element: HTMLVideoElement, file: VideoFile, fa
         const position = jump;
         jump = undefined;
         at = parser.seek(position, true).offset;
-        // Fetch just the packets needed to decode the requested frame and a short audio preroll.
-        // The first response can finish before an ordinary background range competes with the seek.
+        // A paused preview needs only its frame. For playback, read past it in
+        // the same response so the next HTTP round trip cannot eat the priming buffer.
+        const through = position + (pausedSeek ? .2 : 2);
         seekEnd = at;
         for (const id of tracks.keys()) {
           const track = parser.getTrackById(id);
           for (let i = track.nextSample; i < track.samples.length; i++) {
             const sample = track.samples[i]!;
             seekEnd = Math.max(seekEnd, sample.offset + sample.size);
-            if (sample.dts / sample.timescale >= position + .2) break;
+            if (sample.dts / sample.timescale >= through) break;
           }
         }
         await trim(Infinity);

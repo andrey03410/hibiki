@@ -207,12 +207,13 @@ function Youtube({
     let disposed = false,
       timer: ReturnType<typeof setInterval>,
       player: any;
-    const reportTime = () => {
+    const leader = follow?.current;
+    const reportTime = (event?: Event) => {
       if (disposed || !player) return;
       const state = player.getPlayerState?.();
       if (follow) {
         const audio = follow.current;
-        if (audio) syncYoutubePicture(player, audio, pending.current.playing && !document.hidden);
+        if (audio) syncYoutubePicture(player, audio, pending.current.playing && !document.hidden, event?.type === "seeking");
       } else if (state === 1 || state === 2) callbacks.current.onTime?.(...youtubePlaybackReading(player));
     };
     const host = document.createElement("div");
@@ -239,7 +240,10 @@ function Youtube({
               applyYoutubeVolume(player, volume);
               prepareYoutubePlayback(player, id, position, playing);
               timer = setInterval(reportTime, follow ? 250 : 500);
-              if (follow) document.addEventListener("visibilitychange", reportTime);
+              if (follow) {
+                leader?.addEventListener("seeking", reportTime);
+                document.addEventListener("visibilitychange", reportTime);
+              }
             },
             onStateChange: (event: any) => {
               if (disposed || follow) return;
@@ -258,6 +262,7 @@ function Youtube({
     return () => {
       disposed = true;
       clearInterval(timer);
+      leader?.removeEventListener("seeking", reportTime);
       document.removeEventListener("visibilitychange", reportTime);
       player?.destroy?.();
       engine.current = null;
@@ -576,6 +581,7 @@ export function PlayerProvider({
     }
   }, [delivery, playing, audioToken, m4aEnabled]);
   const [nativeVideo, setNativeVideo] = useState<{ key: string; position: number }>();
+  const waitingPicture = useRef<HTMLMediaElement | null>(null);
   const retiredVideos = useRef(new WeakSet<HTMLMediaElement>());
   const streamedVideo = useMemo(() => presentationKind === "video" && sceneAllowed && !waitingForVideo && nativeVideo?.key !== sourceKey &&
     typeof MediaSource !== "undefined" && navigator.vendor === "Google Inc." ? videoFile(source, current?.duration) : undefined,
@@ -689,7 +695,19 @@ export function PlayerProvider({
       if (typeof position === "number" && position > 0) return position;
     }
   }
+  function holdForPicture(element: HTMLMediaElement, hold: boolean) {
+    if (hold && playingRef.current && currentNative(element)) {
+      waitingPicture.current = element;
+      element.pause();
+      feedback.wait();
+      attempt.paused();
+    } else if (!hold && waitingPicture.current === element) {
+      waitingPicture.current = null;
+      if (currentNative(element) && playingRef.current && element.isConnected) playNative(element);
+    }
+  }
   function playNative(element: HTMLMediaElement) {
+    if (waitingPicture.current === element) return;
     element.play().catch((reason: unknown) => {
       if (!currentNative(element) || !playingRef.current) return;
       if (reason instanceof DOMException && reason.name === "AbortError") return;
@@ -1235,6 +1253,7 @@ export function PlayerProvider({
       if (position !== undefined) confirmPosition(position, event.currentTarget.playbackRate);
       measureProgress();
       attempt.paused();
+      if (waitingPicture.current === event.currentTarget) return;
       playIntent(false);
     },
     onEnded(event: SyntheticEvent<HTMLMediaElement>) {
@@ -1697,7 +1716,10 @@ export function PlayerProvider({
   const showArtwork = artwork && failedArtwork !== artwork;
   const watchClip = source && current?.visual;
   const companion = source && presentationKind === "audio" && !watchClip ? videoSource : undefined;
-  const companionFile = useMemo(() => companion && onPlayerScreen && sceneAllowed &&
+  // Chromium can range-seek an owned MP4 directly. A second MSE demuxer
+  // competes with the ongoing audio and re-fetches interleaved keyframes.
+  // Shared video keeps the range loader that periodically rechecks its grant.
+  const companionFile = useMemo(() => companion?.shared && onPlayerScreen && sceneAllowed &&
     typeof MediaSource !== "undefined" && navigator.vendor === "Google Inc." ? videoFile(companion, current?.duration) : undefined,
     [onPlayerScreen, sceneAllowed, companion?.streamUrl, companion?.shared, companion?.bytes, companion?.mime,
       companion?.playbackHints?.audioStart, companion?.playbackHints?.tailStart, current?.duration]);
@@ -1934,7 +1956,7 @@ export function PlayerProvider({
                     </div>
                   ) : companion?.streamUrl ? (
                     <ClipVideo key={JSON.stringify([relayKey ?? sourceKey, companion.id, companion.streamUrl])} url={companion.streamUrl} loop={false}
-                      audio={native} file={companionFile} running={playing && phase === "playing"} onFailure={failPicture}
+                      audio={native} file={companionFile} running={playing} holdSound={holdForPicture} onFailure={failPicture}
                       onClick={event => videoClick.click(event.detail, toggle, () => { void toggleFullscreen(); })} />
                   ) : (
                     <div className={`audio-scene art-${current.title.length % 6}`}
