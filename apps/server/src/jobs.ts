@@ -1,8 +1,9 @@
-import { copyComposition } from "./visuals";
+import { copyComposition, setVisual } from "./visuals";
+import { existingVisualUpload, type VisualUpload } from "./visual-upload";
 import { discardReservation } from "./storage-writer";
 import { ownerAccess, requireHeavy, release, retain, reserve, kanameEnabled, startHeavyStorage, finishHeavyStorage } from "./kaname";
 import { MAX_ARCHIVE_UPLOAD_BYTES } from "./upload-policy";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { copyFile, rename, readdir, mkdir, realpath, rm, lstat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -13,7 +14,7 @@ import { LibraryService, jobDto } from "./library.js";
 import { HttpError, invariant } from "./errors.js";
 import { hintsVersion, inspectPlaybackMetadata } from "./media-playback";
 import { audioViewVersion } from "./mp4-audio";
-import { storagePath } from "./media.js";
+import { hashFile, storagePath } from "./media.js";
 import { downloadReplacement, finishDownloadReplacement, selectedDownloadVideo, validateDownloadReplacement } from "./source-selection";
 import { ShareService } from "./sharing.js";
 import {
@@ -130,6 +131,83 @@ export class JobsService {
     invariant(row, 404, "job_not_found", "Задание не найдено");
     return row;
   }
+  async createVisualSource(ownerId: string, itemId: string, input: {
+    expectedRevision: number; visualSourceId: string; soundSourceId?: string; videoStreamIndex?: number; operationId?: string;
+  }) {
+    await ownerAccess(this.db, ownerId);
+    const { expectedRevision, visualSourceId, soundSourceId, videoStreamIndex, operationId } = input;
+    const inputJson = JSON.stringify({ itemId, expectedRevision, visualSourceId, soundSourceId, videoStreamIndex, operationId });
+    const id = createHash("sha256").update(JSON.stringify(["visual-set", ownerId, itemId, operationId ?? inputJson])).digest("hex");
+    const job = await this.db.$transaction(async tx => {
+      // Serialize the revision check and idempotent job creation with concurrent submissions.
+      await tx.$executeRaw`UPDATE Job SET progress = progress WHERE 0`;
+      const known = await tx.job.findFirst({ where: { id, ownerId } });
+      if (known) {
+        invariant(known.inputJson === inputJson, 409, "visual_operation_conflict", "Идентификатор уже использован для другой операции");
+        return known;
+      }
+      const target = await tx.item.findFirst({ where: { id: itemId, ownerId }, select: { visualRevision: true } });
+      invariant(target, 404, "item_not_found", "Запись не найдена");
+      invariant(target.visualRevision === expectedRevision, 409, "visual_revision", "Видеоряд уже изменился. Обновите карточку.");
+      const source = await tx.source.count({ where: { id: visualSourceId, ownerId, item: { ownerId },
+        provider: "local", OR: [{ status: "available" }, { reason: "unsupported_codec" }], file: { ownerId, NOT: { path: { startsWith: "missing/" } } } } });
+      invariant(source, 404, "visual_source_missing", "Источник видеоряда не найден");
+      return tx.job.create({ data: { id, ownerId, kind: "visual-set", inputJson } });
+    });
+    return jobDto(job);
+  }
+
+  async createVisualUpload(ownerId: string, input: VisualUpload, file: string, hold: string) {
+    const access = await ownerAccess(this.db, ownerId);
+    const { jobId, ...params } = input;
+    const hash = await hashFile(file);
+    const inputKey = randomUUID();
+    const staged = this.visualInput(ownerId, inputKey);
+    await mkdir(path.dirname(staged), { recursive: true });
+    await reserve(this.db, ownerId, 0, access, hold, staged);
+    await rename(file, staged);
+    let retained = false;
+    try {
+      const result = await this.db.$transaction(async tx => {
+        await tx.$executeRaw`UPDATE Job SET progress = progress WHERE 0`;
+        const known = await existingVisualUpload(tx, ownerId, input, hash);
+        if (known) return { job: known, retained: false };
+        const target = await tx.item.count({ where: { id: params.itemId, ownerId, visualRevision: params.expectedRevision } });
+        invariant(target, 409, "visual_changed", "Запись изменилась во время загрузки");
+        const inputHold = "visual-input-" + jobId;
+        await tx.kanameStorage.update({ where: { id: hold, ownerId }, data: { id: inputHold } });
+        await retain(tx, inputHold);
+        const job = await tx.job.create({ data: { id: jobId, ownerId, kind: "visual-attach",
+          inputJson: JSON.stringify({ ...params, inputKey, hash }) } });
+        return { job: jobDto(job), retained: true };
+      });
+      retained = result.retained;
+      return result.job;
+    } finally {
+      if (!retained) await rm(staged, { force: true });
+    }
+  }
+
+  private visualInput(ownerId: string, key: string) {
+    invariant(/^[a-f0-9-]{36}$/.test(key), 409, "visual_upload_required", "Загрузите видеоряд ещё раз");
+    return storagePath(this.storageRoot, path.join("visual-inputs", ownerId, key));
+  }
+
+  private async discardVisualInput(jobId: string) {
+    const job = await this.db.job.findUnique({ where: { id: jobId } });
+    if (job?.kind !== "visual-attach" || !["done", "failed", "cancelled"].includes(job.state)) return;
+    await rm(this.visualInput(job.ownerId, asObject(job.inputJson).inputKey), { force: true });
+    await release(this.db, "visual-input-" + jobId);
+  }
+
+  private async recoverVisualInputs() {
+    const completed = await this.db.$queryRaw<Array<{ id: string }>>`
+      SELECT j.id FROM Job j JOIN KanameStorage hold ON hold.id = 'visual-input-' || j.id
+      WHERE j.kind = 'visual-attach' AND j.state IN ('done','failed','cancelled')
+    `;
+    for (const job of completed) await this.discardVisualInput(job.id);
+  }
+
   async create(ownerId: string, kind: string, input: unknown, browser = false, uploadHold?: string): Promise<JobDto> {
     const access = await ownerAccess(this.db, ownerId);
     if (kind === "youtube-download") requireHeavy(access);
@@ -220,22 +298,20 @@ export class JobsService {
   async cancel(ownerId: string, id: string, browser = false): Promise<JobDto> {
     const job = await this.owned(ownerId, id, browser);
     if (!["queued", "running"].includes(job.state)) return jobDto(job);
-    await this.db.job.updateMany({
-      where: { id, ownerId, state: { in: ["queued", "running"] } },
-      data: {
-        cancelRequested: true,
-        ...(job.state === "queued"
-          ? { state: "cancelled", leaseUntil: null }
-          : {}),
-      },
-    });
+    await this.db.$transaction([
+      this.db.job.updateMany({ where: { id, ownerId, state: "queued" },
+        data: { state: "cancelled", cancelRequested: true, leaseUntil: null } }),
+      this.db.job.updateMany({ where: { id, ownerId, state: "running" }, data: { cancelRequested: true } }),
+    ]);
     this.active.get(id)?.abort();
+    if (job.kind === "visual-attach") await this.discardVisualInput(id);
     return this.get(ownerId, id, browser);
   }
   async retry(ownerId: string, id: string, browser = false): Promise<JobDto> {
     const job = await this.owned(ownerId, id, browser);
     const access = await ownerAccess(this.db, ownerId);
     if (job.kind === "youtube-download") requireHeavy(access);
+    invariant(job.kind !== "visual-attach", 409, "visual_upload_required", "Для новой попытки загрузите видеоряд ещё раз");
     invariant(
       ["failed", "cancelled"].includes(job.state),
       409,
@@ -307,6 +383,7 @@ export class JobsService {
     if (now.getTime() >= this.nextArchiveRecovery) {
       this.nextArchiveRecovery = now.getTime() + 60_000;
       await this.archives.cleanup();
+      await this.recoverVisualInputs();
     }
     await this.db.job.updateMany({
       where: {
@@ -449,7 +526,7 @@ export class JobsService {
       }
     };
     try {
-      await mkdir(this.directory(job.id), { recursive: true });
+      if (job.kind !== "visual-set" && job.kind !== "visual-attach") await mkdir(this.directory(job.id), { recursive: true });
       const result = await this.execute(job, controller.signal, save);
       controller.signal.throwIfAborted();
       const previewId: string | undefined = job.kind === "import" ? asObject(job.inputJson).previewJobId : undefined;
@@ -504,6 +581,7 @@ export class JobsService {
       clearInterval(timer);
       await heartbeatPromise;
       this.active.delete(job.id);
+      if (job.kind === "visual-attach") await this.discardVisualInput(job.id);
     }
     return true;
   }
@@ -520,6 +598,26 @@ export class JobsService {
     const access = await ownerAccess(this.db, job.ownerId);
     if (job.kind === "youtube-download") requireHeavy(access);
     const input = asObject(job.inputJson);
+    if (job.kind === "visual-attach" || job.kind === "visual-set") {
+      const lease = () => ({ id: job.id, ownerId: job.ownerId, state: "running", attempt: job.attempt,
+        cancelRequested: false, leaseUntil: { gt: new Date() } });
+      return setVisual(this.db, this.storageRoot, job.ownerId, input.itemId, {
+        ...(job.kind === "visual-attach" ? { uploadPath: this.visualInput(job.ownerId, input.inputKey) } : { visualSourceId: input.visualSourceId }),
+        expectedRevision: input.expectedRevision,
+        soundSourceId: input.soundSourceId, videoStreamIndex: input.videoStreamIndex, operationId: input.operationId ?? job.id,
+      }, {
+        signal,
+        validateAccess: async tx => {
+          signal.throwIfAborted();
+          invariant(await tx.job.count({ where: lease() }), 409, "job_lease", "Задание уже завершено или отменено");
+        },
+        onPublished: async (tx, result) => {
+          const updated = await tx.job.updateMany({ where: lease(),
+            data: { state: "done", leaseUntil: null, progress: 1, completed: 1, total: 1, resultJson: JSON.stringify(result) } });
+          invariant(updated.count, 409, "job_lease", "Задание уже завершено или отменено");
+        },
+      });
+    }
     if (job.kind === "youtube-import" || job.kind === "youtube-refresh") {
       let result = asObject(job.resultJson) as YoutubeResult;
       if (!Array.isArray(result.entries)) {

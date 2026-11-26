@@ -23,6 +23,7 @@ import { HttpError, invariant } from "./errors";
 import { allowedLocalPath, storagePath } from "./media";
 import { sendMediaFile } from "./media-response";
 import { registerMcp } from "./mcp";
+import { receiveVisualUpload, visualGrant, visualUploadOptions, type VisualUpload } from "./visual-upload";
 import { uploadPolicy } from "./upload-policy";
 import { artworkQuery, ArtworkService } from "./artwork";
 import { browserOwner, registerNotes } from "./notes";
@@ -50,6 +51,7 @@ export interface UploadGrant {
   ownerId: string;
   expires: number;
   archive: boolean;
+  visual?: VisualUpload;
 }
 export interface Services {
   db: Db;
@@ -357,6 +359,8 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
     );
     return archive ? archiveJob : { items };
   };
+  app.post("/api/items/:id/visual/upload", (request) => receiveVisualUpload(request, s, request.user!.id,
+    visualGrant(request.user!.id, idOf(request), visualUploadOptions.parse(request.query))));
   app.post("/api/items/upload", (request) =>
     receiveUpload(request, request.user!.id),
   );
@@ -385,6 +389,7 @@ export async function createApp(options: { db: Db; storageRoot: string; webRoot?
       "Ссылка загрузки истекла",
     );
     await ownerAccess(db, grant.ownerId);
+    if (grant.visual) return receiveVisualUpload(request, s, grant.ownerId, grant.visual);
     return receiveUpload(request, grant.ownerId, grant.archive);
   });
   app.get("/api/tags", async (request) => ({
