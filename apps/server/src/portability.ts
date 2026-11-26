@@ -649,7 +649,6 @@ function validateManifest(input: unknown): PortableManifest {
   }
   if (manifest.version === 2) {
     const trackIds = unique(manifest.visualTracks.map(track => track.id), "visual tracks");
-    unique(manifest.visualTracks.map(track => track.signature), "visual signatures");
     const media = new Map(manifest.files.map(file => [file.id, file]));
     const used = new Set<string>();
     const originals = new Set(manifest.items.flatMap(item => item.sources.flatMap(source => source.fileId ? [source.fileId] : [])));
@@ -663,7 +662,7 @@ function validateManifest(input: unknown): PortableManifest {
       if (!roles) continue;
       requireRef(trackIds, roles.visual.trackId);
       used.add(roles.visual.trackId);
-      if (!sources.find(source => source.id === roles.sound.sourceId)?.fileId)
+      if (!sources.find(source => source.id === roles.sound.sourceId && source.provider === "local")?.fileId)
         throw new Error("Звуковой источник не принадлежит записи или не имеет файла");
       if (roles.sound.fileId) usedFiles.add(roles.sound.fileId);
       if (roles.sound.fileId && media.get(roles.sound.fileId)?.kind !== "audio")
@@ -1132,9 +1131,11 @@ export async function applyArchive(
   signal?.throwIfAborted();
   const manifestFiles = new Map(manifest.files.map((file) => [file.id, file]));
   const fileUses = new Map<string, number>();
+  const sourceFiles = new Set<string>();
   for (const item of manifest.items)
     for (const source of item.sources)
       if (source.fileId) {
+        sourceFiles.add(source.fileId);
         const hash = manifestFiles.get(source.fileId)!.hash;
         fileUses.set(hash, (fileUses.get(hash) ?? 0) + 1);
       }
@@ -1255,6 +1256,7 @@ export async function applyArchive(
         };
         const fileIds = new Map<string, string>();
         const availability = new Map<string, boolean>();
+        const newRoleFiles: string[] = [];
         let added = 0,
           reused = 0;
         for (const file of manifest.files) {
@@ -1264,7 +1266,7 @@ export async function applyArchive(
           let stored = await tx.mediaFile.findUnique({
             where: { ownerId_hash: { ownerId, hash: file.hash } },
           });
-          if (!stored)
+          if (!stored) {
             stored = await tx.mediaFile.create({
               data: {
                 id: plan.id,
@@ -1279,7 +1281,8 @@ export async function applyArchive(
                 ...playback,
               },
             });
-          else if (plan.copied && stored.path === plan.previousPath)
+            if (manifest.version === 2 && !sourceFiles.has(file.id)) newRoleFiles.push(stored.id);
+          } else if (plan.copied && stored.path === plan.previousPath)
             stored = await tx.mediaFile.update({
               where: { id: stored.id },
               data: {
@@ -1633,6 +1636,16 @@ export async function applyArchive(
           update: { json: JSON.stringify(settings) },
         });
         signal?.throwIfAborted();
+        // A verified visual can already use a different local donor container.
+        // Retire only new role files from this import which got no reference.
+        for (let i = 0; i < newRoleFiles.length; i += 250) {
+          const unused = await tx.mediaFile.findMany({ where: { ownerId, id: { in: newRoleFiles.slice(i, i + 250) },
+            sources: { none: {} }, visualTracks: { none: {} }, visualSounds: { none: {} } }, select: { id: true, path: true } });
+          for (const file of unused) {
+            await tx.mediaFile.delete({ where: { id: file.id } });
+            usedPaths.delete(path.join(storageRoot, file.path));
+          }
+        }
         // Parallel imports may publish the same hash. Delete losing copies while
         // their reservation is still held, before committing the winning files.
         for (const file of cleanup)

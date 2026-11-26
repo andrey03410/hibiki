@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { writeFile, readFile } from "node:fs/promises";
+import { writeFile, readFile, readdir } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
@@ -86,4 +86,37 @@ it("preserves an explicit clear on an existing destination item matched by its o
   await clearVisual(ctx.db, ctx.root, ctx.otherUserId, dest.id, { expectedRevision: attached.visualRevision! });
   await applyArchive(ctx.db, ctx.otherUserId, ctx.root, full);
   expect((await ctx.library.getItem(ctx.otherUserId, dest.id)).visual).toBeUndefined();
+});
+
+async function attachSamePictureAtDestination() {
+  const path = join(ctx.root, "second.wav");
+  await writeFile(path, wav(3));
+  const other = (await ctx.library.importLocal(ctx.otherUserId, path)).item;
+  const donor = (await ctx.library.importLocal(ctx.otherUserId, join(ctx.root, "donor.mp4"))).item;
+  await setVisual(ctx.db, ctx.root, ctx.otherUserId, other.id, { expectedRevision: 0, visualSourceId: donor.sources[0].id });
+}
+
+it("can export unhydrated and verified assignments with the same declared picture signature", async () => {
+  const { donor } = await library();
+  await ctx.library.deleteItem(ctx.userId, donor.id);
+  await applyArchive(ctx.db, ctx.otherUserId, ctx.root, await transfer(false, "meta"));
+  await attachSamePictureAtDestination();
+  const path = join(ctx.root, "onward.zip");
+  await exportLibrary(ctx.db, ctx.otherUserId, ctx.root, path, { includeFiles:true });
+  const checked = await inspectArchive(path, join(ctx.root,"onward"));
+  expect(checked.manifest.version).toBe(2);
+  expect(checked.preview.canApply).toBe(true);
+});
+
+it("discards a detached video copy when the recipient already has the same verified picture", async () => {
+  const { donor } = await library();
+  await ctx.library.deleteItem(ctx.userId, donor.id);
+  const archive = await transfer(true, "deduplicated");
+  await attachSamePictureAtDestination();
+  await applyArchive(ctx.db, ctx.otherUserId, ctx.root, archive);
+  expect(await ctx.db.visualTrack.count({ where: { ownerId: ctx.otherUserId } })).toBe(1);
+  expect(await ctx.db.mediaFile.count({ where: { ownerId: ctx.otherUserId, sources: {none:{}},
+    visualTracks: {none:{}}, visualSounds: {none:{}} } })).toBe(0);
+  const copied = await readdir(join(ctx.root, "imported", ctx.otherUserId), { recursive: true, withFileTypes: true });
+  expect(copied.filter(entry => entry.isFile())).toHaveLength(1);
 });
