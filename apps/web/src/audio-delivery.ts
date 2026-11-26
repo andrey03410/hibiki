@@ -28,8 +28,8 @@ export function ownedAudioFile(source?: SourceDto, duration?: number | null): Au
   if (source?.provider !== "local" || !source.streamUrl || !source.mime) return;
   const path = source.streamUrl;
   const supported = source.shared
-    ? /^\/api\/(?:shared-items\/[^/?#]+|(?:shared|shared-playlists)\/[^/?#]+\/items\/[^/?#]+)\/sources\/[\w-]+(?:\/audio)?$/.test(path)
-    : /^\/files\/[\w-]+(?:\/audio)?$/.test(path);
+    ? /^\/api\/(?:shared-items\/[^/?#]+|(?:shared|shared-playlists)\/[^/?#]+\/items\/[^/?#]+)\/(?:sources\/[\w-]+(?:\/audio)?|sound\/\d+)$/.test(path)
+    : /^(?:\/files\/[\w-]+(?:\/audio)?|\/api\/items\/[\w-]+\/sound\/\d+)$/.test(path);
   const size = source.bytes;
   if (!supported || !size || !Number.isSafeInteger(size) || size > MAX_FILE || size < 0) return;
   const hint = source.playbackHints;
@@ -384,6 +384,7 @@ export class AudioDelivery {
   private current?: { token: string; bytes: AudioBytes; recheck: boolean };
   private next?: AudioBytes;
   private prepared = false;
+  private speculative = false;
   private state?: AudioCoverage;
   private listeners = new Set<() => void>();
   private timer?: ReturnType<typeof setTimeout>;
@@ -404,15 +405,31 @@ export class AudioDelivery {
     return !!file && !file.shared && this.prepared && this.next?.file.url === file.url && this.next.file.size === file.size;
   }
   suspendPreparation() { if (!this.prepared) void this.prepare(); }
-  async prepare(file?: AudioFile) {
+  cancelIntent() {
+    if (this.speculative) void this.prepare();
+  }
+  prepareIntent(file?: AudioFile) {
+    if (!file || file.shared || (this.next && !this.speculative)) return;
+    return this.stage(file, true);
+  }
+  beginSelection(file?: AudioFile) {
+    if (!file || file.shared || file.url === this.current?.bytes.file.url) return;
+    return this.stage(file, false, true);
+  }
+  prepare(file?: AudioFile) {
+    return this.stage(file, false);
+  }
+  private async stage(file: AudioFile | undefined, speculative: boolean, selected = false) {
+    if (speculative && this.current && !this.current.bytes.complete) return;
+    this.speculative = speculative;
     if (file && this.next?.file.url === file.url && this.next.file.size === file.size) return;
     this.next?.close();
     this.next = undefined;
     this.prepared = false;
-    if (!file || (this.current && (!this.current.bytes.complete || file.url === this.current.bytes.file.url))) return;
+    if (!file || (this.current && ((!selected && !this.current.bytes.complete) || file.url === this.current.bytes.file.url))) return;
     const next = this.next = new AudioBytes(file, this.read);
     try {
-      await next.prepare("low");
+      await next.prepare(selected ? "high" : "low");
       if (this.next === next) this.prepared = true;
     } catch { if (this.next === next) { next.close(); this.next = undefined; } }
   }
@@ -487,6 +504,8 @@ export class AudioDelivery {
     this.current?.bytes.close();
     this.next?.close();
     this.current = this.next = undefined;
+    this.speculative = false;
+    this.prepared = false;
     this.publish();
   }
 }

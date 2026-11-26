@@ -104,6 +104,7 @@ const SettingsPage = lazyView(() => import("./SettingsPage"));
 const KanameSettings = lazyView(() => import("./KanameSettings").then(m => ({default:m.KanameSettings})));
 const YoutubeLinkedPlaylist = lazyView(() => import("./YoutubeSync").then(m => ({default:m.YoutubeLinkedPlaylist})));
 const TagsPage = lazyView(() => import("./TagsPage"));
+const VisualEditor = lazyView(() => import("./VisualEditor").then(m => ({default:m.VisualEditor})));
 const SourceReplacement = lazyView(() => import("./SourceReplacement").then(m => ({default:m.SourceReplacement})));
 const RuleEditor = lazyView(() => import("./RuleEditor"));
 const loadSharing = () => import("./Sharing");
@@ -1022,12 +1023,16 @@ const ItemRow = React.memo(function ItemRow({ item, index, catalog, checked, las
     : !inLibrary && video && (!active || waitingForVideo || mode === "original") ? "Смотреть"
     : "Воспроизвести";
   const itemLoading = active && loadingLabel;
+  const { warmCover } = usePlayerCommands();
   const coverLabel = `${playLabel} ${item.title}`;
   const activate = () => activateItem(item, index);
   const artwork = <ItemArtwork source={artworkSource} kind={item.kind} />;
   const cover = inLibrary ? (
     <button type="button" className={`item-art entry-cover art-${index % 6}`}
       aria-label={video ? `${coverLabel} · обложка` : coverLabel} title={available ? coverLabel : "Нет рабочего источника"}
+      onPointerEnter={e => { if (e.pointerType === "mouse") warmCover(item); }}
+      onPointerLeave={e => { if (!e.currentTarget.matches(":focus-visible")) warmCover(); }}
+      onFocus={() => warmCover(item)} onBlur={() => warmCover()}
       disabled={!available} onClick={activate}>
       {artwork}
       {available && (
@@ -1309,6 +1314,7 @@ function EditItem({ item, close, focusSource }: { item: ItemDto; close: () => vo
         </section>
       )}
       <React.Suspense fallback={<div role="status">Загружаем источники…</div>}>
+        {!borrowedOnly && <VisualEditor key={item.id} item={item} reload={refresh} />}
         <SourceReplacement item={item} reload={refresh} localOnly={borrowedOnly} focusSource={focusSource} />
       </React.Suspense>
       <ItemListeningSummary itemId={item.id} />

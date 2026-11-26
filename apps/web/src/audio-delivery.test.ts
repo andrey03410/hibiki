@@ -453,3 +453,33 @@ it("uses the observed prefix speed to pace only the continuous background audio 
     expect(await rateFor(20)).toBeGreaterThan(5 * await rateFor(200));
   } finally { timer.mockRestore(); }
 });
+
+it("preserves the next track when a different cover receives speculative intent", async () => {
+  const server = origin();
+  const delivery = new AudioDelivery(server.fetcher);
+  await delivery.prepare(file("next"));
+  await delivery.prepareIntent(file("hover"));
+  expect(delivery.isPreparedOwnFile(file("next"))).toBe(true);
+});
+
+it("cancels an unused intent prefix and promotes the clicked cover exactly once", async () => {
+  const transport = vi.fn(origin().fetcher);
+  const delivery = new AudioDelivery(transport);
+  await delivery.prepareIntent(file("hover"));
+  expect(delivery.isPreparedOwnFile(file("hover"))).toBe(true);
+  delivery.cancelIntent();
+  expect(delivery.isPreparedOwnFile(file("hover"))).toBe(false);
+  await delivery.prepareIntent(file("clicked"));
+  delivery.select(file("clicked"), "play");
+  await delivery.start();
+  expect(transport.mock.calls.filter(([url]) => url === file("clicked").url)).toHaveLength(1);
+});
+
+it("accepts revision-bound composition sound in the appropriate access context", () => {
+  const local = {id:"a", provider:"local", status:"available", bytes:2000, mime:"audio/mp4"} as const;
+  for (const streamUrl of ["/api/shared/link/items/one/sound/4", "/api/shared-playlists/list/items/one/sound/4", "/api/shared-items/saved/sound/4"])
+    expect(ownedAudioFile({...local, shared:true, streamUrl})?.url).toBe(streamUrl);
+  expect(ownedAudioFile({...local, streamUrl:"/api/items/one/sound/4"})?.shared).toBeUndefined();
+  expect(ownedAudioFile({...local, streamUrl:"/api/items/one/sound/4"})?.url).toBe("/api/items/one/sound/4");
+  expect(ownedAudioFile({...local, streamUrl:"/api/items/one/visual/4"})).toBeUndefined();
+});

@@ -5,6 +5,7 @@ export interface PlayableItem {
   id: string;
   kind: "audio" | "video";
   preferredSourceId?: string;
+  visual?: { soundSourceId: string };
   sources: PlaybackSource[];
 }
 export interface PlaybackSource {
@@ -166,20 +167,24 @@ export function createPlaybackAttempt(history: ListeningAttempt) {
 export function playbackSources<T extends PlaybackSource>(item: {
   kind: "audio" | "video";
   preferredSourceId?: string;
+  visual?: { soundSourceId: string };
   sources: T[];
 }, mode: PlaybackMode = "original"): T[] {
+  const assigned = item.visual?.soundSourceId;
+  const originals = assigned ? item.sources.filter(source => source.id === assigned) : item.sources;
+  if (assigned) mode = "audio";
   const matchesKind = (source: T) => mode === "audio"
     ? playbackKind(item, source) === "audio"
     : item.kind !== "video" || playbackKind(item, source) === item.kind;
   const soundCapable = (source: T) => source.provider === "local" &&
     (source.hasAudio ?? (playbackKind(item, source) === "audio"));
-  const sources = mode === "audio" ? item.sources.flatMap(source => {
+  const sources = mode === "audio" ? originals.flatMap(source => {
     if (source.provider !== "local" || !source.audioStreamUrl || !source.audioBytes || !source.audioMime) return [source];
     const derived = { ...source, id: source.id + ":audio", streamUrl: source.audioStreamUrl,
       bytes: source.audioBytes, mime: source.audioMime, hasAudio: true,
       playbackHints: { audioStart: source.audioViewStart ?? 0 } };
     return [derived, source];
-  }) : [...item.sources];
+  }) : [...originals];
   const preferred = (source: T) => source.id === item.preferredSourceId ||
     (!!item.preferredSourceId && source.id === item.preferredSourceId + ":audio");
   return sources
@@ -225,7 +230,7 @@ export function queueEntryUnavailableReason(item: PlayableItem | undefined, mode
 }
 
 export function playbackSourceForAttempt<T extends PlaybackSource>(
-  item: { kind: "audio" | "video"; preferredSourceId?: string; sources: T[] },
+  item: { kind: "audio" | "video"; preferredSourceId?: string; visual?: { soundSourceId: string }; sources: T[] },
   failed: ReadonlySet<string>,
   active?: { sourceId: string; preferredSourceId?: string },
   mode: PlaybackMode = "original",
@@ -534,11 +539,11 @@ export function playbackArtwork(
 
 
 export function playbackKind(
-  item: { kind: "audio" | "video" },
+  item: { kind: "audio" | "video"; visual?: { soundSourceId: string } },
   source?: { provider: "local" | "youtube"; mime?: string | null },
   mode: PlaybackMode = "original",
 ): "audio" | "video" {
-  if (mode === "audio") return "audio";
+  if (item.visual || mode === "audio") return "audio";
   if (source?.provider === "youtube") return "video";
   if (source?.mime?.startsWith("audio/")) return "audio";
   if (source?.mime?.startsWith("video/")) return "video";
@@ -546,7 +551,7 @@ export function playbackKind(
 }
 
 export function canAutoplayPlayback(
-  item: { kind: "audio" | "video" },
+  item: { kind: "audio" | "video"; visual?: { soundSourceId: string } },
   source: PlaybackSource | undefined,
   mode: PlaybackMode,
   onPlayerScreen: boolean,
