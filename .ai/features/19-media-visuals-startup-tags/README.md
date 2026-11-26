@@ -2,9 +2,9 @@
 id: 19
 title: Свой видеоряд, быстрый старт и каталог тегов
 track: product
-stage: build
+stage: review
 branch: codex/19-media-visuals-startup-tags
-pr:
+pr: https://github.com/andrey03410/hibiki/pull/29
 started: 2026-11-26
 merged:
 ---
