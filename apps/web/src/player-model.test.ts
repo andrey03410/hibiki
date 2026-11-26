@@ -19,6 +19,7 @@ import {
   togglePlaybackShuffle,
   addToPlaybackQueue,
   playbackSourceForAttempt,
+  playbackTransport,
   createPlaybackAttempt,
   restoreCachedPlayback,
   playbackSettingsSignature,
@@ -113,6 +114,12 @@ describe("activation of an individual item", () => {
 
   it("changes the presentation of the active item when a different mode was requested", () => {
     expect(itemActivation({ ...state, queue: [...state.queue] }, video.id, "original")).toBe("changeMode");
+  });
+
+  it("rebinds the same recording to a different playlist without starting it again", () => {
+    const queue = { ...state, queue: [...state.queue], queuePlaylistIds: { [video.id]: "first" } };
+    expect(itemActivation(queue, video.id, "audio", "second", "first")).toBe("rebind");
+    expect(itemActivation(queue, video.id, "audio", "first", "first")).toBe("toggle");
   });
 
   it("starts the context for a different selected item", () => {
@@ -269,6 +276,25 @@ describe("browser playback model", () => {
   const youtubeOnly = { ...videoWithSound, id: "yt-only", sources: [videoWithSound.sources[2]!] };
   const silent = { ...videoWithSound, id: "silent", sources: [{ ...videoWithSound.sources[1]!, hasAudio: false }] };
 
+  it("keeps the leading audio clock and exposes the original picture together", () => {
+    const movie = { ...videoWithSound.sources[1], audioStreamUrl: "/files/movie/audio", audioBytes: 1024, audioMime: "audio/mp4" };
+    const transport = playbackTransport({ ...video, sources: [movie] }, new Set());
+    expect(transport.source?.streamUrl).toBe("/files/movie/audio");
+    expect(transport.kind).toBe("audio");
+    expect(transport.video?.streamUrl).toBe("/files/movie");
+    const fallback = playbackTransport({ ...video, sources: [movie] }, new Set(["movie:audio"]));
+    expect(fallback.source?.streamUrl).toBe("/files/movie");
+    expect(fallback.kind).toBe("audio");
+  });
+
+  it("allows video-only sources to lead playback in the visible scene", () => {
+    for (const item of [silent, youtubeOnly]) {
+      const transport = playbackTransport(item, new Set());
+      expect(transport.kind).toBe("video");
+      expect(transport.source?.id).toBe(item.sources[0].id);
+    }
+  });
+
   it("plays a video in its original form and prefers its audio copy when listening", () => {
     const item = { ...videoWithSound, preferredSourceId: "copy" };
     expect(playbackSources(item, "original").map((source) => source.id)).toEqual(["movie", "youtube", "copy"]);
@@ -296,12 +322,21 @@ describe("browser playback model", () => {
     expect(playableVideoSource(lost)).toBeUndefined();
   });
 
-  it("waits to play video outside the player, including YouTube, and allows local audio", () => {
-    expect(canAutoplayPlayback(videoWithSound, videoWithSound.sources[1], "original", false)).toBe(false);
-    expect(canAutoplayPlayback(youtubeOnly, youtubeOnly.sources[0], "original", false)).toBe(false);
-    expect(canAutoplayPlayback(videoWithSound, videoWithSound.sources[1], "original", true)).toBe(true);
-    expect(canAutoplayPlayback(videoWithSound, videoWithSound.sources[1], "audio", false)).toBe(true);
-    expect(canAutoplayPlayback(videoWithSound, videoWithSound.sources[0], "original", false)).toBe(true);
+  it("continues local sound outside the player and scopes video-only playback to the scene", () => {
+    for (const item of [videoWithSound, silent, youtubeOnly]) {
+      const transport = playbackTransport(item, new Set());
+      expect(canAutoplayPlayback(transport, false)).toBe(item === videoWithSound);
+      expect(canAutoplayPlayback(transport, true)).toBe(true);
+    }
+    expect(canAutoplayPlayback(undefined, true)).toBe(false);
+  });
+
+  it("only uses the YouTube fallback on the watch screen after local sound fails", () => {
+    const failed = new Set(["copy", "movie"]);
+    const fallback = playbackTransport(videoWithSound, failed);
+    expect(fallback.source?.provider).toBe("youtube");
+    expect(canAutoplayPlayback(fallback, false)).toBe(false);
+    expect(canAutoplayPlayback(fallback, true)).toBe(true);
   });
 
   it("finds the next compatible entry without changing the saved queue or wrapping by default", () => {
@@ -745,7 +780,7 @@ it("changes only the previous and next card snapshots when playback moves", asyn
   const cards = new PlayerCards();
   const state = {active:true, playing:true, loadingLabel:"", waitingForVideo:false, mode:"audio" as const};
   cards.update("a", state, true);
-  const initial = ["a","b","c"].map(cards.read);
+  const initial = ["a","b","c"].map(id => cards.read(id));
   cards.update("b", state, false);
   const changed = ["a","b","c"].filter((id,index) => cards.read(id) !== initial[index]);
   expect(changed).toEqual(["a","b"]);
@@ -779,4 +814,49 @@ it("corrects the clip to the leading audio phase and tolerates adjacent frames a
   expect(clipSeekTime(3, 0, NaN)).toBeUndefined();
   expect(clipSeekTime(3, 0, 0)).toBeUndefined();
   expect(clipSeekTime(60, 0.13, 30)).toBe(0);
+});
+
+it("holds the last original video frame if a separate audio source runs longer", async () => {
+  const { clipSeekTime } = await import("./clip-clock");
+  expect(clipSeekTime(80, 4, 30, false)).toBe(30);
+  expect(clipSeekTime(80, 30, 30, false)).toBeUndefined();
+});
+
+it("shows Play in another playlist until the active recording has been rebound", async () => {
+  const { PlayerCards } = await import("./player-model");
+  const cards = new PlayerCards();
+  const card = { active: true, playing: true, waitingForVideo: false, loadingLabel: "", mode: "audio" as const };
+  cards.update("recording", card, true, "first");
+  expect(cards.read("recording", "second").playing).toBe(false);
+  cards.update("recording", card, true, "second");
+  expect(cards.read("recording", "second").playing).toBe(true);
+  expect(cards.read("recording", "first").active).toBe(false);
+});
+
+it("keeps a visible YouTube picture silent and synchronized to the local recording", async () => {
+  const { syncYoutubePicture } = await import("./player-model");
+  const commands: unknown[] = [];
+  const picture = {
+    getPlayerState: () => 2, getDuration: () => 60, getCurrentTime: () => 2, isMuted: () => false,
+    mute: () => commands.push("mute"), seekTo: (time: number) => commands.push(time),
+    playVideo: () => commands.push("play"), pauseVideo: () => commands.push("pause"),
+  };
+  syncYoutubePicture(picture, { currentTime: 42, paused: false, seeking: false }, true);
+  expect(commands).toEqual(["mute", 42, "play"]);
+  commands.length = 0;
+  syncYoutubePicture({ ...picture, getPlayerState: () => 1, isMuted: () => true, getCurrentTime: () => 47.1 },
+    { currentTime: 47, paused: true, seeking: false }, false);
+  expect(commands).toEqual(["pause"]);
+});
+
+it("advances failed companion pictures without dropping their working audio or recycling a failed picture", () => {
+  const movie = { id: "movie", provider: "local" as const, status: "available", mime: "video/mp4", streamUrl: "/files/movie", hasAudio: true };
+  const online = { id: "online", provider: "youtube" as const, status: "available", externalId: "abcdefghijk" };
+  const item = { id: "film", kind: "video" as const, sources: [movie, online] };
+  const second = playbackTransport(item, new Set(), undefined, new Set(["movie"]));
+  expect(second.source?.id).toBe("movie");
+  expect(second.video?.id).toBe("online");
+  const exhausted = playbackTransport(item, new Set(), undefined, new Set(["movie", "online"]));
+  expect(exhausted.source?.id).toBe("movie");
+  expect(exhausted.video).toBeUndefined();
 });

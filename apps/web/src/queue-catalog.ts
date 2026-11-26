@@ -101,6 +101,9 @@ export class QueueCatalog {
   }
   deleted = (id: string) => this.known.has(id) && !this.rows.has(id);
   isShared = (id?: string) => id !== undefined && this.sharedIds.has(id);
+  recordingId(id: string) {
+    return this.sharedIds.get(id)?.id ?? id;
+  }
   sharedId(path: string, id: string) {
     const source = this.sharedQueues.get(path);
     return source && `shared-playback:${source.number}:${id}`;
