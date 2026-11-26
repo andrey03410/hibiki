@@ -1906,7 +1906,8 @@ export function PlayerProvider({
                       }}
                     />
                   ) : (
-                    <div className={`audio-scene art-${current.title.length % 6}`}>
+                    <div className={`audio-scene art-${current.title.length % 6}`}
+                      onClick={event => videoClick.click(event.detail, toggle, () => { void toggleFullscreen(); })}>
                       {showArtwork && <img className="audio-backdrop" src={artwork} alt="" onError={() => setFailedArtwork(artwork)} />}
                       <div className={`audio-cover art-${current.title.length % 6}`}>
                         {showArtwork ? <img src={artwork} alt={`Обложка: ${current.title}`} onError={() => setFailedArtwork(artwork)} /> : (
@@ -2043,7 +2044,7 @@ export function PlayerProvider({
             </span>
             <span className="mini-player-info">
               <strong>{current.title}</strong>
-              <small role="status">{loadingLabel || (needsVideoForPlayback ? soundUnavailableReason(current) ?? "Источник звука недоступен"
+              <small id="mini-playback-status" role="status">{loadingLabel || (needsVideoForPlayback ? soundUnavailableReason(current) ?? "Источник звука недоступен"
                 : waitingForVideo ? "Видео готово к просмотру"
                 : audioFallback ? "Доступен только звук"
                 : playing && phase === "playing" ? "Сейчас играет" : playing ? "" : "На паузе")}</small>
@@ -2053,22 +2054,21 @@ export function PlayerProvider({
             <button className="icon-button" aria-label="Предыдущая запись" onClick={() => live.current.position > 3 ? seek(0) : next(-1)}>
               <SkipBack size={17} fill="currentColor" />
             </button>
-            {!waitingForVideo && (
-              <button className="mini-player-play" aria-label={playing ? "Приостановить" : "Воспроизвести"} onClick={toggle}>
-                {playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}
-              </button>
-            )}
-            {(current.visual || videoSource) && (
-              <button type="button" className="icon-button" aria-label={current.visual ? "Смотреть клип" : "Открыть видео"} title={current.visual ? "Смотреть клип" : "Открыть видео"} onClick={watchCurrent}>
-                <Video size={18} aria-hidden="true" />
-              </button>
-            )}
+            <button type="button" className="mini-player-play" aria-label={playing ? "Приостановить" : "Воспроизвести"}
+              disabled={waitingForVideo} aria-describedby={waitingForVideo ? "mini-playback-status" : undefined} onClick={toggle}>
+              {playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}
+            </button>
             <button className="icon-button" aria-label="Следующая запись" onClick={() => next()}>
               <SkipForward size={17} fill="currentColor" />
             </button>
           </div>
           <div className="mini-player-side">
             <span>{formatDuration(settings.position)} / {formatDuration(total)}</span>
+            {(current.visual || videoSource) && (
+              <button type="button" className="icon-button" aria-label={current.visual ? "Смотреть клип" : "Открыть видео"} title={current.visual ? "Смотреть клип" : "Открыть видео"} onClick={watchCurrent}>
+                <Video size={18} aria-hidden="true" />
+              </button>
+            )}
             <PlaybackVolume compact volume={settings.volume} onMute={toggleMute} onVolume={setVolume} />
             <CompactPlaybackQueue incomplete={!queueEditable} key={routeKey} onOpenChange={setQueueOpen} deleted={catalog.deleted} canRecheck={catalog.rechecksPlayback} settings={queueSettings} version={catalogVersion} onVisible={loadVisible} itemsById={itemsById} failedIds={failed.current} onSelect={selectRow} />
           </div>

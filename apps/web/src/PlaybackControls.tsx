@@ -119,24 +119,8 @@ export function PlaybackSeekBar({
 export function PlaybackVolume({volume, onVolume, onMute, compact = false}: {
   volume: number; onVolume: (level: number) => void; onMute: () => void; compact?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  const group = useRef<HTMLDivElement>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
-  const id = useId();
   const Icon = volume ? Volume2 : VolumeX;
   const percent = Math.round(volume * 100);
-  useEffect(() => {
-    if (!open) return;
-    const outside = (event: PointerEvent | FocusEvent) => {
-      if (event.target instanceof Node && !group.current?.contains(event.target)) setOpen(false);
-    };
-    document.addEventListener("pointerdown", outside);
-    document.addEventListener("focusin", outside);
-    return () => {
-      document.removeEventListener("pointerdown", outside);
-      document.removeEventListener("focusin", outside);
-    };
-  }, [open]);
   const mute = volume ? "Выключить звук" : "Включить звук";
   const controls = <>
     <button type="button" className="icon-button" aria-label={mute} title={`${mute} (M)`} onClick={onMute}><Icon size={19} /></button>
@@ -144,22 +128,7 @@ export function PlaybackVolume({volume, onVolume, onMute, compact = false}: {
       min="0" max="100" step="1" value={percent} onChange={event => onVolume(event.currentTarget.valueAsNumber / 100)}
       style={{ "--progress": `${percent}%` } as CSSProperties} />
   </>;
-  if (!compact) return controls;
-  return <div className="mini-volume" ref={group} onKeyDown={event => {
-    if (open && event.key === "Escape") {
-      event.preventDefault();
-      setOpen(false);
-      trigger.current?.focus();
-    }
-  }}>
-    <button ref={trigger} type="button" className="icon-button" aria-label={`Громкость, ${percent}%`}
-      aria-expanded={open} aria-controls={id} title="Громкость" onClick={() => setOpen(value => !value)}>
-      <Icon size={19} />
-    </button>
-    <div id={id} className="mini-volume-panel" role="group" aria-label="Настройки громкости" hidden={!open}>
-      {controls}<output>{percent}%</output>
-    </div>
-  </div>;
+  return compact ? <div className="mini-volume" role="group" aria-label="Громкость">{controls}</div> : controls;
 }
 
 // Sections share their surrounding scroller so headings, the current row and

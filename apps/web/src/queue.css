@@ -139,46 +139,6 @@
   margin-top: 8px;
 }
 
-.playback-mode {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 3px;
-  border: 1px solid #c0a9f427;
-  border-radius: 9px;
-  background: #1a171f;
-}
-
-.playback-mode button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  min-height: 34px;
-  padding: 5px 11px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: #a99bb5;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.playback-mode button:hover,
-.playback-mode button[aria-pressed="true"] {
-  background: #bf9ce51e;
-  color: #ead8f7;
-}
-
-.playback-mode button[aria-pressed="true"] {
-  border-color: #c0a9f43b;
-}
-
-.watch-stage.is-audio:not(:fullscreen, .is-viewport-fullscreen) .watch-media {
-  aspect-ratio: auto;
-  height: clamp(178px, 23vw, 340px);
-}
-
 .watch-stage .watch-notice {
   flex-wrap: wrap;
 }
@@ -536,25 +496,37 @@ input[type="range"].playback-seek:not(.mini-player-seek) {
   background: var(--seek-track);
 }
 .mini-volume {
-  position: relative;
-}
-.mini-volume-panel:not([hidden]) {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 12px);
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 10px;
-  border: 1px solid #65536f;
-  border-radius: 8px;
-  background: #28202f;
-  color: #f0e5f5;
-  box-shadow: 0 4px 16px #120d18a8;
-  z-index: 2;
+  gap: 4px;
 }
-.mini-volume-panel input { width: 90px; }
-.mini-volume-panel output { width: 4ch; text-align: right; }
+
+.mini-volume input {
+  width: clamp(54px, 6vw, 92px);
+}
+
+.mini-player-play:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+@media (max-width: 960px) {
+  .mini-player-body { grid-template-columns: minmax(0, 1fr) auto auto; }
+}
+
+@media (max-width: 760px) {
+  .mini-player-side > span { display: none; }
+}
+
+@media (max-width: 520px) {
+  .mini-player-body {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 0;
+  }
+  .mini-player-track { grid-column: 1 / -1; }
+  .app-shell:has(.mini-player-body) { padding-bottom: 96px; }
+}
+
 .playback-loading {
   align-self: flex-start;
   padding: 5px 16px;
