@@ -2,7 +2,7 @@
 id: 21
 title: Быстрый старт, плавное видео и открытие плейлистов
 track: product
-stage: build
+stage: review
 branch: codex/21-media-playlist-performance
 pr: null
 started: 2026-11-26
@@ -14,7 +14,7 @@ started: 2026-11-26
 - [x] [Продукт](product.md)
 - [x] [Техника](tech.md)
 - [x] [План](plan.md)
-- [ ] [Проверка](verify.md)
+- [x] [Проверка](verify.md)
 - [ ] Вливание и выкладка
 
 Поручение владельца от 26 ноября 2026 года
