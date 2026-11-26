@@ -16,6 +16,9 @@ const params = z.object({ id });
 export function registerVisuals(app: FastifyInstance, root: string) {
   const db = app.library.db;
   const base = "/api/items/:id";
+  app.post(base + "/visual/prepare", request =>
+    app.jobs.createVisualSource(request.user!.id, params.parse(request.params).id, assignment.parse(request.body)),
+  );
   app.put(base + "/visual", (request) =>
     setVisual(db, root, request.user!.id, params.parse(request.params).id, assignment.parse(request.body)),
   );

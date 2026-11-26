@@ -59,7 +59,17 @@ it("attaches an uploaded clip through MCP, releases its container and reuses the
     const streams = (await call("media_get", { itemId: donor.id })).sources[0].videoStreams;
     expect(streams).toMatchObject([{ index: 0, codec: "h264" }]);
     const args = { itemId: item.id, visualSourceId: donor.sources[0]!.id, expectedRevision: 1 };
+    const session = await app.auth.createSession(ctx.userId);
+    const prepared = await fetch(new URL("/api/items/" + item.id + "/visual/prepare", url), {
+      method: "POST",
+      headers: { Cookie: "hibiki_session=" + session, "Content-Type": "application/json" },
+      body: JSON.stringify({ visualSourceId: args.visualSourceId, expectedRevision: args.expectedRevision }),
+    });
+    expect(prepared.status).toBe(200);
+    const browserJob = await prepared.json();
+    expect(browserJob).toMatchObject({ state: "queued", kind: "visual-set" });
     const attach = await call("media_set_visual", args);
+    expect(attach.jobId).toBe(browserJob.id);
     await app.jobs.runOnce();
     const finished = await call("job_get", { jobId: attach.jobId });
     expect(finished.state, finished.error).toBe("done");
