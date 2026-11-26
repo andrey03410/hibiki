@@ -107,7 +107,7 @@ export class LibraryPages {
     // Debounce typing. A paste, full-title replacement or clear is ready to submit.
     if (previous && filters.query.trim() && singleCharacterEdit(previous.query, filters.query)) {
       this.cancel();
-      this.timer = setTimeout(() => void this.refresh(), 150);
+      this.timer = setTimeout(() => void this.refresh(), 110);
     } else if (this.state.selectionId && filters !== previous) {
       void this.restart(false);
     } else {
