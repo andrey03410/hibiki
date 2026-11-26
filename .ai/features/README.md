@@ -17,6 +17,7 @@
 | [17. Смешанный плейлист по одной ссылке](17-mixed-playlist-sharing/README.md) | `merged` | [PR №21](https://github.com/andrey03410/hibiki/pull/21), Доступ к полученным записям с разрешения владельца исходной ссылки |
 | [18. Освобождение места после импорта медиатеки](18-import-storage/README.md) | `merged` | [Учёт квоты и очистка входных ZIP с сайта и через MCP](18-import-storage/verify.md) |
 | [19. Свой видеоряд, быстрый старт и каталог тегов](19-media-visuals-startup-tags/README.md) | `product` | Продуктовая и техническая спецификации на обсуждении, подготовлен макет каталога |
+| [20. Запуск плейлистов и непрерывное воспроизведение](20-playlist-player-flow/README.md) | `product` | [Восемь продуктовых решений и сценарии приёмки](20-playlist-player-flow/product.md) на согласовании |
 
 Процесс — [feature](../../.claude/skills/feature/SKILL.md).
 
