@@ -16,6 +16,7 @@
 | [16. Производительность прослушивания](16-playback-performance/README.md) | `merged` | Быстрый старт треков, буфер оригинального видео, фоновые запросы, ускорение MCP и замена источника карточки. [Продовые замеры](16-playback-performance/verify.md) |
 | [17. Смешанный плейлист по одной ссылке](17-mixed-playlist-sharing/README.md) | `merged` | [PR №21](https://github.com/andrey03410/hibiki/pull/21), Доступ к полученным записям с разрешения владельца исходной ссылки |
 | [18. Освобождение места после импорта медиатеки](18-import-storage/README.md) | `merged` | [Учёт квоты и очистка входных ZIP с сайта и через MCP](18-import-storage/verify.md) |
+| [19. Свой видеоряд, быстрый старт и каталог тегов](19-media-visuals-startup-tags/README.md) | `product` | Продуктовая и техническая спецификации на обсуждении, подготовлен макет каталога |
 
 Процесс — [feature](../../.claude/skills/feature/SKILL.md).
 
