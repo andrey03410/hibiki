@@ -631,6 +631,7 @@ function LibraryNavigation(props: Omit<React.ComponentProps<typeof TagNavigation
   return <TagNavigation {...props} hasPlayer={useHasPlayer()} />;
 }
 
+const FavoriteChangeContext = React.createContext<((id: string, favorite: boolean) => void) | undefined>(undefined);
 const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId: string; search: ReturnType<typeof useLibrarySearch> }) {
   const { library, overview, notify, openImport } = useData(),
     player = usePlayerCommands();
@@ -651,7 +652,7 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   const pages = useMemo(() => new LibraryPages((cursor, signal, selectionId) =>
     reader.page(filters, latestOverview.current, cursor, signal, selectionId)), [filters, reader]);
   const previousFilters = useRef<typeof filters>(undefined);
-  const {items, loading, error, nextCursor, total, tagCounts, selectionId} = useSyncExternalStore(pages.subscribe, pages.snapshot);
+  const {items, loading, appending, error, nextCursor, total, tagCounts, selectionId} = useSyncExternalStore(pages.subscribe, pages.snapshot);
   const sentinel = useRef<HTMLDivElement>(null);
   useEffect(() => {
     pages.open(filters, previousFilters.current);
@@ -773,6 +774,7 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
             </button>
           </div>
         )}
+        <FavoriteChangeContext.Provider value={(id, value) => pages.favoriteChanged(id, value, filters.favoriteOnly)}>
         <ItemTable
           items={items}
           view={view}
@@ -786,8 +788,9 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
             old.tagIds.includes(id) ? old : { ...old, tagIds: [...old.tagIds, id] }
           ))}
         />
+        </FavoriteChangeContext.Provider>
         <div ref={sentinel} aria-hidden="true" />
-        {loading && <div role="status" className="loading-inline"><LoaderCircle className="spin" size={18} /> Загружаем записи…</div>}
+        {loading && (!items.length || appending) && <div role="status" className="loading-inline"><LoaderCircle className="spin" size={18} /> Загружаем записи…</div>}
         {error && <div role="alert"><ErrorMessage error={error} /><Button onClick={() => void pages.retry()}>Повторить загрузку</Button></div>}
         {!loading && !error && !items.length && (
           <EmptyState
@@ -1183,6 +1186,7 @@ const ItemRow = React.memo(function ItemRow({ item, index, catalog, checked, las
 
 function FavoriteButton({ item, withLabel = false }: { item: ItemDto; withLabel?: boolean }) {
   const { refresh, notify } = useData();
+  const changed = React.useContext(FavoriteChangeContext);
   const [busy, setBusy] = useState(false);
   const label = item.favorite ? "Убрать из избранного" : "Добавить в избранное";
   return (
@@ -1192,11 +1196,14 @@ function FavoriteButton({ item, withLabel = false }: { item: ItemDto; withLabel?
       title={label}
       aria-label={`${label} · ${item.title}`}
       aria-pressed={!!item.favorite}
-      disabled={busy}
+      aria-disabled={busy || undefined}
+      aria-busy={busy || undefined}
       onClick={async () => {
+        if (busy) return;
         setBusy(true);
         try {
-          await api(`/items/${encodeURIComponent(item.id)}/favorite`, "PATCH", { favorite: !item.favorite });
+          const result = await api<{favorite:boolean}>(`/items/${encodeURIComponent(item.id)}/favorite`, "PATCH", { favorite: !item.favorite });
+          changed?.(item.id, result.favorite);
           await refresh();
         } catch (e) {
           notify((e as Error).message, true);
