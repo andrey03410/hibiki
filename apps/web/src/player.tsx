@@ -24,7 +24,6 @@ import {
   ListMusic,
   AudioLines,
   Video,
-  Headphones,
   Minimize2,
   X,
   Music2,
@@ -35,7 +34,7 @@ import {
   GripVertical,
 } from "lucide-react";
 import { moveQueueItem, removeUpcomingItem, undoQueueRemoval, type QueueRemoval } from "@hibiki/core";
-import type { ItemDto, PlaybackMode, PlaylistDto } from "@hibiki/contracts";
+import type { ItemDto, PlaybackMode, PlaylistDto, SourceDto } from "@hibiki/contracts";
 import { api, formatDuration, mediaWord } from "./api.ts";
 import { ItemArtwork } from "./ItemArtwork.tsx";
 import { fetchItems } from "./library-pages";
@@ -52,7 +51,6 @@ import "./queue.css";
 import {
   playbackSources,
   playbackVolume,
-  playableVideoSource,
   canStartSelectedItem,
   sourceLoadPosition,
   restorePlayback,
@@ -67,7 +65,7 @@ import {
   createVideoClickGesture,
   addToPlaybackQueue,
   createPlaybackAttempt,
-  playbackSourceForAttempt,
+  playbackTransport,
   queuePlaylistInput,
   itemActivation,
   startPlaybackQueue,
@@ -78,6 +76,7 @@ import {
   nativePlaybackReading,
   NativePlaybackPosition,
   youtubePlaybackReading,
+  syncYoutubePicture,
   prepareYoutubePlayback,
   nativeRestartHasProgress,
   createYoutubeRestartConfirmation,
@@ -113,16 +112,16 @@ type StartOptions = {
   isCurrent?: () => boolean;
   openPlayer?: boolean;
 };
-type SharedStartOptions = Pick<StartOptions, "mode" | "isCurrent" | "openPlayer"> & { activate?: boolean };
+type SharedStartOptions = Pick<StartOptions, "mode" | "isCurrent" | "openPlayer" | "fromLibrary"> & { activate?: boolean };
 const PlayerContext = createContext<Controller | null>(null);
 export const usePlayer = () => useContext(PlayerContext)!;
 type PlayerCommands = Pick<Controller, "start" | "activateItem" | "playShared" | "sharedId" | "warmCover" | "toggle" | "watchCurrent" | "enqueue" | "playNext">;
 const CommandsContext = createContext<PlayerCommands | null>(null);
 const CardsContext = createContext<PlayerCards | null>(null);
 export const usePlayerCommands = () => useContext(CommandsContext)!;
-export function usePlayerCard(id: string) {
+export function usePlayerCard(id: string, playlistId?: string) {
   const store = useContext(CardsContext)!;
-  return useSyncExternalStore(store.subscribe, () => store.read(id));
+  return useSyncExternalStore(store.subscribe, () => store.read(id, playlistId));
 }
 export function useHasPlayer() {
   const store = useContext(CardsContext)!;
@@ -153,10 +152,17 @@ function loadYoutube() {
     };
     const script = document.createElement("script");
     script.src = "https://www.youtube.com/iframe_api";
-    script.onerror = () =>
+    script.onerror = () => {
+      youtubePromise = undefined;
+      window.onYouTubeIframeAPIReady = previous;
+      script.remove();
       reject(new Error("Не удалось загрузить YouTube. Проверьте соединение."));
+    };
     document.head.append(script);
   }));
+}
+function youtubeVideoId(source: SourceDto) {
+  return source.externalId || (source.url && (new URL(source.url).searchParams.get("v") || source.url.split("/").pop()));
 }
 function applyYoutubeVolume(player: any, volume: number) {
   player.setVolume(volume * 100);
@@ -176,19 +182,21 @@ function Youtube({
   onAutoplayBlocked,
   onBuffering,
   onPlaying,
+  follow,
 }: {
   id: string;
   playing: boolean;
   volume: number;
   position: number;
   engine: React.RefObject<any>;
-  onTime: (...reading: PlaybackReading) => void;
-  onEnded: () => void;
+  follow?: React.RefObject<HTMLMediaElement | null>;
+  onTime?: (...reading: PlaybackReading) => void;
+  onEnded?: () => void;
   onError: () => void;
-  onPaused: () => void;
-  onAutoplayBlocked: () => void;
-  onBuffering: () => void;
-  onPlaying: (...reading: PlaybackReading) => void;
+  onPaused?: () => void;
+  onAutoplayBlocked?: () => void;
+  onBuffering?: () => void;
+  onPlaying?: (...reading: PlaybackReading) => void;
 }) {
   const target = useRef<HTMLDivElement>(null),
     callbacks = useRef({ onTime, onEnded, onError, onPaused, onAutoplayBlocked, onBuffering, onPlaying });
@@ -200,9 +208,12 @@ function Youtube({
       timer: ReturnType<typeof setInterval>,
       player: any;
     const reportTime = () => {
-      const state = player?.getPlayerState?.();
-      if (!disposed && (state === 1 || state === 2))
-        callbacks.current.onTime(...youtubePlaybackReading(player));
+      if (disposed || !player) return;
+      const state = player.getPlayerState?.();
+      if (follow) {
+        const audio = follow.current;
+        if (audio) syncYoutubePicture(player, audio, pending.current.playing && !document.hidden);
+      } else if (state === 1 || state === 2) callbacks.current.onTime?.(...youtubePlaybackReading(player));
     };
     const host = document.createElement("div");
     target.current?.append(host);
@@ -217,6 +228,7 @@ function Youtube({
             autoplay: 0,
             playsinline: 1,
             rel: 0,
+            ...(follow && { controls: 0, disablekb: 1, mute: 1 }),
             origin: location.origin,
           },
           events: {
@@ -226,18 +238,19 @@ function Youtube({
               const { volume, position, playing } = pending.current;
               applyYoutubeVolume(player, volume);
               prepareYoutubePlayback(player, id, position, playing);
-              timer = setInterval(reportTime, 500);
+              timer = setInterval(reportTime, follow ? 250 : 500);
+              if (follow) document.addEventListener("visibilitychange", reportTime);
             },
             onStateChange: (event: any) => {
-              if (disposed) return;
-              if (event.data === 0) callbacks.current.onEnded();
-              if (event.data === 1) callbacks.current.onPlaying(...youtubePlaybackReading(player));
-              if (event.data === 2) callbacks.current.onPaused();
-              if (event.data === 3) callbacks.current.onBuffering();
+              if (disposed || follow) return;
+              if (event.data === 0) callbacks.current.onEnded?.();
+              if (event.data === 1) callbacks.current.onPlaying?.(...youtubePlaybackReading(player));
+              if (event.data === 2) callbacks.current.onPaused?.();
+              if (event.data === 3) callbacks.current.onBuffering?.();
             },
             onPlaybackRateChange: reportTime,
             onError: () => { if (!disposed) callbacks.current.onError(); },
-            onAutoplayBlocked: () => { if (!disposed) callbacks.current.onAutoplayBlocked(); },
+            onAutoplayBlocked: () => { if (!disposed) callbacks.current.onAutoplayBlocked?.(); },
           },
         });
       })
@@ -245,11 +258,12 @@ function Youtube({
     return () => {
       disposed = true;
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", reportTime);
       player?.destroy?.();
       engine.current = null;
       host.remove();
     };
-  }, [id]);
+  }, [id, follow]);
   useEffect(() => {
     const p = engine.current;
     if (p?.playVideo) playing ? p.playVideo() : p.pauseVideo();
@@ -257,7 +271,7 @@ function Youtube({
   useEffect(() => {
     if (engine.current) applyYoutubeVolume(engine.current, volume);
   }, [volume]);
-  return <div ref={target} className="youtube-frame" />;
+  return <div ref={target} className="youtube-frame" style={follow ? { pointerEvents: "none" } : undefined} />;
 }
 
 function QueuePlaylistDialog({
@@ -315,6 +329,11 @@ function QueuePlaylistDialog({
   );
 }
 
+function restoredPlaylistId(settings: PlaybackSettings) {
+  const origin = settings.queuePlaylistIds?.[settings.queue[settings.queueIndex]!];
+  return origin && settings.queue.every(id => settings.queuePlaylistIds?.[id] === origin) ? origin : undefined;
+}
+
 export function PlayerProvider({
   revision,
   initialSettings,
@@ -355,11 +374,12 @@ export function PlayerProvider({
     getItem: key => localStorage.getItem(key), setItem: (key, value) => localStorage.setItem(key, value),
   }, `hibiki.player.${userId}`, initialState));
   const [settings, setSettings] = useState(() => cache.restore(initialSettings));
+  const [initialOrigin] = useState(() => restoredPlaylistId(settings));
+  const queueOrigin = useRef(initialOrigin);
   const [playing, setPlaying] = useState(false),
     [duration, setDuration] = useState(0),
     [failedSources, setFailedSources] = useState<ReadonlySet<string>>(() => new Set()),
     [error, setError] = useState(""),
-    [offerAudioSkip, setOfferAudioSkip] = useState(false),
     [nativeFullscreen, setNativeFullscreen] = useState(false),
     [viewportFullscreen, setViewportFullscreen] = useState(false),
     [controlsIdle, setControlsIdle] = useState(true),
@@ -378,10 +398,10 @@ export function PlayerProvider({
   const stage = useRef<HTMLDivElement>(null),
     native = useRef<HTMLMediaElement | null>(null),
     youtube = useRef<any>(null),
+    pictureYoutube = useRef<any>(null),
     seekOnLoad = useRef(settings.position),
     live = useRef(settings),
     playOnPlayerOpen = useRef<string | undefined>(undefined),
-    requestedVideoSourceId = useRef<string | undefined>(undefined),
     playingRef = useRef(playing),
     failed = useRef(new Set<string>()),
     sourceCheck = useRef<{ key: string; token: number } | undefined>(undefined),
@@ -405,23 +425,49 @@ export function PlayerProvider({
   const current = itemsById.get(settings.queue[settings.queueIndex]!);
   const sourceIdentity = useRef<{ itemId?: string; sourceId?: string; preferredSourceId?: string }>(undefined);
   const previousSource = sourceIdentity.current;
-  const source = current ? playbackSourceForAttempt(
-    current,
-    failedSources,
+  const pictureVisit = JSON.stringify([current?.id, routeKey]);
+  const [failedPictures, setFailedPictures] = useState<{ visit: string; ids: Set<string> }>();
+  const rejected = failedPictures?.visit === pictureVisit ? failedPictures.ids : undefined;
+  useEffect(() => { if (!onPlayerScreen) setFailedPictures(undefined); }, [onPlayerScreen]);
+  const transport = current && playbackTransport(current, failedSources,
     playing && previousSource?.itemId === current.id && previousSource.sourceId
       ? { sourceId: previousSource.sourceId, preferredSourceId: previousSource.preferredSourceId }
-      : undefined,
-    settings.mode,
-    requestedVideoSourceId.current,
-  ) : undefined;
-  const videoSource = current && playableVideoSource(current, failedSources);
+      : undefined, rejected);
+  const source = transport?.source;
+  const presentationKind = transport?.kind;
+  const videoSource = transport?.video;
   const isYoutube = source?.provider === "youtube";
-  const youtubeId = isYoutube
-    ? source.externalId || new URL(source.url!).searchParams.get("v") || source.url!.split("/").pop()
-    : undefined;
-  const presentationKind = current ? playbackKind(current, source, settings.mode) : undefined;
-  const needsVideoForPlayback = !!videoSource && settings.mode === "audio" && !source;
-  const waitingForVideo = !onPlayerScreen && (!!source && presentationKind === "video" || needsVideoForPlayback);
+  const youtubeId = isYoutube ? youtubeVideoId(source) : undefined;
+  const needsVideoForPlayback = !!source && presentationKind === "video";
+  const waitingForVideo = !onPlayerScreen && needsVideoForPlayback;
+  const screen = useRef(onPlayerScreen);
+  const currentRoute = useRef(routeKey);
+  currentRoute.current = routeKey;
+  screen.current = onPlayerScreen;
+  function queuePlaybackState(): PlaybackSettings {
+    return { ...live.current, mode: screen.current ? "original" : "audio" };
+  }
+  const sceneGrant = onPlayerScreen && current && catalog.rechecksPlayback(current.id)
+    ? JSON.stringify([routeKey, current.id]) : undefined;
+  const [sceneAccess, setSceneAccess] = useState<{ grant: string; allowed: boolean; resume?: boolean }>();
+  const [sceneRetry, setSceneRetry] = useState(0);
+  const sceneAllowed = !sceneGrant || (sceneAccess?.grant === sceneGrant && sceneAccess.allowed);
+  const sceneDenied = sceneGrant && sceneAccess?.grant === sceneGrant && !sceneAccess.allowed;
+  useEffect(() => {
+    if (!sceneGrant || !current) { setSceneAccess(undefined); return; }
+    let active = true;
+    void catalog.refreshPlayback(current.id, () => active).then(item => {
+      if (!active) return;
+      setSceneAccess({ grant: sceneGrant, allowed: !!item?.sources.length, resume: playingRef.current });
+      if (!item?.sources.length) { playIntent(false); setError("Доступ к записи закрыт."); }
+    }).catch(failure => {
+      if (!active) return;
+      setSceneAccess({ grant: sceneGrant, allowed: false, resume: playingRef.current });
+      if (needsVideoForPlayback) playIntent(false);
+      setError(failure.message);
+    });
+    return () => { active = false; };
+  }, [catalog, sceneGrant, sceneRetry]);
   const identity = { itemId: current?.id, sourceId: source?.id };
   const sourceKey = JSON.stringify([identity, source?.streamUrl, presentationKind, waitingForVideo]);
   const delivery = useMemo(() => new AudioDelivery(), [userId]);
@@ -531,9 +577,9 @@ export function PlayerProvider({
   }, [delivery, playing, audioToken, m4aEnabled]);
   const [nativeVideo, setNativeVideo] = useState<{ key: string; position: number }>();
   const retiredVideos = useRef(new WeakSet<HTMLMediaElement>());
-  const streamedVideo = useMemo(() => presentationKind === "video" && !waitingForVideo && nativeVideo?.key !== sourceKey &&
+  const streamedVideo = useMemo(() => presentationKind === "video" && sceneAllowed && !waitingForVideo && nativeVideo?.key !== sourceKey &&
     typeof MediaSource !== "undefined" && navigator.vendor === "Google Inc." ? videoFile(source, current?.duration) : undefined,
-    [userId, presentationKind, waitingForVideo, nativeVideo, sourceKey, source?.shared, source?.streamUrl,
+    [userId, presentationKind, sceneAllowed, waitingForVideo, nativeVideo, sourceKey, source?.shared, source?.streamUrl,
       source?.bytes, source?.mime, source?.playbackHints?.audioStart, source?.playbackHints?.tailStart, current?.duration]);
   function fallbackToNativeVideo(element: HTMLMediaElement) {
     if (!streamedVideo || native.current !== element || retiredVideos.current.has(element)) return false;
@@ -575,18 +621,17 @@ export function PlayerProvider({
       if (!playing || !coverage?.complete) delivery.suspendPreparation();
       return;
     }
-    void catalog.nextInQueue(() => live.current, 1, true, failed.current, () => active, () => libraryOrder.tail)
+    void catalog.nextInQueue(queuePlaybackState, 1, true, failed.current, () => active, () => libraryOrder.tail)
       .then(target => {
         if (!active || !target) return;
         const id = target.state.queue[target.index];
         const item = id && id !== current?.id ? itemsById.get(id) : undefined;
-        const preferred = item && playbackSources(item, target.state.mode)[0];
-        const next = item && preferred && playbackKind(item, preferred, target.state.mode) === "audio"
-          ? ownedAudioFile(preferred, item.duration) : undefined;
+        const sound = item && playbackSources(item, "audio")[0];
+        const next = item && sound ? ownedAudioFile(sound, item.duration) : undefined;
         return delivery.prepare(next);
       }).catch(() => { if (active) void delivery.prepare(); });
     return () => { active = false; };
-  }, [delivery, canPrepareNext, sourceKey, settings.queue, settings.queueIndex, settings.mode, settings.repeat, revision]);
+  }, [delivery, canPrepareNext, sourceKey, settings.queue, settings.queueIndex, onPlayerScreen, settings.repeat, revision]);
   const cancelledYoutubeStart = useRef(false);
   const clock = useMemo(() => ({
     read: () => native.current?.currentTime ?? feedback.position(),
@@ -675,8 +720,8 @@ export function PlayerProvider({
     attempt.select(item ?? null, id && playlistIds && Object.hasOwn(playlistIds, id) ? playlistIds[id] : undefined, trigger);
   }
   function resetSources() {
-    requestedVideoSourceId.current = undefined;
     setFailedSources(new Set());
+    setFailedPictures(undefined);
     sourceIdentity.current = undefined;
     seekOnLoad.current = 0;
   }
@@ -688,17 +733,17 @@ export function PlayerProvider({
   ) {
     const id = state.queue[index];
     const entry = id ? itemsById.get(id) : undefined;
-    const preferred = entry && playbackSources(entry, state.mode)[0];
-    const canPlay = !!entry && canAutoplayPlayback(entry, preferred, state.mode, onPlayerScreen);
+    const nextTransport = entry && playbackTransport(entry, new Set());
+    const preferred = nextTransport?.source;
+    const canPlay = canAutoplayPlayback(nextTransport, screen.current);
     const shouldPlay = autoplay && canPlay;
     const sameSource = !!current && !!preferred && id === current.id &&
-      source?.id === preferred.id && presentationKind === playbackKind(current, preferred, state.mode);
+      source?.id === preferred.id && presentationKind === nextTransport?.kind;
     playOnPlayerOpen.current = undefined;
     resetSources();
     patch({ ...state, queueIndex: index, position: 0 });
     selectAttempt(live.current, trigger);
     setError("");
-    setOfferAudioSkip(false);
     playIntent(shouldPlay);
     if (sameSource && file && relayReady) {
       // Give the new native element its own playback token.
@@ -741,14 +786,14 @@ export function PlayerProvider({
   }
   async function switchTo(index: number) {
     const token = intent.command();
-    const state = live.current;
+    const state = queuePlaybackState();
     const id = state.queue[index];
     if (!id) return;
     if (index === state.queueIndex) {
       toggle();
       return;
     }
-    const guarded = catalog.rechecksPlayback(id) && !preparedOwnSource(id, state.mode);
+    const guarded = catalog.rechecksPlayback(id) && !preparedOwnSource(id);
     const item = guarded ? await reloadPlaybackEntry(id, token) : itemsById.get(id);
     if (token !== intent.navigation || !item || live.current.queue !== state.queue) return;
     if (queueEntryUnavailableReason(item, state.mode)) {
@@ -772,7 +817,7 @@ export function PlayerProvider({
     catalog.put(entries);
     let selected: ItemDto | undefined = entries[index];
     if (!selected) return;
-    if (selected.shared && !catalog.isShared(selected.id) && !preparedOwnSource(selected.id, options.fromLibrary ? "audio" : options.mode ?? "original")) {
+    if (selected.shared && !catalog.isShared(selected.id) && !preparedOwnSource(selected.id)) {
       try {
         selected = await catalog.refreshPlayback(selected.id, isCurrent);
         if (!selected || !isCurrent()) return;
@@ -784,12 +829,20 @@ export function PlayerProvider({
     const { fromLibrary = false, loadQueueIds, queueIds } = options;
     const mode = fromLibrary ? "audio" : options.mode ?? "original";
     const shuffle = !fromLibrary && live.current.shuffle;
+    if (queueIds && !queueIds.includes(selected.id)) {
+      setError("Этой записи больше нет в плейлисте.");
+      return;
+    }
     let newOrder = queueIds
       ? startPlaybackQueue(queueIds.map(id => ({ id })), queueIds.indexOf(selected.id), shuffle, playlistId)
       : startPlaybackQueue(entries, index, shuffle, playlistId);
     let state = { ...live.current, ...newOrder, mode, shuffle };
-    let playable = canStartSelectedItem(selected, mode, fromLibrary && selectedItem) ? state.queueIndex : -1;
+    let playable = canStartSelectedItem(selected, mode, fromLibrary && selectedItem && !playlistId && !catalog.isShared(selected.id)) ? state.queueIndex : -1;
     let complete = !loadQueueIds;
+    if (selectedItem && playable < 0) {
+      setError(`«${selected.title}». ${queueEntryUnavailableReason(selected, mode) ?? "Источник недоступен"}.`);
+      return;
+    }
     if (playable < 0 && fromLibrary) {
       const candidate = await findNext(1, state, token, true, false, setError, isCurrent);
       if (candidate === undefined || !isCurrent()) return;
@@ -800,7 +853,7 @@ export function PlayerProvider({
         try {
           const ids = await loadQueueIds();
           if (!isCurrent()) return;
-          newOrder = startPlaybackQueue(ids.map(id => ({id})), 0, false);
+          newOrder = startPlaybackQueue(ids.map(id => ({id})), 0, false, playlistId);
           state = {...live.current, ...newOrder, mode, shuffle};
           playable = await catalog.findPlayable(state.queue, -1, 1, false, mode, undefined, isCurrent);
           complete = true;
@@ -821,7 +874,6 @@ export function PlayerProvider({
     }
     if (!isCurrent()) return;
     if (playable < 0) {
-      setOfferAudioSkip(false);
       setError(mode === "audio"
         ? "В этой подборке нет записей, доступных для прослушивания."
         : "В этой очереди нет доступных источников.");
@@ -835,11 +887,23 @@ export function PlayerProvider({
     firstSound.current?.();
     firstSound.current = undefined;
     libraryOrder.cancel();
-    finishAttempt("manual");
     failed.current.clear();
     setRemoval(undefined);
     setShowSavePlaylist(false);
-    playEntry({...live.current, ...newOrder, mode, shuffle}, playable, playable === state.queueIndex ? "manual" : "advance");
+    queueOrigin.current = playlistId;
+    const nextState = { ...live.current, ...newOrder, mode, shuffle, queueIndex: playable };
+    const activeId = live.current.queue[live.current.queueIndex];
+    if (selectedItem && activeId && catalog.recordingId(activeId) === catalog.recordingId(entry.id)) {
+      const position = readPosition() ?? live.current.position;
+      seekOnLoad.current = position;
+      patch({ ...nextState, position });
+      attempt.updatePlaylistId(entry.id, playlistId);
+      setError("");
+      playIntent(true);
+    } else {
+      finishAttempt("manual");
+      playEntry(nextState, playable, playable === state.queueIndex ? "manual" : "advance");
+    }
     if (!complete && loadQueueIds) {
       const gate = new AbortController();
       const release = () => gate.abort();
@@ -853,7 +917,7 @@ export function PlayerProvider({
         return loadQueueIds();
       }, ids => patch(completeLibraryOrder(live.current, ids)));
     }
-    if (opensPlayer && !onPlayerScreen) openAndPlay(entry.id);
+    if (opensPlayer && !screen.current && currentRoute.current === routeKey) openAndPlay(entry.id);
     if (playable !== state.queueIndex) showSkipped(state, state.queueIndex, playable);
   }
   function activateItem(entries: ItemDto[], index: number, playlistId?: string, options: StartOptions = {}) {
@@ -861,23 +925,37 @@ export function PlayerProvider({
     if (!item) return;
     const state = live.current;
     const mode = options.fromLibrary ? "audio" : options.mode ?? state.mode;
-    switch (itemActivation(state, item.id, mode)) {
-      case "start": start(entries, index, playlistId, options, true); break;
-      case "changeMode": changeMode(mode, { activate: true, keepSelectedVideo: options.fromLibrary }); break;
+    switch (itemActivation(state, item.id, options.fromLibrary ? state.mode : mode, playlistId, queueOrigin.current)) {
+      case "start":
+      case "rebind":
+        return start(entries, index, playlistId, options, true);
+      case "changeMode":
+        if (mode === "original" && !onPlayerScreen && (item.visual || videoSource)) {
+          openAndPlay(item.id);
+          return;
+        }
+        if (mode === "audio" && !playbackSources(item, mode).length) {
+          setError(soundUnavailableReason(item) ?? "Источник звука недоступен");
+          return;
+        }
+        patch({ mode });
+        if (!playingRef.current) return toggle();
+        return;
       case "toggle":
         if (waitingForVideo && !options.fromLibrary) watchCurrent();
-        else toggle();
+        else return toggle();
     }
   }
   async function playShared(path: string, items: ItemDto[], index: number, load: () => Promise<ItemDto[]>, options: SharedStartOptions) {
     if (options.isCurrent?.() === false) return;
     const entries = catalog.sharedEntries(path, items, load);
     const chosen = entries[index];
-    if (options.activate && chosen?.visual && chosen.id === current?.id && options.mode === "original" &&
-        live.current.mode === "original" && !onPlayerScreen && !playingRef.current) {
-      await toggle();
-      if (options.isCurrent?.() !== false && playingRef.current) navigate("/player");
-    } else if (options.activate) activateItem(entries, index, undefined, options);
+    if (options.activate && chosen && chosen.id === current?.id && options.mode === "original" &&
+        !onPlayerScreen && !playingRef.current && (chosen.visual || playbackTransport(chosen, new Set()).video)) {
+      // SharedMedia reloaded this access path before dispatching the watch action.
+      catalog.put(entries);
+      openAndPlay(chosen.id);
+    } else if (options.activate) await activateItem(entries, index, undefined, options);
     else await start(entries, index, undefined, options);
   }
   async function findNext(direction: 1 | -1, state: PlaybackSettings, token: number, retry = false, wrap = state.repeat === "all", onError = setError, active = () => intent.navigation === token) {
@@ -888,23 +966,22 @@ export function PlayerProvider({
       if (active()) onError((e as Error).message);
     }
   }
-  function preparedOwnSource(id: string | undefined, mode: PlaybackMode) {
+  function preparedOwnSource(id: string | undefined) {
     const item = id && itemsById.get(id);
     if (!item || !audioRelayReady()) return false;
-    const source = playbackSources(item, mode)[0];
-    return playbackKind(item, source, mode) === "audio" && delivery.isPreparedOwnFile(ownedAudioFile(source, item.duration));
+    return delivery.isPreparedOwnFile(ownedAudioFile(playbackSources(item, "audio")[0], item.duration));
   }
   async function advanceTarget(direction: 1 | -1, ended: boolean, retry: () => void, manual = false, excluded = failed.current) {
     const token = manual ? intent.command() : intent.advance();
-    const state = live.current;
+    const state = queuePlaybackState();
     const nextIndex = state.queueIndex + direction;
     const index = state.repeat === "all" && !libraryOrder.tail
       ? (nextIndex + state.queue.length) % state.queue.length : nextIndex;
     const id = state.queue[index];
-    if (!(ended && state.repeat === "one") && id && !excluded.has(id) && preparedOwnSource(id, state.mode))
+    if (!(ended && state.repeat === "one") && id && !excluded.has(id) && preparedOwnSource(id))
       return {index, state};
     try {
-      return await catalog.nextInQueue(() => live.current, direction, ended, excluded, () => token === intent.navigation, () => libraryOrder.tail);
+      return await catalog.nextInQueue(queuePlaybackState, direction, ended, excluded, () => token === intent.navigation, () => libraryOrder.tail);
     } catch (e) {
       if (intent.navigation === token) {
         mediaKey.current = sourceKey;
@@ -980,7 +1057,7 @@ export function PlayerProvider({
     const unsuccessful = new Set(failedSources);
     if (source) unsuccessful.add(source.id);
     if (entry && entry !== current) catalog.put([entry]);
-    if (entry && playbackSourceForAttempt(entry, unsuccessful, undefined, settings.mode)) {
+    if (entry && canAutoplayPlayback(playbackTransport(entry, unsuccessful), screen.current)) {
       measureProgress();
       attempt.paused();
       setFailedSources(unsuccessful);
@@ -1174,17 +1251,18 @@ export function PlayerProvider({
     if (!playingRef.current && catalog.rechecksPlayback(current.id)) {
       const item = await reloadPlaybackEntry(current.id, token);
       if (!item || token !== intent.navigation) return;
-      if (!playbackSources(item, live.current.mode).length) {
+      if (!playbackSources(item, queuePlaybackState().mode).length) {
         setError(`«${item.title}» недоступна для воспроизведения.`);
         return;
       }
+      if (sceneGrant) setSceneAccess({grant: sceneGrant, allowed: true});
       if (!source) {
         finishAttempt("manual");
         failed.current.delete(item.id);
         playEntry(live.current, live.current.queueIndex, "manual");
         return;
       }
-      if (!playbackSources(item, live.current.mode).some(candidate => candidate.id === source.id)) {
+      if (playbackTransport(item, failedSources).source?.id !== source.id) {
         setFailedSources(new Set());
         setError("");
         playIntent(true);
@@ -1192,7 +1270,7 @@ export function PlayerProvider({
       }
     }
     if (!source) {
-      if (playbackSources(current, settings.mode).length) {
+      if (playbackSources(current, queuePlaybackState().mode).length) {
         finishAttempt("manual");
         failed.current.delete(current.id);
         playEntry(live.current, live.current.queueIndex, "manual");
@@ -1228,97 +1306,10 @@ export function PlayerProvider({
     playOnPlayerOpen.current = itemId;
     navigate("/player");
   }
-  async function watchCurrent() {
-    if (!current) return;
-    if (current.visual) {
-      if (catalog.rechecksPlayback(current.id)) {
-        const token = intent.command();
-        const latest = await reloadPlaybackEntry(current.id, token);
-        if (!latest || token !== intent.navigation) return;
-        if (!latest.sources.length) { setError("Доступ к записи закрыт."); return; }
-        if (!latest.visual && !playableVideoSource(latest)) { setError("Клип больше недоступен."); return; }
-      }
-      patch({mode: "original"});
-      openAndPlay(current.id);
-      return;
-    }
-    if (!videoSource) return;
-    if (settings.mode === "original" && source?.id === videoSource.id) {
-      if (catalog.rechecksPlayback(current.id)) {
-        const token = intent.command();
-        const item = await reloadPlaybackEntry(current.id, token);
-        if (!item || token !== intent.navigation) return;
-        if (!playableVideoSource(item)) {
-          setError(`«${item.title}» недоступна для просмотра.`);
-          return;
-        }
-      }
-      openAndPlay(current.id);
-    }
-    else changeMode("original", { activate: true, videoSourceId: videoSource.id });
-  }
-  async function changeMode(mode: PlaybackMode, {
-    skipCurrent = false, activate = false, keepSelectedVideo = false, videoSourceId,
-  }: { skipCurrent?: boolean; activate?: boolean; keepSelectedVideo?: boolean; videoSourceId?: string } = {}) {
-    const state = live.current;
-    if (!current || (state.mode === mode && !videoSourceId)) {
-      setOfferAudioSkip(false);
-      return;
-    }
-    const token = intent.command();
-    const item = catalog.rechecksPlayback(current.id) ? await reloadPlaybackEntry(current.id, token) : current;
-    if (!item || token !== intent.navigation || state.queue !== live.current.queue) return;
-    const updated = { ...state, mode };
-    const latestVideo = item === current ? videoSource : playableVideoSource(item, failedSources);
-    const candidate = videoSourceId ? latestVideo : playbackSources(item, mode)[0];
-    if (!candidate && !(keepSelectedVideo && latestVideo)) {
-      const nextEntry = await findNext(1, updated, token, true);
-      if (token !== intent.navigation || state.queue !== live.current.queue || nextEntry === undefined) return;
-      if (mode === "audio" && skipCurrent && nextEntry >= 0) {
-        finishAttempt("manual");
-        failed.current.clear();
-        playEntry({...live.current, mode}, nextEntry, "manual");
-        showSkipped(updated, state.queueIndex, nextEntry);
-        return;
-      }
-      setOfferAudioSkip(mode === "audio" && nextEntry >= 0);
-      setError(mode === "audio"
-        ? soundUnavailableReason(item) ?? "Источник звука недоступен"
-        : "Источник недоступен");
-      return;
-    }
-    setOfferAudioSkip(false);
-    setError("");
-    playOnPlayerOpen.current = undefined;
-    failed.current.clear();
-    setFailedSources(new Set());
-    sourceIdentity.current = undefined;
-    requestedVideoSourceId.current = videoSourceId ? candidate?.id : undefined;
-    const position = readPosition() ?? state.position;
-    const needsReattach = source?.id !== candidate?.id || presentationKind !== playbackKind(item, candidate, mode);
-    if (needsReattach) {
-      measureProgress();
-      attempt.paused();
-      mediaKey.current = "";
-      setDuration(0);
-    }
-    seekOnLoad.current = position;
-    const canPlay = canAutoplayPlayback(item, candidate, mode, onPlayerScreen);
-    playIntent((activate || playingRef.current) && canPlay);
-    patch({ mode, position });
-    if (activate && (!canPlay || item.visual) && mode === "original" && !onPlayerScreen) openAndPlay(current.id);
-  }
-  async function watchQueueVideo(index: number) {
-    const token = intent.command();
-    const state = live.current;
-    const id = state.queue[index];
-    if (!id) return;
-    const item = catalog.rechecksPlayback(id) ? await reloadPlaybackEntry(id, token) : itemsById.get(id);
-    if (!item || token !== intent.navigation || live.current.queue !== state.queue ||
-      playbackKind(item, playbackSources(item)[0]) !== "video") return;
-    finishAttempt("manual");
-    failed.current.delete(item.id);
-    playEntry({ ...state, mode: "original" }, index, "manual");
+  function watchCurrent() {
+    if (!current || !(current.visual || videoSource)) return;
+    if (waitingForVideo) openAndPlay(current.id);
+    else navigate("/player");
   }
   function addToQueue(item: ItemDto, placement: "next" | "last", playlistId?: string) {
     if (libraryOrder.tail) return;
@@ -1372,9 +1363,9 @@ export function PlayerProvider({
     resetSources();
     failed.current.clear();
     setError("");
-    setOfferAudioSkip(false);
     setRemoval(undefined);
     setShowSavePlaylist(false);
+    queueOrigin.current = undefined;
     patch({ queue: [], queueIndex: 0, position: 0, queuePlaylistIds: {} });
   }
 
@@ -1425,7 +1416,7 @@ export function PlayerProvider({
   }, [catalog, revision, queueRetry]);
   const pendingEntry = useRef<string | undefined>(undefined);
   useEffect(() => {
-    const state = live.current;
+    const state = queuePlaybackState();
     const id = state.queue[state.queueIndex];
     if (!id) return;
     if (current) {
@@ -1457,7 +1448,7 @@ export function PlayerProvider({
       if (playingRef.current) playNative(native.current);
       else native.current.pause();
     }
-  }, [playing, sourceKey, streamedVideo, audioUrl, m4aEnabled]);
+  }, [playing, sourceKey, streamedVideo, audioUrl, m4aEnabled, needsVideoForPlayback && sceneAllowed]);
   useEffect(() => {
     if (native.current) native.current.volume = settings.volume;
   }, [settings.volume]);
@@ -1471,6 +1462,7 @@ export function PlayerProvider({
       const restored = restorePlayback(initialSettings ?? {});
       playOnPlayerOpen.current = undefined;
       savedSettings.current = restored;
+      queueOrigin.current = restoredPlaylistId(restored);
       resetSources();
       patch(restored);
       playIntent(false);
@@ -1611,8 +1603,17 @@ export function PlayerProvider({
   }
   useEffect(() => {
     const changed = () => setNativeFullscreen(!!stage.current && document.fullscreenElement === stage.current);
+    const exitOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && stage.current && document.fullscreenElement === stage.current) {
+        void document.exitFullscreen().catch(() => {});
+      }
+    };
     document.addEventListener("fullscreenchange", changed);
-    return () => document.removeEventListener("fullscreenchange", changed);
+    document.addEventListener("keydown", exitOnEscape);
+    return () => {
+      document.removeEventListener("fullscreenchange", changed);
+      document.removeEventListener("keydown", exitOnEscape);
+    };
   }, []);
   useEffect(() => {
     if (!current || !onPlayerScreen) {
@@ -1694,26 +1695,46 @@ export function PlayerProvider({
   };
   const artwork = playbackArtwork(current, source);
   const showArtwork = artwork && failedArtwork !== artwork;
-  const watchClip = source && settings.mode === "original" && current?.visual;
-  const audioFallback = !current?.visual && current?.kind === "video" && settings.mode === "original" &&
-    source && presentationKind === "audio";
+  const watchClip = source && current?.visual;
+  const companion = source && presentationKind === "audio" && !watchClip ? videoSource : undefined;
+  const companionFile = useMemo(() => companion && onPlayerScreen && sceneAllowed &&
+    typeof MediaSource !== "undefined" && navigator.vendor === "Google Inc." ? videoFile(companion, current?.duration) : undefined,
+    [onPlayerScreen, sceneAllowed, companion?.streamUrl, companion?.shared, companion?.bytes, companion?.mime,
+      companion?.playbackHints?.audioStart, companion?.playbackHints?.tailStart, current?.duration]);
+  const companionYoutubeId = companion?.provider === "youtube" ? youtubeVideoId(companion) : undefined;
+  const picturesExhausted = !companion && !!rejected?.size && presentationKind === "audio" && !watchClip;
+  function recheckPictureGrant() {
+    if (!sceneGrant) return;
+    setSceneAccess(undefined);
+    setSceneRetry(value => value + 1);
+  }
+  function failPicture() {
+    if (!companion) return;
+    setFailedPictures(previous => ({
+      visit: pictureVisit,
+      ids: new Set([...(previous?.visit === pictureVisit ? previous.ids : []), companion.id]),
+    }));
+    // A failed borrowed URL can mean that the grant was revoked. Verify it
+    // again before trying another candidate, including an external iframe.
+    recheckPictureGrant();
+  }
+  const watchVideo = !!(videoSource || watchClip || picturesExhausted);
+  const audioFallback = !watchVideo && current?.kind === "video" && !!source;
   const sourceLabel = source?.shared ? "Источник по ссылке" : isYoutube ? "YouTube" : source ? "Локальный файл" : "Источник недоступен";
-  const rowCommands = useRef({switchTo, watchQueueVideo, reorder, removeFromQueue});
-  useLayoutEffect(() => { rowCommands.current = {switchTo, watchQueueVideo, reorder, removeFromQueue}; });
+  const rowCommands = useRef({switchTo, reorder, removeFromQueue});
+  useLayoutEffect(() => { rowCommands.current = {switchTo, reorder, removeFromQueue}; });
   const selectRow = useCallback((index: number) => { void rowCommands.current.switchTo(index); }, []);
-  const queueSettings = useMemo(() => ({queue: settings.queue, queueIndex: settings.queueIndex, mode: settings.mode}),
-    [settings.queue, settings.queueIndex, settings.mode]);
+  const queueMode: PlaybackMode = onPlayerScreen ? "original" : "audio";
+  const queueSettings = useMemo(() => ({queue: settings.queue, queueIndex: settings.queueIndex, mode: queueMode}),
+    [settings.queue, settings.queueIndex, queueMode]);
   const queueRow = useCallback((id: string, index: number) => {
     const editable = queueEditable && index > settings.queueIndex;
     const item = itemsById.get(id);
     const title = item?.title ?? (catalog.deleted(id) ? "Запись удалена" : "Загружаем запись…");
     const artworkSource = item?.sources.find(candidate => candidate.thumbnail);
     const active = index === settings.queueIndex;
-    const unavailableReason = queueEntryUnavailableReason(item, settings.mode);
+    const unavailableReason = queueEntryUnavailableReason(item, queueMode);
     const failedReason = failed.current.has(id) ? "Источник недоступен" : undefined;
-    const canWatch = settings.mode === "audio" && unavailableReason && item && playbackSources(item).some(
-      (candidate) => playbackKind(item, candidate) === "video",
-    );
     const canMoveUp = index > settings.queueIndex + 1;
     const canMoveDown = index < settings.queue.length - 1;
     return (
@@ -1758,11 +1779,6 @@ export function PlayerProvider({
             <small>{unavailableReason ?? failedReason ?? (item?.kind === "video" ? "Видео" : "Аудио")}</small>
           </span>
         </button>
-        {canWatch && (
-          <button className="icon-button queue-watch-video" aria-label={`Смотреть ${title}`} title="Смотреть" onClick={() => rowCommands.current.watchQueueVideo(index)}>
-            <Video size={16} />
-          </button>
-        )}
         {editable && (
           <div className="queue-entry-actions">
             <button className="icon-button" aria-disabled={!canMoveUp} aria-label={`Переместить выше: ${title}`} title="Переместить выше" onClick={() => rowCommands.current.reorder(id, index - 1)}><ArrowUp size={14} /></button>
@@ -1805,20 +1821,12 @@ export function PlayerProvider({
         <>
           <header className="watch-heading">
             <h1>Плеер</h1>
-            <div className="playback-mode" role="group" aria-label="Режим воспроизведения">
-              <button type="button" aria-pressed={settings.mode === "original"} onClick={() => changeMode("original")}>
-                <Video size={15} /> Аудио и видео
-              </button>
-              <button type="button" aria-pressed={settings.mode === "audio"} onClick={() => changeMode("audio")}>
-                <Headphones size={15} /> Только звук
-              </button>
-            </div>
           </header>
           <div className="watch-layout">
             <div className="watch-main">
               <div
                 ref={stage}
-                className={`watch-stage ${presentationKind === "audio" && !watchClip ? "is-audio" : ""} ${youtubeId ? "is-youtube" : ""} ${viewportFullscreen ? "is-viewport-fullscreen" : ""} ${fullscreen && controlsIdle ? "is-controls-idle" : ""}`}
+                className={`watch-stage ${!watchVideo ? "is-audio" : ""} ${youtubeId || companionYoutubeId ? "is-youtube" : ""} ${viewportFullscreen ? "is-viewport-fullscreen" : ""} ${fullscreen && controlsIdle ? "is-controls-idle" : ""}`}
                 aria-label="Сцена воспроизведения"
                 tabIndex={-1}
                 onPointerMove={(event) => {
@@ -1828,7 +1836,17 @@ export function PlayerProvider({
                 }}
               >
                 <div className="watch-media">
-                  {source && youtubeId ? (
+                  {!sceneAllowed ? (
+                    <div className="clip-status" role="status">{sceneDenied ? <>
+                      Не удалось подтвердить доступ к записи
+                      <button type="button" className="button subtle compact" onClick={() => {
+                        if (sceneAccess?.resume && !playingRef.current) playIntent(true);
+                        setSceneAccess(undefined);
+                        setError("");
+                        setSceneRetry(value => value + 1);
+                      }}>Повторить проверку</button>
+                    </> : "Проверяем доступ к записи…"}</div>
+                  ) : source && youtubeId ? (
                     <Youtube
                       key={sourceKey}
                       id={youtubeId}
@@ -1905,8 +1923,22 @@ export function PlayerProvider({
                         }, () => { void toggleFullscreen(); });
                       }}
                     />
+                  ) : picturesExhausted ? (
+                    <div className="clip-status" role="status">Видеоряд недоступен
+                      <button type="button" className="button subtle compact" onClick={() => { setFailedPictures(undefined); recheckPictureGrant(); }}>Повторить</button>
+                    </div>
+                  ) : companionYoutubeId ? (
+                    <div style={{ width: "100%", height: "100%" }} onClick={event => videoClick.click(event.detail, toggle, () => { void toggleFullscreen(); })}>
+                      <Youtube id={companionYoutubeId} playing={playing && phase === "playing"} volume={0} position={settings.position}
+                        follow={native} engine={pictureYoutube} onError={failPicture} />
+                    </div>
+                  ) : companion?.streamUrl ? (
+                    <ClipVideo key={JSON.stringify([relayKey ?? sourceKey, companion.id, companion.streamUrl])} url={companion.streamUrl} loop={false}
+                      audio={native} file={companionFile} running={playing && phase === "playing"} onFailure={failPicture}
+                      onClick={event => videoClick.click(event.detail, toggle, () => { void toggleFullscreen(); })} />
                   ) : (
-                    <div className={`audio-scene art-${current.title.length % 6}`}>
+                    <div className={`audio-scene art-${current.title.length % 6}`}
+                      onClick={event => videoClick.click(event.detail, toggle, () => { void toggleFullscreen(); })}>
                       {showArtwork && <img className="audio-backdrop" src={artwork} alt="" onError={() => setFailedArtwork(artwork)} />}
                       <div className={`audio-cover art-${current.title.length % 6}`}>
                         {showArtwork ? <img src={artwork} alt={`Обложка: ${current.title}`} onError={() => setFailedArtwork(artwork)} /> : (
@@ -1920,7 +1952,7 @@ export function PlayerProvider({
                       {!source && <span className="audio-scene-label">Источник недоступен</span>}
                     </div>
                   )}
-                  {watchClip && <ClipVideo key={(relayKey ?? sourceKey) + watchClip.streamUrl} url={watchClip.streamUrl} audio={native}
+                  {sceneAllowed && watchClip && <ClipVideo key={(relayKey ?? sourceKey) + watchClip.streamUrl} url={watchClip.streamUrl} audio={native}
                     running={playing && phase === "playing"} onClick={event => {
                       videoClick.click(event.detail, toggle, () => { void toggleFullscreen(); });
                     }} />}
@@ -1958,15 +1990,14 @@ export function PlayerProvider({
                   {(error || saveError) && (
                     <div className="watch-notice" role="status">
                       <CircleAlert size={16} /><span>{error || saveError}</span>
-                      {offerAudioSkip && <button className="text-button" onClick={() => changeMode("audio", { skipCurrent: true })}>Слушать со следующей доступной</button>}
                       <button className="icon-button" aria-label="Скрыть уведомление" onClick={dismissNotice}><X size={15} /></button>
                     </div>
                   )}
                 </div>
               </div>
               <div className="watch-metadata">
-                <span className="watch-kind-icon">{presentationKind === "video" ? <Video size={20} /> : <Music2 size={20} />}</span>
-                <div><h2>{current.title}</h2><p>{watchClip ? "Клип" : audioFallback ? "Доступен только звук" : presentationKind === "video" ? "Видео" : "Аудио"}<span>·</span>{sourceLabel}{current.tags.slice(0, 2).map((tag) => <span className="watch-tag" key={tag.id}>{tag.name}</span>)}</p></div>
+                <span className="watch-kind-icon">{watchVideo ? <Video size={20} /> : <Music2 size={20} />}</span>
+                <div><h2>{current.title}</h2><p>{watchClip ? "Клип" : audioFallback ? "Доступен только звук" : watchVideo ? "Видео" : "Аудио"}<span>·</span>{sourceLabel}{current.tags.slice(0, 2).map((tag) => <span className="watch-tag" key={tag.id}>{tag.name}</span>)}</p></div>
               </div>
               <p className="watch-shortcuts"><kbd>K</kbd> пауза <span>·</span> <kbd>← →</kbd> 5 с <span>·</span> <kbd>J L</kbd> 10 с <span>·</span> <kbd>0–9</kbd> позиция <span>·</span> <kbd>↑ ↓</kbd> громкость <span>·</span> <kbd>F</kbd> полный экран</p>
             </div>
@@ -2022,7 +2053,6 @@ export function PlayerProvider({
   function dismissNotice() {
     setError("");
     setSaveError("");
-    setOfferAudioSkip(false);
   }
   const miniPlayer = !onPlayerScreen && (current || error || saveError || queueRetryNotice) ? (
     <div className="mini-player">
@@ -2043,7 +2073,7 @@ export function PlayerProvider({
             </span>
             <span className="mini-player-info">
               <strong>{current.title}</strong>
-              <small role="status">{loadingLabel || (needsVideoForPlayback ? soundUnavailableReason(current) ?? "Источник звука недоступен"
+              <small id="mini-playback-status" role="status">{loadingLabel || (needsVideoForPlayback ? soundUnavailableReason(current) ?? "Источник звука недоступен"
                 : waitingForVideo ? "Видео готово к просмотру"
                 : audioFallback ? "Доступен только звук"
                 : playing && phase === "playing" ? "Сейчас играет" : playing ? "" : "На паузе")}</small>
@@ -2053,22 +2083,21 @@ export function PlayerProvider({
             <button className="icon-button" aria-label="Предыдущая запись" onClick={() => live.current.position > 3 ? seek(0) : next(-1)}>
               <SkipBack size={17} fill="currentColor" />
             </button>
-            {!waitingForVideo && (
-              <button className="mini-player-play" aria-label={playing ? "Приостановить" : "Воспроизвести"} onClick={toggle}>
-                {playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}
-              </button>
-            )}
-            {(current.visual || videoSource) && (
-              <button type="button" className="icon-button" aria-label={current.visual ? "Смотреть клип" : "Открыть видео"} title={current.visual ? "Смотреть клип" : "Открыть видео"} onClick={watchCurrent}>
-                <Video size={18} aria-hidden="true" />
-              </button>
-            )}
+            <button type="button" className="mini-player-play" aria-label={playing ? "Приостановить" : "Воспроизвести"}
+              disabled={waitingForVideo} aria-describedby={waitingForVideo ? "mini-playback-status" : undefined} onClick={toggle}>
+              {playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}
+            </button>
             <button className="icon-button" aria-label="Следующая запись" onClick={() => next()}>
               <SkipForward size={17} fill="currentColor" />
             </button>
           </div>
           <div className="mini-player-side">
             <span>{formatDuration(settings.position)} / {formatDuration(total)}</span>
+            {(current.visual || videoSource) && (
+              <button type="button" className="icon-button" aria-label={current.visual ? "Смотреть клип" : "Открыть видео"} title={current.visual ? "Смотреть клип" : "Открыть видео"} onClick={watchCurrent}>
+                <Video size={18} aria-hidden="true" />
+              </button>
+            )}
             <PlaybackVolume compact volume={settings.volume} onMute={toggleMute} onVolume={setVolume} />
             <CompactPlaybackQueue incomplete={!queueEditable} key={routeKey} onOpenChange={setQueueOpen} deleted={catalog.deleted} canRecheck={catalog.rechecksPlayback} settings={queueSettings} version={catalogVersion} onVisible={loadVisible} itemsById={itemsById} failedIds={failed.current} onSelect={selectRow} />
           </div>
@@ -2091,11 +2120,12 @@ export function PlayerProvider({
     enqueue: (item, playlistId) => commands.current.addToQueue(item, "last", playlistId),
     playNext: (item, playlistId) => commands.current.addToQueue(item, "next", playlistId),
   }), [catalog]);
+  const activePlaylistId = queueOrigin.current;
   const controller = useMemo<Controller>(() => ({ ...stableCommands, current, playing, waitingForVideo, loadingLabel, mode: settings.mode, queueEditable }),
     [stableCommands, current, playing, waitingForVideo, loadingLabel, settings.mode, queueEditable]);
   useLayoutEffect(() => {
-    cards.update(current?.id, {active: !!current, playing, waitingForVideo, loadingLabel, mode: settings.mode}, queueEditable);
-  }, [cards, current?.id, playing, waitingForVideo, loadingLabel, settings.mode, queueEditable]);
+    cards.update(current?.id, {active: !!current, playing, waitingForVideo, loadingLabel, mode: settings.mode}, queueEditable, activePlaylistId);
+  }, [cards, current?.id, playing, waitingForVideo, loadingLabel, settings.mode, queueEditable, activePlaylistId]);
   return (
     <CardsContext.Provider value={cards}><CommandsContext.Provider value={stableCommands}><PlayerContext.Provider value={controller}>
       {children(player, miniPlayer)}

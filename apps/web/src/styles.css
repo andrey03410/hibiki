@@ -1103,12 +1103,35 @@ input[type="checkbox"]:checked:after {
   display: block;
   border-radius: 8px;
 }
+.playlist-cover-play {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  border-radius: inherit;
+}
+.playlist-play-mark {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border: 1px solid #ffffff75;
+  border-radius: 50%;
+  background: #211c28cf;
+  color: white;
+  pointer-events: none;
+}
 .playlist-card .cover {
   width: 100%;
   border-radius: 8px;
   transition: filter 0.2s;
 }
-.playlist-cover-wrap:is(:hover, :focus-visible) .cover {
+.playlist-cover-play:is(:hover, :focus-visible) .cover {
   filter: brightness(1.15);
 }
 .cover-type {
@@ -1134,13 +1157,12 @@ input[type="checkbox"]:checked:after {
   inset-block-end: 8px;
   display: grid;
   place-items: center;
-  width: 27px;
-  height: 27px;
+  width: 30px;
+  height: 30px;
   border: 1px solid #ffffff38;
   border-radius: 50%;
   background: #211c28db;
   color: #f4effb;
-  pointer-events: none;
 }
 .playlist-card-title {
   overflow-wrap: anywhere;

@@ -104,6 +104,25 @@ export function prepareYoutubePlayback(
   else player.playVideo();
 }
 
+export function syncYoutubePicture(
+  player: {
+    getPlayerState(): number; getCurrentTime(): number; getDuration(): number;
+    isMuted(): boolean; mute(): void; seekTo(position: number, allowSeekAhead: boolean): void;
+    playVideo(): void; pauseVideo(): void;
+  },
+  audio: Pick<HTMLMediaElement, "currentTime" | "paused" | "seeking">,
+  running: boolean,
+) {
+  const state = player.getPlayerState();
+  const duration = player.getDuration();
+  const target = duration > 0 ? Math.min(audio.currentTime, duration) : audio.currentTime;
+  if (!player.isMuted()) player.mute();
+  if (Math.abs(target - player.getCurrentTime()) > 0.5) player.seekTo(target, true);
+  if (running && !audio.paused && !audio.seeking && (!duration || audio.currentTime < duration)) {
+    if (state !== 1 && state !== 3) player.playVideo();
+  } else if (state === 1 || state === 3) player.pauseVideo();
+}
+
 export function youtubePlaybackReading(
   player: {
     getCurrentTime?(): number;
@@ -203,8 +222,10 @@ export function playbackSources<T extends PlaybackSource>(item: {
     );
 }
 
-export function playableVideoSource(item: PlayableItem, failed?: ReadonlySet<string>) {
-  return playbackSources(item).find((source) => playbackKind(item, source) === "video" && !failed?.has(source.id));
+export function playableVideoSource<T extends PlaybackSource>(
+  item: Omit<PlayableItem, "sources"> & { sources: T[] }, failed?: ReadonlySet<string>, failedPictures?: ReadonlySet<string>,
+) {
+  return playbackSources(item).find(source => playbackKind(item, source) === "video" && !failed?.has(source.id) && !failedPictures?.has(source.id));
 }
 
 export function canStartSelectedItem(item: PlayableItem, mode: PlaybackMode, keepSelectedVideo = false): boolean {
@@ -234,11 +255,8 @@ export function playbackSourceForAttempt<T extends PlaybackSource>(
   failed: ReadonlySet<string>,
   active?: { sourceId: string; preferredSourceId?: string },
   mode: PlaybackMode = "original",
-  requestedSourceId?: string,
 ): T | undefined {
   const sources = playbackSources(item, mode).filter((source) => !failed.has(source.id));
-  const requested = requestedSourceId && sources.find((source) => source.id === requestedSourceId);
-  if (requested) return requested;
   if (active && active.preferredSourceId !== item.preferredSourceId) {
     const retained = sources.find((source) => source.id === active.sourceId);
     if (retained) return retained;
@@ -246,12 +264,28 @@ export function playbackSourceForAttempt<T extends PlaybackSource>(
   return sources[0];
 }
 
+// A recording with local sound has one leading native clock in both views.
+// A video-only source can lead while the watch scene is mounted.
+export function playbackTransport<T extends PlaybackSource>(
+  item: Omit<PlayableItem, "sources"> & { sources: T[] },
+  failed: ReadonlySet<string>,
+  active?: { sourceId: string; preferredSourceId?: string },
+  failedPictures?: ReadonlySet<string>,
+) {
+  const sound = playbackSourceForAttempt(item, failed, active, "audio");
+  const video = playableVideoSource(item, failed, sound ? failedPictures : undefined);
+  return { source: sound ?? video, kind: sound ? "audio" as const : "video" as const, video };
+}
+
 export function itemActivation(
   { queue, queueIndex, mode }: Pick<PlaybackSettings, "queue" | "queueIndex" | "mode">,
   itemId: string,
   requestedMode = mode,
-): "start" | "toggle" | "changeMode" {
+  playlistId?: string,
+  activePlaylistId?: string,
+): "start" | "toggle" | "changeMode" | "rebind" {
   if (queue[queueIndex] !== itemId) return "start";
+  if (playlistId && activePlaylistId !== playlistId) return "rebind";
   return requestedMode === mode ? "toggle" : "changeMode";
 }
 
@@ -551,14 +585,11 @@ export function playbackKind(
 }
 
 export function canAutoplayPlayback(
-  item: { kind: "audio" | "video"; visual?: { soundSourceId: string } },
-  source: PlaybackSource | undefined,
-  mode: PlaybackMode,
+  transport: ReturnType<typeof playbackTransport> | undefined,
   onPlayerScreen: boolean,
 ): boolean {
-  return !!source && (onPlayerScreen || playbackKind(item, source, mode) === "audio");
+  return !!transport?.source && (onPlayerScreen || transport.kind === "audio");
 }
-
 
 export async function enterPlayerFullscreen(
   request?: () => Promise<void>,
@@ -672,16 +703,19 @@ const inactiveCard: PlayerCardState = {active: false, playing: false, waitingFor
 export class PlayerCards {
   private listeners = new Set<() => void>();
   private id?: string;
+  private playlistId?: string;
   private card = inactiveCard;
   private editable = true;
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
   };
-  read = (id: string) => this.id === id ? this.card : inactiveCard;
+  read = (id: string, playlistId?: string) =>
+    this.id === id && (!playlistId || playlistId === this.playlistId) ? this.card : inactiveCard;
   hasCurrent = () => !!this.id;
   queueEditable = () => this.editable;
-  update(id: string | undefined, card: PlayerCardState, editable: boolean) {
+  update(id: string | undefined, card: PlayerCardState, editable: boolean, playlistId?: string) {
+    this.playlistId = playlistId;
     this.id = id;
     if (this.card.active !== card.active || this.card.playing !== card.playing || this.card.mode !== card.mode ||
         this.card.waitingForVideo !== card.waitingForVideo || this.card.loadingLabel !== card.loadingLabel) this.card = card;

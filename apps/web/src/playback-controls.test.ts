@@ -67,13 +67,16 @@ it.each([
   expect(html).toContain(`--buffer-end:${end}%`);
 });
 
-it("shows a volume trigger in the mini-player and a slider with the same level in the watch player", () => {
+it("exposes mute and the current volume slider immediately in both player layouts", () => {
   const props = {volume: 0.35, onVolume() {}, onMute() {}};
   const mini = renderToStaticMarkup(createElement(PlaybackVolume, {...props, compact: true}));
   const watch = renderToStaticMarkup(createElement(PlaybackVolume, props));
-  expect(mini).toMatch(/<button[^>]*aria-label="Громкость, 35%"[^>]*aria-expanded="false"/);
-  expect(watch).toContain('aria-valuetext="35%"');
-  expect(watch).toContain('aria-label="Выключить звук"');
+  for (const layout of [mini, watch]) {
+    expect(layout).not.toMatch(/hidden=""|aria-expanded=/);
+    expect(layout).toContain('aria-valuetext="35%"');
+    expect(layout).toContain('aria-label="Выключить звук"');
+    expect(layout).toContain('type="range"');
+  }
 });
 
 it("merges contiguous decoder and byte coverage and shows all of a fully downloaded track", async () => {

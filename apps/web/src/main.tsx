@@ -1,6 +1,7 @@
 import {Button, DataContext, EmptyState, EMPTY, ErrorMessage, Modal, PageTop, useData} from "./WorkspaceUi";
 import React, {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useSyncExternalStore,
   useRef,
@@ -72,6 +73,8 @@ import { api, ApiError, setWorkspaceOwner, formatDuration, humanDuration, mediaW
 import { ErrorBoundary, lazyView } from "./ErrorBoundary";
 import { ItemArtwork } from "./ItemArtwork.tsx";
 import { PlaylistCard, PlaylistCover } from "./PlaylistCard";
+import { ScopedPlaylistPage, usePlaylistLibrary } from "./PlaylistLibrary";
+import type { PlaylistTarget } from "./playlist-library";
 import { PlaylistDetails } from "./playlist-detail";
 import { ruleDescription } from "./playlist-rules";
 import { LibraryPages, LibraryCardReader, fetchItems, searchBody, validateOverview } from "./library-pages";
@@ -83,7 +86,7 @@ import { GroupSelect, TagPicker, PerformanceEditor } from "./ClassificationEdito
 import { batchTagChanges, compositionDelta, groupKeys, groups, groupOf, itemPerformance, missingLabels, TagCatalog,
   type BatchMode, type Performance, type PerformanceFilter, type TagGroup, type Voice } from "./taxonomy";
 import { ItemTagList } from "./LibraryItemControls.tsx";
-import { playbackSources } from "./player-model.ts";
+import { playbackSources, soundUnavailableReason } from "./player-model.ts";
 import { librarySearchForTag, librarySourceBadges, matchesSearch, sourceAvailability, type LibraryView } from "./library-search.ts";
 import { LibrarySearchControls, useLibrarySearch } from "./LibrarySearchControls.tsx";
 import { NoteEditor, NoteIndicator, NotesContext, NotesLoadError, useNotes, useNotesController } from "./NoteEditor.tsx";
@@ -324,9 +327,11 @@ function Workspace({
   const location = useLocation();
   const notes = useNotesController();
   const librarySearch = useLibrarySearch(user.id);
+  const playlistLibrary = usePlaylistLibrary();
   const seenImports = useRef<Set<string> | null>(null);
   const navigate = useNavigate();
   function browseTag(id: string) {
+    playlistLibrary.clear();
     librarySearch[1]((old) => librarySearchForTag(old, id));
     navigate("/");
     window.scrollTo(0, 0);
@@ -559,10 +564,12 @@ function Workspace({
             <React.Suspense fallback={<div className="loading-inline" role="status"><LoaderCircle size={18} className="spin" />Загружаем…</div>}>
             <Routes>
               <Route path="/player" element={<ErrorBoundary label="Не удалось показать плеер.">{watchPlayer}</ErrorBoundary>} />
-              <Route path="/" element={<LibraryPage userId={user.id} search={librarySearch} />} />
+              <Route path="/" element={playlistLibrary.scope
+                ? <ScopedPlaylistPage scope={playlistLibrary.scope} clear={playlistLibrary.clear} />
+                : <LibraryPage userId={user.id} search={librarySearch} />} />
               <Route
                 path="/playlists"
-                element={<PlaylistsPage query={playlistQuery} onQuery={setPlaylistQuery} onCreate={() => setCreateOpen(true)} />}
+                element={<PlaylistsPage playlistLibrary={playlistLibrary} query={playlistQuery} onQuery={setPlaylistQuery} onCreate={() => setCreateOpen(true)} />}
               />
               <Route path="/playlists/:id" element={<PlaylistRoute onBrowseTag={browseTag} />} />
               <Route path="/tags" element={<TagsPage key={location.key} userId={user.id} visits={tagVisits.current} onBrowse={browseTag} />} />
@@ -875,7 +882,7 @@ function ItemTable({
   const selectedIds = new Set(selected);
   function activate(item: ItemDto, index: number) {
     if (onActivate) onActivate(item);
-    else player.activateItem(items, index, playlistId, { fromLibrary: inLibrary, queueIds: playlistOrder });
+    else player.activateItem(items, index, playlistId, { fromLibrary: inLibrary || !!playlistId, queueIds: playlistOrder });
   }
   function select(id: string, checked: boolean) {
     if (selected) onSelected?.(checked ? [...selected, id] : selected.filter(other => other !== id));
@@ -1012,16 +1019,15 @@ const ItemRow = React.memo(function ItemRow({ item, index, catalog, checked, las
   const externalUrl = ownSources.find((source) => source.url)?.url;
   const artworkSource = item.sources.find((source) => source.thumbnail);
   const available = playbackSources(item).length > 0;
-  const { active, playing, mode, waitingForVideo, loadingLabel } = usePlayerCard(item.id);
+  const { active, playing, loadingLabel } = usePlayerCard(item.id, playlistId);
+  const playlistSoundError = playlistId ? soundUnavailableReason(item) : undefined;
   const status = sourceAvailability(item);
   const hasItemNote = !!noteFor(notes, "item", item.id);
   const hasSourceNote = ownSources.some((source) => noteFor(notes, "source", source.id));
   const video = item.kind === "video";
   const yt = ownSources.some((source) => source.provider === "youtube");
   const kindLabel = video ? "Видео" : "Аудио";
-  const playLabel = playing ? "Приостановить"
-    : !inLibrary && video && (!active || waitingForVideo || mode === "original") ? "Смотреть"
-    : "Воспроизвести";
+  const playLabel = playing ? "Приостановить" : "Воспроизвести";
   const itemLoading = active && loadingLabel;
   const { warmCover } = usePlayerCommands();
   const coverLabel = `${playLabel} ${item.title}`;
@@ -1150,8 +1156,8 @@ const ItemRow = React.memo(function ItemRow({ item, index, catalog, checked, las
     <article className={`collection-entry ${active ? "current" : ""}`}
       key={item.id} aria-current={active || undefined}>
       <div className="entry-select">{inLibrary ? selection : (
-        <button className="icon-button playlist-track-play" type="button" disabled={!available} onClick={activate}
-          aria-label={coverLabel} title={coverLabel}>
+        <button className="icon-button playlist-track-play" type="button" disabled={!available || !!playlistSoundError} onClick={activate}
+          aria-label={coverLabel} title={playlistSoundError ?? coverLabel}>
           {playing ? <Pause size={15} /> : <Play size={15} />}
         </button>
       )}</div>
@@ -1174,7 +1180,7 @@ const ItemRow = React.memo(function ItemRow({ item, index, catalog, checked, las
                 </span>
               );
             })}
-            {!available && item.shared?.available !== false && <span>Нет рабочего источника</span>}
+            {playlistSoundError ? <span>{playlistSoundError}</span> : !available && item.shared?.available !== false && <span>Нет рабочего источника</span>}
           </div>
           {reasons?.[item.id] && (
             <details className="reason-details">
@@ -1433,12 +1439,47 @@ function BatchTags({ ids, close }: { ids: string[]; close: () => void }) {
       <Button className="primary" disabled={preview?.changes.length === 0} busy={busy} onClick={() => void submit()}>{preview ? "Применить" : "Показать изменения"}</Button>
     </div></Modal>;
 }
-function PlaylistsPage({ query, onQuery, onCreate }: {
+function CatalogPlaylistEditor({ id, close }: { id: string; close: () => void }) {
+  const [playlist, setPlaylist] = useState<PlaylistDto>();
+  const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setError("");
+    void api<PlaylistDto>("/playlists/" + encodeURIComponent(id), "GET", undefined, "high", controller.signal)
+      .then(setPlaylist)
+      .catch(failure => { if (!controller.signal.aborted) setError(failure.message); });
+    return () => controller.abort();
+  }, [id, retry]);
+  if (playlist) return <PlaylistEditor playlist={playlist} close={close} onSaved={close} />;
+  return <Modal title="Изменить плейлист" close={close}>
+    {error ? <><ErrorMessage error={error} /><Button onClick={() => setRetry(value => value + 1)}>Повторить</Button></>
+      : <div className="loading-inline" role="status"><LoaderCircle className="spin" size={18} />Загружаем плейлист…</div>}
+  </Modal>;
+}
+
+function PlaylistsPage({ query, onQuery, onCreate, playlistLibrary }: {
+  playlistLibrary: ReturnType<typeof usePlaylistLibrary>;
   query: string;
   onQuery: (query: string) => void;
   onCreate: () => void;
 }) {
   const { overview } = useData();
+  const player = usePlayerCommands();
+  const [edit, setEdit] = useState<{ id: string; trigger: HTMLButtonElement }>();
+  const searchInput = useRef<HTMLInputElement>(null);
+  const restoreFocus = useRef<HTMLButtonElement | undefined>(undefined);
+  function launch(target: PlaylistTarget) { void playlistLibrary.launch(target, player); }
+  function closeEditor() {
+    restoreFocus.current = edit?.trigger;
+    setEdit(undefined);
+  }
+  useLayoutEffect(() => {
+    if (edit || !restoreFocus.current) return;
+    const trigger = restoreFocus.current;
+    restoreFocus.current = undefined;
+    (trigger.isConnected ? trigger : searchInput.current)?.focus({preventScroll: true});
+  }, [edit]);
   const { playlists: savedPlaylists, error: savedError, loading: savedLoading } = useSavedSharedPlaylists();
   const { notes } = useNotes();
   const [share, setShare] = useState<{ id: string; issued: Promise<ShareLinkDto> }>();
@@ -1451,7 +1492,7 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
     <>
       <div className="title-row library-title-row">
         <h1>Плейлисты</h1>
-        <Button className="primary" onClick={onCreate} aria-label="Создать плейлист" title="Создать плейлист">
+        <Button className="primary" onClick={() => { playlistLibrary.cancelPending(); onCreate(); }} aria-label="Создать плейлист" title="Создать плейлист">
           <Plus size={17} />
           <span>Создать плейлист</span>
         </Button>
@@ -1463,7 +1504,7 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
         <label className="search-input">
           <Search size={16} />
           <input
-            aria-label="Поиск плейлистов"
+            ref={searchInput} aria-label="Поиск плейлистов"
             value={query}
             onChange={(e) => onQuery(e.target.value)}
             placeholder="Поиск по названию и заметкам…"
@@ -1472,14 +1513,21 @@ function PlaylistsPage({ query, onQuery, onCreate }: {
       </div>
       <NotesLoadError />
       {savedError && <ErrorMessage error={savedError.message} />}
+      <ErrorMessage error={playlistLibrary.error} />
+      {playlistLibrary.pending && <div className="loading-inline" role="status"><LoaderCircle size={16} className="spin" />
+        Открываем «{playlistLibrary.pending.title}»…</div>}
       <div className="playlist-grid">
         {playlists.map((p) => (
-          <PlaylistCard key={p.id} playlist={p} hasNote={Boolean(noteFor(notes, "playlist", p.id))} onShare={() => setShare({ id: p.id, issued: issueShare("playlist", p.id) })} />
+          <PlaylistCard key={p.id} playlist={p} hasNote={Boolean(noteFor(notes, "playlist", p.id))}
+            onPlay={() => launch({kind: "own", id: p.id, title: p.title})} onEdit={trigger => { playlistLibrary.cancelPending(); setEdit({id: p.id, trigger}); }}
+            onShare={() => { playlistLibrary.cancelPending(); setShare({ id: p.id, issued: issueShare("playlist", p.id) }); }} />
         ))}
         <React.Suspense fallback={null}>
-          {shared.map(playlist => <SavedSharedPlaylistCard key={playlist.id} playlist={playlist} />)}
+          {shared.map(playlist => <SavedSharedPlaylistCard key={playlist.id} playlist={playlist}
+            onPlay={() => launch({kind: "saved", id: playlist.id, title: playlist.title})} />)}
         </React.Suspense>
       </div>
+      {edit && <CatalogPlaylistEditor key={edit.id} id={edit.id} close={closeEditor} />}
       {share && <React.Suspense fallback={
         <Modal title="Поделиться" close={() => setShare(undefined)}>
           <div className="loading-inline" role="status"><LoaderCircle className="spin" size={18} />Создаём ссылку…</div>
@@ -1966,7 +2014,7 @@ function PlaylistEditor({
     ? compositionDelta(before, preview.items) : undefined, [changed, before, preview]);
 
   useEffect(() => {
-    // The cover opens the editor before the detail page loads its rows.
+    // The catalog editor opens without loading the detail page.
     // A quick rule change can also precede the first unmodified preview.
     if (!changed || before || !playlistId || !savedKey) return;
     const controller = new AbortController();

@@ -25,10 +25,11 @@ export function issueShare(kind: ShareKind, targetId: string) {
   return request;
 }
 
-export function orderedSharedItems(view: { items: ItemDto[]; positions?: (string | null)[] }) {
-  if (!view.positions) return view.items;
+export function orderedSharedItems(view: { items: ItemDto[]; positions?: (string | null)[] }, snapshot?: (string | null)[]) {
   const available = new Map(view.items.map(item => [item.id, item]));
-  return view.positions.map(id => id === null ? null : available.get(id) ?? null);
+  const liveOrder = view.positions ?? view.items.map(item => item.id);
+  const allowed = new Set(liveOrder);
+  return (snapshot ?? liveOrder).map(id => id !== null && allowed.has(id) ? available.get(id) ?? null : null);
 }
 
 export function formatShareExpiry(expiresAt: string | null) {
