@@ -2,10 +2,11 @@
 id: 21
 title: Быстрый старт, плавное видео и открытие плейлистов
 track: product
-stage: review
+stage: merged
 branch: codex/21-media-playlist-performance
-pr: null
+pr: https://github.com/andrey03410/hibiki/pull/31
 started: 2026-11-26
+merged: 2026-11-26
 ---
 
 # 21. Быстрый старт, плавное видео и открытие плейлистов
@@ -15,7 +16,7 @@ started: 2026-11-26
 - [x] [Техника](tech.md)
 - [x] [План](plan.md)
 - [x] [Проверка](verify.md)
-- [ ] Вливание и выкладка
+- [x] Автономная приёмка и [вливание через PR №31](https://github.com/andrey03410/hibiki/pull/31)
 
 Поручение владельца от 26 ноября 2026 года
 
