@@ -2,9 +2,9 @@
 id: 20
 title: Запуск плейлистов и непрерывное воспроизведение
 track: product
-stage: build
+stage: review
 branch: codex/20-playlist-player-flow
-pr:
+pr: https://github.com/andrey03410/hibiki/pull/30
 started: 2026-11-26
 merged:
 ---
