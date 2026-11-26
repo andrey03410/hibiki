@@ -2,10 +2,10 @@ import { lockStorage, discardReservation } from "./storage-writer";
 import { ownerAccess, checkItems, moveReservedFile, reserve, release, meterStorage, type Access } from "./kaname";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, constants } from "node:fs";
-import { copyFile, lstat, mkdir, realpath, rename, rm } from "node:fs/promises";
+import { copyFile, lstat, mkdir, open, realpath, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
-import { Transform, type Readable } from "node:stream";
+import { Transform, Readable } from "node:stream";
 import { ZipFile } from "yazl";
 import * as yauzl from "yauzl";
 import { z } from "zod";
@@ -22,7 +22,11 @@ import {
 import { usesPrivateHistory } from "@hibiki/core";
 import type { Db } from "./db.js";
 import { tagDto } from "./taxonomy";
-import { inspectFile } from "./media.js";
+import { inspectFile, probeMediaStreams } from "./media.js";
+import { readOnlyMediaFlags } from "./media-playback";
+import { readAudioRange, type AudioView } from "./mp4-audio";
+import { inspectVisualPath } from "./visual-media";
+import { cleanupPreviousVisual } from "./visuals";
 
 const id = z.string().min(1).max(200);
 const title = z.string().max(2000);
@@ -103,7 +107,7 @@ const fileSchema = z
     included: z.boolean(),
   })
   .strict();
-const manifestSchema = z
+const manifestV1 = z
   .object({
     format: z.literal("hibiki"),
     version: z.literal(1),
@@ -171,6 +175,22 @@ const manifestSchema = z
     settings: settingsSchema,
   })
   .strict();
+const rolesSchema = z.object({
+  sound: z.object({ sourceId: id, fileId: id.optional() }).strict(),
+  visual: z.object({ trackId: id }).strict(),
+}).strict();
+const trackSchema = z.object({
+  id, signature: z.string().regex(/^[a-f0-9]{64}$/), fileId: id,
+  streamIndex: z.number().int().nonnegative().nullable(), duration: z.number().positive(),
+}).strict();
+const manifestV2 = manifestV1.extend({
+  version: z.literal(2),
+  items: z.array(manifestV1.shape.items.element.extend({ roles: rolesSchema.optional() })).max(100000),
+  visualTracks: z.array(trackSchema).max(100000),
+});
+const manifestSchema = z.discriminatedUnion("version", [manifestV1, manifestV2]);
+type PortableTrack = z.infer<typeof trackSchema>;
+type PortableRoles = z.infer<typeof rolesSchema>;
 export type PortableManifest = z.infer<typeof manifestSchema>;
 export function archiveRequiresBrowser(manifest: PortableManifest): boolean {
   return (
@@ -192,6 +212,7 @@ export interface ImportPreview {
   counts: { items: number; tags: number; playlists: number; files: number };
   missingFiles: string[];
   issues: string[];
+  missingRoles?: { itemId: string; role: "sound" | "visual" }[];
   duplicates?: { items: number; tags: number; playlists: number };
 }
 export interface CheckedArchive {
@@ -280,6 +301,26 @@ export async function storagePath(
   return actual;
 }
 
+async function* visualBytes(path: string, view: AudioView, signal?: AbortSignal, expectedHash?: string) {
+  const handle = await open(path, readOnlyMediaFlags);
+  const digest = expectedHash ? createHash("sha256") : undefined;
+  try {
+    for await (const chunk of readAudioRange(handle, view, 0, view.bytes - 1)) {
+      signal?.throwIfAborted();
+      digest?.update(chunk);
+      yield chunk;
+    }
+    if (digest && digest.digest("hex") !== expectedHash) throw new Error("Видеоряд изменился во время экспорта");
+  } finally { await handle.close(); }
+}
+
+async function verifyVisual(path: string, track: PortableTrack, signal?: AbortSignal) {
+  const checked = await inspectVisualPath(path, track.streamIndex ?? undefined, signal);
+  if (checked.signature !== track.signature || Math.abs(checked.duration - track.duration) > 0.01)
+    throw new Error("Подпись или длительность видеоряда не совпадает с манифестом");
+  return checked;
+}
+
 export async function exportLibrary(
   db: Db,
   ownerId: string,
@@ -297,7 +338,7 @@ export async function exportLibrary(
   const snapshot = await db.$transaction(async (tx) => ({
     items: await tx.item.findMany({
       where: { ownerId },
-      include: { sources: true, tags: true },
+      include: { sources: true, tags: true, visual: { include: { visualTrack: true } } },
     }),
     tags: await tx.tag.findMany({ where: { ownerId } }),
     playlists: await tx.playlist.findMany({ where: { ownerId } }),
@@ -330,7 +371,18 @@ export async function exportLibrary(
       i.sources.flatMap((s) => (s.fileId ? [s.fileId] : [])),
     ),
   );
+  const originals = new Set(usedFiles);
+  const tracks = new Map(snapshot.items.flatMap(item => {
+    const pair = item.visual;
+    if (!pair) return [];
+    if (pair.visualTrack.ownerId !== ownerId || !item.sources.some(source => source.id === pair.soundSourceId && source.ownerId === ownerId))
+      throw new Error("Дорожки принадлежат другой записи или владельцу");
+    if (pair.soundFileId) usedFiles.add(pair.soundFileId);
+    if (pair.visualTrack.streamIndex === null || originals.has(pair.visualTrack.fileId)) usedFiles.add(pair.visualTrack.fileId);
+    return [[pair.visualTrack.id, pair.visualTrack] as const];
+  }));
   const entries = new Map<string, string>();
+  const videoEntries = new Map<string, { actual: string; view: AudioView }>();
   const missingFiles: string[] = [];
   const files: PortableManifest["files"] = [];
   for (const file of snapshot.files.filter((f) => usedFiles.has(f.id))) {
@@ -358,6 +410,43 @@ export async function exportLibrary(
       included,
     });
   }
+  const portableTracks: PortableTrack[] = [];
+  const byHash = new Map(files.map(file => [file.hash, file]));
+  const ownedFiles = new Map(snapshot.files.map(file => [file.id, file]));
+  for (const track of tracks.values()) {
+    const signature = track.signature.split(":").at(-1)!;
+    const file = ownedFiles.get(track.fileId);
+    if (!file) throw new Error("Файл видеоряда недоступен владельцу");
+    if (track.streamIndex === null || originals.has(file.id)) {
+      portableTracks.push({ id: track.id, signature, fileId: file.id, streamIndex: track.streamIndex, duration: track.duration });
+      continue;
+    }
+    // A virtual track whose donor is absent must never add that donor's original bytes to the archive.
+    const fileId = "video-" + createHash("sha256").update(track.id).digest("hex");
+    let hash = createHash("sha256").update("missing-video:" + signature).digest("hex");
+    let bytes = 0, included = false;
+    const actual = await storagePath(storageRoot, file.path).catch(error => {
+      if (error.code !== "ENOENT") throw error;
+      return null;
+    });
+    if (actual) {
+      const verified = await verifyVisual(actual, { id: track.id, signature, fileId, duration: track.duration, streamIndex: track.streamIndex }, options.signal);
+      const digest = createHash("sha256");
+      for await (const chunk of visualBytes(actual, verified.view, options.signal)) digest.update(chunk);
+      hash = digest.digest("hex");
+      bytes = verified.view.bytes;
+      included = options.includeFiles;
+      if (included) videoEntries.set(fileId, { actual, view: verified.view });
+    } else if (options.includeFiles) missingFiles.push(fileId);
+    const existing = byHash.get(hash);
+    if (!existing) {
+      const selected = fileSchema.parse({ id: fileId, hash, bytes, included, path: "files/" + fileId + ".mp4",
+        mime: "video/mp4", kind: "video", duration: track.duration });
+      files.push(selected);
+      byHash.set(hash, selected);
+    }
+    portableTracks.push({ id: track.id, signature, fileId: existing?.id ?? fileId, streamIndex: null, duration: track.duration });
+  }
   const settings = safeSettings(
     snapshot.setting ? JSON.parse(snapshot.setting.json) : {},
   );
@@ -373,9 +462,9 @@ export async function exportLibrary(
       ),
     );
   }
-  const manifest: PortableManifest = {
+  const manifest = validateManifest({
     format: "hibiki",
-    version: 1,
+    ...(tracks.size ? { version: 2, visualTracks: portableTracks } : { version: 1 }),
     origin: createHash("sha256").update(ownerId).digest("hex"),
     createdAt: new Date().toISOString(),
     items: snapshot.items.map((item) => ({
@@ -401,6 +490,10 @@ export async function exportLibrary(
       ...(history.has(item.id)
         ? { listeningSummary: history.get(item.id)! }
         : {}),
+      ...(item.visual && { roles: {
+        sound: { sourceId: item.visual.soundSourceId, ...(item.visual.soundFileId && { fileId: item.visual.soundFileId }) },
+        visual: { trackId: item.visual.visualTrackId },
+      } }),
       sources: item.sources.map((s) => ({
         id: s.id,
         provider: s.provider as "youtube" | "local",
@@ -433,8 +526,7 @@ export async function exportLibrary(
     })),
     files,
     settings,
-  };
-  validateManifest(manifest);
+  });
   const json = Buffer.from(JSON.stringify(manifest));
   if (json.length > MAX_MANIFEST)
     throw new Error("Манифест библиотеки превышает лимит 16 MiB");
@@ -443,9 +535,21 @@ export async function exportLibrary(
   try {
     const archive = new ZipFile();
     archive.addBuffer(json, "manifest.json");
-    for (const file of files)
-      if (file.included)
-        archive.addFile(entries.get(file.id)!, file.path, { compress: false });
+    const output = archive.outputStream as Readable;
+    archive.on("error", error => output.destroy(error));
+    const openStreams = new Set<Readable>();
+    output.once("close", () => { for (const stream of openStreams) stream.destroy(); });
+    for (const file of files) {
+      if (!file.included) continue;
+      const entry = videoEntries.get(file.id);
+      if (entry) {
+        const stream = Readable.from(visualBytes(entry.actual, entry.view, options.signal, file.hash), { objectMode: false });
+        stream.on("error", error => output.destroy(error));
+        openStreams.add(stream);
+        stream.once("close", () => openStreams.delete(stream));
+        archive.addReadStream(stream, file.path, { compress: false, size: file.bytes });
+      } else archive.addFile(entries.get(file.id)!, file.path, { compress: false });
+    }
     const complete = pipeline(
       archive.outputStream,
       meterStorage(db, ownerId, options.storage?.access ?? null, options.storage?.id ?? "", [temporary, destination]),
@@ -542,6 +646,31 @@ function validateManifest(input: unknown): PortableManifest {
       if (source.provider === "local" && !source.fileId)
         throw new Error("Локальный источник без файла");
     }
+  }
+  if (manifest.version === 2) {
+    const trackIds = unique(manifest.visualTracks.map(track => track.id), "visual tracks");
+    unique(manifest.visualTracks.map(track => track.signature), "visual signatures");
+    const media = new Map(manifest.files.map(file => [file.id, file]));
+    const used = new Set<string>();
+    const originals = new Set(manifest.items.flatMap(item => item.sources.flatMap(source => source.fileId ? [source.fileId] : [])));
+    const usedFiles = new Set(originals);
+    for (const track of manifest.visualTracks) {
+      if (track.streamIndex !== null && !originals.has(track.fileId)) throw new Error("Виртуальный видеоряд ссылается на отсутствующую запись донора");
+      usedFiles.add(track.fileId);
+      if (media.get(track.fileId)?.kind !== "video") throw new Error("Видеоряд ссылается на неизвестный видеофайл");
+    }
+    for (const { roles, sources } of manifest.items) {
+      if (!roles) continue;
+      requireRef(trackIds, roles.visual.trackId);
+      used.add(roles.visual.trackId);
+      if (!sources.find(source => source.id === roles.sound.sourceId)?.fileId)
+        throw new Error("Звуковой источник не принадлежит записи или не имеет файла");
+      if (roles.sound.fileId) usedFiles.add(roles.sound.fileId);
+      if (roles.sound.fileId && media.get(roles.sound.fileId)?.kind !== "audio")
+        throw new Error("Звуковая дорожка ссылается на неизвестный аудиофайл");
+    }
+    if (used.size !== trackIds.size) throw new Error("В архиве есть видеоряд без записи");
+    if (usedFiles.size !== media.size) throw new Error("В архиве есть файл без источника или роли");
   }
   const dependencies = new Map<string, string[]>();
   const visitRule = (rule: Rule, refs: string[]) => {
@@ -743,7 +872,7 @@ export async function inspectArchive(
         throw new Error(`В архиве отсутствует заявленный файл: ${file.id}`);
       if (actual.hash !== file.hash || actual.bytes !== file.bytes)
         throw new Error(`Не совпадает хэш или размер файла: ${file.id}`);
-      const media = await inspectFile(actual.path, { signal });
+      const media = await inspectFile(actual.path, { signal, standalone: true });
       signal?.throwIfAborted();
       if (media.kind !== file.kind || media.mime !== file.mime)
         throw new Error(`Тип медиа не совпадает с манифестом: ${file.id}`);
@@ -756,6 +885,26 @@ export async function inspectArchive(
               source.status = "unavailable";
               source.reason = "unsupported_codec";
             }
+    }
+    const missingRoles: NonNullable<ImportPreview["missingRoles"]> = [];
+    if (manifest.version === 2) {
+      const resources = new Map(manifest.files.map(f => [f.id, files.get(f.path)]));
+      const tracks = new Map(manifest.visualTracks.map(t => [t.id, t]));
+      for (const track of tracks.values()) {
+        const actual = resources.get(track.fileId);
+        if (actual) {
+          if (track.streamIndex === null && actual.hasAudio) throw new Error("Файл отдельного видеоряда содержит чужой звук");
+          await verifyVisual(actual.path, track, signal);
+        }
+      }
+      for (const { id, roles, sources } of manifest.items) {
+        if (!roles) continue;
+        const original = resources.get(sources.find(s => s.id === roles.sound.sourceId)!.fileId!);
+        const sound = roles.sound.fileId ? resources.get(roles.sound.fileId) : original;
+        if (!original || !sound) missingRoles.push({ itemId: id, role: "sound" });
+        if (original?.hasAudio === false || sound?.hasAudio === false) throw new Error("В звуковом источнике нет аудио");
+        if (!resources.get(tracks.get(roles.visual.trackId)!.fileId)) missingRoles.push({ itemId: id, role: "visual" });
+      }
     }
     return {
       manifest,
@@ -770,9 +919,11 @@ export async function inspectArchive(
           files: files.size,
         },
         missingFiles,
+        ...(missingRoles.length && { missingRoles }),
         issues: missingFiles.length
           ? [
               "Часть локальных файлов не включена; их источники будут отмечены недоступными",
+              ...(missingRoles.length ? ["Недоступно звуковых дорожек: " + missingRoles.filter(r => r.role === "sound").length + ", видеорядов: " + missingRoles.filter(r => r.role === "visual").length] : []),
             ]
           : [],
       },
@@ -1057,6 +1208,42 @@ export async function applyArchive(
       }
       prepared.set(file.hash, plan);
     }
+    const rolesByItem = new Map<string, PortableRoles>();
+    const verifiedTracks = new Map<string, { track: PortableTrack; identity: string; streamIndex: number | null }>();
+    if (manifest.version === 2) {
+      const actualResource = (fileId: string) => {
+        const plan = prepared.get(manifestFiles.get(fileId)!.hash)!;
+        return plan.usable ? storagePath(storageRoot, plan.relative) : null;
+      };
+      for (const track of manifest.visualTracks) {
+        const actual = await actualResource(track.fileId);
+        // A manifest with no bytes may preserve identity but cannot populate the trusted signature index.
+        if (actual && track.streamIndex === null && (await probeMediaStreams(actual, signal, true)).audio)
+          throw new Error("Файл отдельного видеоряда содержит чужой звук");
+        const verified = actual ? await verifyVisual(actual, track, signal) : null;
+        const pendingId = mappedId(ownerId, manifest.origin, "visual", track.id);
+        verifiedTracks.set(track.id, { track, identity: verified ? track.signature : "pending:" + pendingId + ":" + track.signature,
+          streamIndex: verified?.streamIndex ?? track.streamIndex });
+      }
+      const sounds = new Map<string, Awaited<ReturnType<typeof inspectFile>>>();
+      for (const item of manifest.items) {
+        const roles = item.roles;
+        if (!roles) continue;
+        rolesByItem.set(item.id, roles);
+        const original = item.sources.find(s => s.id === roles.sound.sourceId)!.fileId!;
+        for (const fileId of new Set([original, roles.sound.fileId ?? original])) {
+          const actual = await actualResource(fileId);
+          if (!actual) continue;
+          let info = sounds.get(fileId);
+          if (!info) {
+            info = await inspectFile(actual, { signal, standalone: true });
+            sounds.set(fileId, info);
+          }
+          if (!info.hasAudio || (fileId === roles.sound.fileId && info.kind !== "audio"))
+            throw new Error("Файл звуковой роли не содержит подходящую аудиодорожку");
+        }
+      }
+    }
     const usedPaths = new Set<string>();
     const result = await db.$transaction(
       async (tx) => {
@@ -1274,6 +1461,7 @@ export async function applyArchive(
               create: { itemId: newId, tagId: maps.tags.get(tagId)! },
               update: {},
             });
+          const sourceIds = new Map<string, string>();
           for (const source of item.sources) {
             const fileId = source.fileId
               ? fileIds.get(source.fileId)
@@ -1353,6 +1541,7 @@ export async function applyArchive(
                 },
                 data: { note: source.note },
               });
+            sourceIds.set(source.id, (previousImport ?? existing)?.id ?? sourceId);
             if (source.id === item.preferredSourceId)
               await tx.item.updateMany({
                 where: { id: newId, ownerId, preferredSourceId: null },
@@ -1361,6 +1550,27 @@ export async function applyArchive(
                     (previousImport ?? existing)?.id ?? sourceId,
                 },
               });
+          }
+          const roles = rolesByItem.get(item.id);
+          if (roles) {
+            const { track, identity, streamIndex } = verifiedTracks.get(roles.visual.trackId)!;
+            const current = await tx.item.findUniqueOrThrow({ where: { id: newId },
+              select: { visualRevision: true, visual: { include: { visualTrack: true } } } });
+            const old = current.visual;
+            const pendingIdentity = "pending:" + mappedId(ownerId, manifest.origin, "visual", track.id) + ":" + track.signature;
+            // A repeat import can hydrate its own missing role. It cannot undo a subsequent edit or clear.
+            if ((!old && !current.visualRevision) || (old?.visualTrack.signature === pendingIdentity && identity === track.signature)) {
+              const visual = await tx.visualTrack.upsert({
+                where: { ownerId_signature: { ownerId, signature: identity } },
+                create: { id: randomUUID(), ownerId, signature: identity, fileId: fileIds.get(track.fileId)!, duration: track.duration, streamIndex },
+                update: {},
+              });
+              const data = { soundSourceId: sourceIds.get(roles.sound.sourceId)!, visualTrackId: visual.id,
+                soundFileId: roles.sound.fileId ? fileIds.get(roles.sound.fileId)! : null };
+              await tx.itemVisual.upsert({ where: { itemId: newId }, create: { itemId: newId, ...data }, update: data });
+              await tx.item.update({ where: { id: newId }, data: { visualRevision: { increment: 1 } } });
+              await cleanupPreviousVisual(tx, ownerId, old);
+            }
           }
         }
         for (const playlist of manifest.playlists) {
