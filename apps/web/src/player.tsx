@@ -41,6 +41,9 @@ import { fetchItems } from "./library-pages";
 import { completeLibraryOrder, LibraryQueueLoad, QueueCatalog, QueueIntents } from "./queue-catalog";
 import { CompactPlaybackQueue, QueueRows, playbackBuffer, PlaybackSeekBar, PlaybackVolume, type BufferedRanges } from "./PlaybackControls";
 import { attachVideoStream, videoFile } from "./video-stream";
+import { VideoDelivery, relayVideoFile, type VideoMode } from "./video-delivery";
+import { intersectTimes } from "./video-index";
+import { playbackMark } from "./playback-debug";
 import { AudioDelivery, ownedAudioFile } from "./audio-delivery";
 import { attachM4aSource, canUseM4aSource } from "./audio-mp4";
 import { audioRelayReady, listenForAudioRanges, subscribeAudioRelay } from "./audio-relay";
@@ -50,6 +53,7 @@ import { useListeningAttempt } from "./listening-client";
 import "./queue.css";
 import {
   playbackSources,
+  playableVideoSource,
   playbackVolume,
   canStartSelectedItem,
   sourceLoadPosition,
@@ -536,8 +540,49 @@ export function PlayerProvider({
     setRangeOnlyToken(audioToken);
     return true;
   }
-  useLayoutEffect(() => () => delivery.clear(), [delivery]);
-  useLayoutEffect(() => listenForAudioRanges(delivery), [delivery, audioToken]);
+  // The original video of a recording with sound is loaded by the tab as well.
+  // Its native decoder reads the bytes through the same relay as the sound.
+  const videoDelivery = useMemo(() => new VideoDelivery(), [userId]);
+  const relayVideo = useMemo(() => presentationKind === "audio" && !current?.visual ? relayVideoFile(videoSource, current?.duration) : undefined,
+    [presentationKind, current?.visual, videoSource?.streamUrl, videoSource?.shared, videoSource?.bytes, videoSource?.mime,
+      videoSource?.playbackHints?.audioStart, videoSource?.playbackHints?.tailStart, current?.duration]);
+  const videoKey = useMemo(() => relayVideo ? crypto.randomUUID?.() : undefined,
+    [videoDelivery, sourceKey, relayVideo?.url, relayVideo?.size]);
+  const [directVideoKey, setDirectVideoKey] = useState<string>();
+  const videoToken = relayReady && videoKey && videoKey !== directVideoKey ? videoKey : undefined;
+  const videoCoverage = useSyncExternalStore(videoDelivery.subscribe, videoDelivery.snapshot);
+  const [videoIntent, setVideoIntent] = useState(false);
+  useLayoutEffect(() => () => { delivery.clear(); videoDelivery.clear(); }, [delivery, videoDelivery]);
+  useLayoutEffect(() => listenForAudioRanges(delivery, (token, range) => videoDelivery.response(token, range)),
+    [delivery, videoDelivery, audioToken]);
+  useLayoutEffect(() => {
+    videoDelivery.select(videoToken ? relayVideo : undefined, videoToken ?? "", () => {
+      // The direct URL reports a revoked grant through the ordinary picture failure.
+      if (videoToken) setDirectVideoKey(videoToken);
+    });
+  }, [videoDelivery, videoToken]);
+  useEffect(() => { setVideoIntent(false); }, [sourceKey]);
+  // Index only while listening, the key frame window on intent, the whole file when watched.
+  const videoMode: VideoMode = onPlayerScreen && sceneAllowed ? "watch" : videoIntent ? "window" : "index";
+  // The sound finishes loading first; then the watched video fills to the end.
+  const videoFill = !audioToken || !!coverage?.complete;
+  useEffect(() => {
+    videoDelivery.configure(videoMode, native.current?.currentTime || live.current.position, videoFill);
+  }, [videoDelivery, videoMode, videoFill, videoToken]);
+  useEffect(() => {
+    if (!videoToken) return;
+    // Media events do not bubble; a capturing listener sees the leader before the picture does.
+    const follow = (event: Event) => {
+      const element = native.current;
+      if (element && event.target === element) videoDelivery.follow(element.currentTime);
+    };
+    document.addEventListener("timeupdate", follow, true);
+    document.addEventListener("seeking", follow, true);
+    return () => {
+      document.removeEventListener("timeupdate", follow, true);
+      document.removeEventListener("seeking", follow, true);
+    };
+  }, [videoDelivery, videoToken]);
   useLayoutEffect(() => {
     delivery.select(audioToken ? file : undefined, audioToken ?? "", reason => {
       const element = native.current;
@@ -581,7 +626,6 @@ export function PlayerProvider({
     }
   }, [delivery, playing, audioToken, m4aEnabled]);
   const [nativeVideo, setNativeVideo] = useState<{ key: string; position: number }>();
-  const waitingPicture = useRef<HTMLMediaElement | null>(null);
   const retiredVideos = useRef(new WeakSet<HTMLMediaElement>());
   const streamedVideo = useMemo(() => presentationKind === "video" && sceneAllowed && !waitingForVideo && nativeVideo?.key !== sourceKey &&
     typeof MediaSource !== "undefined" && navigator.vendor === "Google Inc." ? videoFile(source, current?.duration) : undefined,
@@ -634,6 +678,7 @@ export function PlayerProvider({
         const item = id && id !== current?.id ? itemsById.get(id) : undefined;
         const sound = item && playbackSources(item, "audio")[0];
         const next = item && sound ? ownedAudioFile(sound, item.duration) : undefined;
+        videoDelivery.setNext(item && sound && !item.visual ? relayVideoFile(playableVideoSource(item), item.duration) : undefined);
         return delivery.prepare(next);
       }).catch(() => { if (active) void delivery.prepare(); });
     return () => { active = false; };
@@ -695,19 +740,7 @@ export function PlayerProvider({
       if (typeof position === "number" && position > 0) return position;
     }
   }
-  function holdForPicture(element: HTMLMediaElement, hold: boolean) {
-    if (hold && playingRef.current && currentNative(element)) {
-      waitingPicture.current = element;
-      element.pause();
-      feedback.wait();
-      attempt.paused();
-    } else if (!hold && waitingPicture.current === element) {
-      waitingPicture.current = null;
-      if (currentNative(element) && playingRef.current && element.isConnected) playNative(element);
-    }
-  }
   function playNative(element: HTMLMediaElement) {
-    if (waitingPicture.current === element) return;
     element.play().catch((reason: unknown) => {
       if (!currentNative(element) || !playingRef.current) return;
       if (reason instanceof DOMException && reason.name === "AbortError") return;
@@ -1253,7 +1286,6 @@ export function PlayerProvider({
       if (position !== undefined) confirmPosition(position, event.currentTarget.playbackRate);
       measureProgress();
       attempt.paused();
-      if (waitingPicture.current === event.currentTarget) return;
       playIntent(false);
     },
     onEnded(event: SyntheticEvent<HTMLMediaElement>) {
@@ -1327,6 +1359,7 @@ export function PlayerProvider({
   }
   function watchCurrent() {
     if (!current || !(current.visual || videoSource)) return;
+    playbackMark("video-open", { position: native.current?.currentTime, indexed: !!videoDelivery.snapshot()?.indexed });
     if (waitingForVideo) openAndPlay(current.id);
     else navigate("/player");
   }
@@ -1702,11 +1735,16 @@ export function PlayerProvider({
     return () => window.removeEventListener("keydown", keydown);
   }, [current?.id, playing, duration, settings.volume, sourceKey, viewportFullscreen, onPlayerScreen]);
   const total = duration || current?.duration || 0;
+  // While the original video is watched, a moment is loaded when both sound and picture are.
+  function watchedVideoBuffer(sound: BufferedRanges): BufferedRanges {
+    if (!onPlayerScreen || !videoToken || !videoCoverage?.indexed) return sound;
+    return intersectTimes(sound, videoCoverage.playable);
+  }
   const seekBar = {
     position: settings.position,
     duration: total,
     moving: playing && phase === "playing",
-    buffered: playbackBuffer(buffer?.source === feedback ? buffer.ranges : [], audioToken ? coverage : undefined, total),
+    buffered: watchedVideoBuffer(playbackBuffer(buffer?.source === feedback ? buffer.ranges : [], audioToken ? coverage : undefined, total)),
     clock,
     onSeek: seekFromSlider,
     onScrubStart: () => { scrub.current ??= {}; },
@@ -1716,13 +1754,8 @@ export function PlayerProvider({
   const showArtwork = artwork && failedArtwork !== artwork;
   const watchClip = source && current?.visual;
   const companion = source && presentationKind === "audio" && !watchClip ? videoSource : undefined;
-  // Chromium can range-seek an owned MP4 directly. A second MSE demuxer
-  // competes with the ongoing audio and re-fetches interleaved keyframes.
-  // Shared video keeps the range loader that periodically rechecks its grant.
-  const companionFile = useMemo(() => companion?.shared && onPlayerScreen && sceneAllowed &&
-    typeof MediaSource !== "undefined" && navigator.vendor === "Google Inc." ? videoFile(companion, current?.duration) : undefined,
-    [onPlayerScreen, sceneAllowed, companion?.streamUrl, companion?.shared, companion?.bytes, companion?.mime,
-      companion?.playbackHints?.audioStart, companion?.playbackHints?.tailStart, current?.duration]);
+  const companionRelay = companion && videoToken && relayVideo?.url === companion.streamUrl
+    ? `${companion.streamUrl}?hibiki-audio=${videoToken}` : undefined;
   const companionYoutubeId = companion?.provider === "youtube" ? youtubeVideoId(companion) : undefined;
   const picturesExhausted = !companion && !!rejected?.size && presentationKind === "audio" && !watchClip;
   function recheckPictureGrant() {
@@ -1955,8 +1988,10 @@ export function PlayerProvider({
                         follow={native} engine={pictureYoutube} onError={failPicture} />
                     </div>
                   ) : companion?.streamUrl ? (
-                    <ClipVideo key={JSON.stringify([relayKey ?? sourceKey, companion.id, companion.streamUrl])} url={companion.streamUrl} loop={false}
-                      audio={native} file={companionFile} running={playing} holdSound={holdForPicture} onFailure={failPicture}
+                    <ClipVideo key={JSON.stringify([relayKey ?? sourceKey, companion.id, companion.streamUrl])} url={companionRelay ?? companion.streamUrl}
+                      fallbackUrl={companion.streamUrl} poster={showArtwork ? artwork : undefined} loop={false}
+                      onDirect={() => { if (videoToken) setDirectVideoKey(videoToken); }}
+                      audio={native} running={playing} onFailure={failPicture}
                       onClick={event => videoClick.click(event.detail, toggle, () => { void toggleFullscreen(); })} />
                   ) : (
                     <div className={`audio-scene art-${current.title.length % 6}`}
@@ -2116,7 +2151,11 @@ export function PlayerProvider({
           <div className="mini-player-side">
             <span>{formatDuration(settings.position)} / {formatDuration(total)}</span>
             {(current.visual || videoSource) && (
-              <button type="button" className="icon-button" aria-label={current.visual ? "Смотреть клип" : "Открыть видео"} title={current.visual ? "Смотреть клип" : "Открыть видео"} onClick={watchCurrent}>
+              <button type="button" className="icon-button" aria-label={current.visual ? "Смотреть клип" : "Открыть видео"} title={current.visual ? "Смотреть клип" : "Открыть видео"} onClick={watchCurrent}
+                onPointerEnter={event => { if (event.pointerType === "mouse") setVideoIntent(true); }}
+                onPointerDown={() => setVideoIntent(true)}
+                onPointerLeave={event => { if (!event.currentTarget.matches(":focus-visible")) setVideoIntent(false); }}
+                onFocus={() => setVideoIntent(true)} onBlur={() => setVideoIntent(false)}>
                 <Video size={18} aria-hidden="true" />
               </button>
             )}
