@@ -4,7 +4,7 @@ title: Редизайн интерфейса «Тихий звук»
 track: product
 stage: review
 branch: codex/23-interface-redesign
-pr:
+pr: https://github.com/andrey03410/hibiki/pull/36
 started: 2026-11-27
 merged:
 ---
