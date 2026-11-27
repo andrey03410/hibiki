@@ -206,6 +206,13 @@ export const librarySearchSchema = z.object({
   kind: z.enum(["", "audio", "video"]).default(""),
   tagIds: z.array(z.string().min(1).max(256)).default([]),
   tagMode: z.enum(["and", "or"]).optional(),
+  // Site filters: sets are combined with AND; a set matches any of its tags, or
+  // all of them with `all`. When present, `tagIds`/`tagMode` are ignored.
+  tagSets: z.array(z.object({
+    group: tagGroupSchema,
+    ids: z.array(z.string().min(1).max(256)).min(1).max(1000),
+    all: z.boolean().optional(),
+  })).max(5).optional(),
   performanceFilter: z.enum(["", "ost", "male", "female", "vocal"]).optional(),
   needsClassification: z.boolean().optional(),
   missingGroup: missingGroupSchema.optional(),
