@@ -8,6 +8,7 @@ const INDEX_LIMIT = 8 * MiB;
 // The largest library video is 205 MB. Bigger files keep the part around the playhead.
 export const VIDEO_BUDGET = 256 * MiB;
 const AROUND = 10; // Seconds kept ready on both sides of the playhead.
+const PROBE = 256 * 1024; // Media bytes read past a far decoder request.
 
 type ReadFile = (url: string, init: RequestInit) => Promise<Response>;
 export type VideoFile = { url: string; size: number; duration: number; indexEnd: number; tailStart?: number; shared?: boolean };
@@ -171,7 +172,7 @@ export class VideoBytes {
     }
   }
   private keepRanges(): Interval[] {
-    const keep: Interval[] = [[0, this.file.indexEnd]];
+    const keep: Interval[] = [[0, Math.min(this.file.size, this.file.indexEnd + PROBE)]];
     if (this.file.tailStart !== undefined) keep.push([this.file.tailStart, this.file.size]);
     const window = this.index && windowBytes(this.index, this.position - AROUND, this.position + AROUND);
     if (window) keep.splice(1, 0, [window[0], window[1]]);
@@ -229,16 +230,17 @@ export class VideoBytes {
     const active = this.mode !== "index";
     const head = this.urgentWindow();
     const window = active ? this.around(this.position - AROUND, this.position + AROUND) : undefined;
-    const pending = [...this.demands.values()].filter(({ at }) => !this.rangeAt(at)).reverse();
-    const windowGap = head && (this.gap(head[0], head[1]) ?? this.gap(window![0], window![1]));
-    // A demand far from the playhead is usually a read that the seek has already
-    // superseded, such as the start of the file after the index. The window goes first.
-    const demand = pending.find(({ at }) => !windowGap || !window || (at >= window[0] && at < window[1]));
+    // The decoder waits for these bytes now. Before its metadata event a native player
+    // probes the first media samples, so the probe never waits. A read elsewhere is
+    // usually one the seek has superseded: it waits until the seconds ahead are loaded.
+    const headGap = head && this.gap(head[0], head[1]);
+    const probeEnd = this.file.indexEnd + PROBE;
+    const near = (at: number) => !!window && at >= window[0] && at < window[1];
+    const demand = [...this.demands.values()].reverse().find(({ at }) =>
+      !this.rangeAt(at) && (at < probeEnd || near(at) || !headGap));
     if (demand) {
-      // Stream on from a read near the playhead. A stale read elsewhere gets a bounded range.
-      const near = window && demand.at >= window[0] && demand.at < window[1];
       // The paced fill, not a decoder read, continues past the window.
-      const limit = near ? window[1] : Math.min(size, demand.at + 2 * MiB);
+      const limit = near(demand.at) ? window![1] : Math.min(size, demand.at < probeEnd ? probeEnd : demand.at + PROBE);
       const gap = this.gap(demand.at, demand.at < this.file.indexEnd ? this.file.indexEnd : limit);
       if (gap) return { start: gap[0], end: gap[1], kind: "demand", priority: "high", paced: false };
     }
@@ -246,7 +248,17 @@ export class VideoBytes {
       const gap = this.indexGaps();
       return gap && { start: gap[0], end: gap[1], kind: "index", priority: active ? "high" : "low", paced: false };
     }
-    if (windowGap) return { start: windowGap[0], end: windowGap[1], kind: "window", priority: "high", paced: false };
+    if (head && window) {
+      const ahead = headGap;
+      if (ahead) {
+        // Load ahead in steps of the whole window, not a request per second of playback.
+        const reach = this.around(this.position, this.position + 2 * AROUND)?.[1] ?? head[1];
+        return { start: ahead[0], end: this.gap(ahead[0], reach)![1], kind: "window", priority: "high", paced: false };
+      }
+      // The first media bytes a native decoder probes before it seeks, then the seconds behind.
+      const probe = this.gap(this.file.indexEnd, Math.min(size, this.file.indexEnd + PROBE)) ?? this.gap(window[0], window[1]);
+      if (probe) return { start: probe[0], end: probe[1], kind: "window", priority: "high", paced: false };
+    }
     if (this.mode === "watch" && this.fillAllowed && head) {
       // A video larger than the budget keeps loading ahead and lets old pages go.
       if (this.stored >= this.budget * .85) this.evict(this.budget * .75, true);
@@ -355,6 +367,7 @@ export class VideoBytes {
   async chunk(key: symbol, at: number, end: number) {
     this.checkAccess();
     if (!this.rangeAt(at)) {
+      if (!this.demands.has(key)) playbackMark("video-read", { at, kb: Math.round((at - this.file.indexEnd) / 1024) });
       this.demands.delete(key);
       this.demands.set(key, { at });
       const active = this.transfer;

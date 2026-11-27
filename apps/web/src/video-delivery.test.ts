@@ -51,18 +51,21 @@ describe("tab-owned video delivery", () => {
     const delivery = new VideoDelivery(server.fetcher);
     delivery.configure("window", 31, false);
     delivery.select(file(), "t");
-    await until(() => (delivery.snapshot()?.playable.length ?? 0) > 0 && server.ranges.length >= 3);
+    await until(() => (delivery.snapshot()?.playable.length ?? 0) > 0 && server.ranges.length >= 4);
     await settle();
-    expect(server.ranges).toHaveLength(3);
+    // Index, the seconds ahead, the samples a decoder probes first, the seconds behind.
+    expect(server.ranges).toHaveLength(4);
     const playable = delivery.snapshot()!.playable;
-    expect(playable[0]![0]).toBeLessThanOrEqual(21);
-    expect(playable[0]![1]).toBeGreaterThanOrEqual(41);
-    expect(playable.at(-1)![1]).toBeLessThan(45);
+    const around = playable.find(([a, b]) => a <= 31 && b >= 31)!;
+    expect(around[0]).toBeLessThanOrEqual(21);
+    expect(around[1]).toBeGreaterThanOrEqual(41);
+    expect(playable.at(-1)![1]).toBeLessThan(55);
     // The first media range starts at the key frame at 30 s, then the seconds behind it follow.
     let keyFrame = movie.mdatBody;
     for (let i = 0; i < 300; i++) keyFrame += 1000 + i + 200;
     expect(server.ranges[1]).toMatch(new RegExp(`^bytes=${keyFrame}-`));
-    expect(Number(/^bytes=(\d+)/.exec(server.ranges[2]!)![1])).toBeLessThan(keyFrame);
+    expect(server.ranges[2]).toMatch(new RegExp(`^bytes=${movie.mdatBody}-`));
+    expect(Number(/^bytes=(\d+)/.exec(server.ranges[3]!)![1])).toBeLessThan(keyFrame);
   });
 
   it("fills a watched video to the end and serves identical bytes to the decoder", async () => {
@@ -97,20 +100,33 @@ describe("tab-owned video delivery", () => {
     expect(JSON.stringify(delivery.snapshot())).toBe(covered);
   });
 
-  it("serves a decoder read inside the window and defers a stale read from the file start", async () => {
+  it("serves the decoder's probe of the first samples at once and defers a far stale read", async () => {
     const server = origin({ slow: true });
     const delivery = new VideoDelivery(server.fetcher);
     delivery.configure("watch", 40, false);
     delivery.select(file(), "t");
     await until(() => !!delivery.snapshot()?.indexed);
-    const stale = delivery.response("t", `bytes=${movie.mdatBody}-`)!;
-    const reader = stale.body!.getReader();
-    const first = reader.read();
-    await until(() => server.ranges.length >= 2);
-    const window = server.ranges[1]!;
-    expect(window).not.toBe(`bytes=${movie.mdatBody}-`);
+    // Before its metadata event a native decoder reads the first media samples.
+    const probe = delivery.response("t", `bytes=${movie.mdatBody}-`)!.body!.getReader();
+    const first = probe.read();
+    await until(() => server.ranges.some(range => range.startsWith(`bytes=${movie.mdatBody}-`)));
     expect((await first).value!.length).toBeGreaterThan(0);
-    await reader.cancel();
+    // It preempts the window: index, the interrupted window head, then the probe.
+    expect(server.ranges.findIndex(range => range.startsWith(`bytes=${movie.mdatBody}-`))).toBeLessThanOrEqual(2);
+    const probeRange = server.ranges.find(range => range.startsWith(`bytes=${movie.mdatBody}-`))!;
+    expect(Number(probeRange.split("-")[1])).toBe(movie.mdatBody + 256 * 1024 - 1);
+    await probe.cancel();
+    // A read far from the playhead and past the probe waits for the seconds ahead.
+    const far = movie.mdatBody + 300 * 1024;
+    const stale = delivery.response("t", `bytes=${far}-`)!.body!.getReader();
+    const pending = stale.read();
+    await settle();
+    const head = server.ranges.findIndex(range => /^bytes=(\d+)/.exec(range)![1] !== String(movie.mdatBody) && range !== `bytes=0-${movie.mdatBody - 1}`);
+    const staleAt = server.ranges.findIndex(range => range.startsWith(`bytes=${far}-`));
+    expect(head).toBeGreaterThan(0);
+    expect(staleAt === -1 || staleAt > head).toBe(true);
+    await stale.cancel();
+    void pending.catch(() => {});
   });
 
   it("prepares the next recording after the watched one and reuses it", async () => {
@@ -141,14 +157,14 @@ describe("tab-owned video delivery", () => {
 
   it("keeps the playing window when the budget evicts far pages", async () => {
     const server = origin();
-    const bytes = new VideoBytes(file(), server.fetcher, 480 * 1024);
+    const bytes = new VideoBytes(file(), server.fetcher, 720 * 1024);
     bytes.configure("watch", 30, true);
     bytes.schedule();
     await new Promise(resolve => setTimeout(resolve, 400));
     const window = windowBytes(bytes.index!, 20, 40)!;
     const ranges = bytes.byteRanges();
     expect(ranges.some(([a, b]) => a <= window[0] && b >= Math.min(window[1], window[0] + 64 * 1024))).toBe(true);
-    expect(ranges.reduce((sum, [a, b]) => sum + b - a, 0)).toBeLessThanOrEqual(480 * 1024 + 64 * 1024);
+    expect(ranges.reduce((sum, [a, b]) => sum + b - a, 0)).toBeLessThanOrEqual(720 * 1024 + 64 * 1024);
     expect(bytes.complete).toBe(false);
     const requests = server.ranges.length;
     await new Promise(resolve => setTimeout(resolve, 200));

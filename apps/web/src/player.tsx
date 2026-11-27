@@ -549,7 +549,10 @@ export function PlayerProvider({
   const videoKey = useMemo(() => relayVideo ? crypto.randomUUID?.() : undefined,
     [videoDelivery, sourceKey, relayVideo?.url, relayVideo?.size]);
   const [directVideoKey, setDirectVideoKey] = useState<string>();
-  const videoToken = relayReady && videoKey && videoKey !== directVideoKey ? videoKey : undefined;
+  // The sound prefix goes first on a slow link. The video index follows once sound plays.
+  const [armedVideoKey, setArmedVideoKey] = useState<string>();
+  const videoToken = relayReady && videoKey && videoKey !== directVideoKey &&
+    (armedVideoKey === videoKey || onPlayerScreen) ? videoKey : undefined;
   const videoCoverage = useSyncExternalStore(videoDelivery.subscribe, videoDelivery.snapshot);
   const [videoIntent, setVideoIntent] = useState(false);
   useLayoutEffect(() => () => { delivery.clear(); videoDelivery.clear(); }, [delivery, videoDelivery]);
@@ -657,6 +660,7 @@ export function PlayerProvider({
   const mediaKey = useRef(sourceKey);
   const feedback = useMemo(() => new PlaybackFeedback(), [sourceKey]);
   const phase = useSyncExternalStore(feedback.subscribe, feedback.snapshot);
+  useEffect(() => { if (phase === "playing" && videoKey) setArmedVideoKey(videoKey); }, [phase, videoKey]);
   useEffect(() => { if (phase === "playing") firstSound.current?.(); }, [phase, sourceKey]);
   const loadingLabel = feedback.label;
   const [buffer, setBuffer] = useState<{source: PlaybackFeedback; ranges: BufferedRanges}>();
