@@ -33,12 +33,20 @@ describe("compact entry classification", () => {
     expect(row).not.toContain("Альт");
     expect(row).toContain("Спокойная");
     expect(row).not.toContain("Версия");
-    expect(row).toContain("+4");
+    // Source and artist are already in the row: only the hidden genre and extra count.
+    expect(row).toContain("+2");
     expect(row).toContain("Мужской и женский вокал");
     expect(detail).toContain("Альт");
     expect(detail).toContain("Дополнительно");
     expect(detail).toContain("Автор");
     expect(html).not.toContain("Архив");
+  });
+  it("shows no bare counter when the row already shows every assigned tag", () => {
+    const only = tags.filter(tag => tag.group === "source" || tag.group === "artist");
+    const html = renderToStaticMarkup(createElement(ItemTagList, { tags: only, catalog: new TagCatalog(only) }));
+    const [row] = html.split('popover="auto"');
+    expect(row).not.toMatch(/\+\d/);
+    expect(row).not.toContain("Без тегов");
   });
   it("prefers the assigned work below a selected studio over an alphabetically earlier unrelated work", () => {
     const studio: TagDto = { id: "s", name: "Студия", group: "source", color: "#acf" };

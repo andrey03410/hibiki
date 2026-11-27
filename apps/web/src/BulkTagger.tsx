@@ -3,6 +3,7 @@ import { CloudSun, Disc3, FolderTree, Hash, LoaderCircle, Mic, MicVocal, Plus, S
 import type { ItemDto } from "@hibiki/contracts";
 import { api } from "./api";
 import { fetchItems } from "./library-pages";
+import { records } from "./LibraryFilters";
 import { Popover, Segmented, TagChip, usePopover } from "./design/primitives";
 import { useData } from "./WorkspaceUi";
 import { groupKeys, groupOf, groups, type Performance, type TagCatalog, type TagGroup, type Voice } from "./taxonomy";
@@ -64,7 +65,7 @@ function BulkPanel({ ids, catalog, close, onDone }: { ids: string[]; catalog: Ta
     try {
       await api("/items/batch", "POST", { expectedRevision: revision, changes });
       await refresh();
-      notify(`Разметка обновлена: ${changes.length} ${changes.length === 1 ? "запись" : "записей"}`);
+      notify(`Разметка обновлена: ${records(changes.length)}`);
       close();
       onDone();
     } catch (e) {
@@ -78,7 +79,7 @@ function BulkPanel({ ids, catalog, close, onDone }: { ids: string[]; catalog: Ta
   const removed = [...plan].filter(([, on]) => !on).flatMap(([id]) => catalog.byId.get(id) ?? []);
   const perfState = performance?.performance ?? "keep";
   return <>
-    <div className="ds-pop-head"><strong>Разметка · {items.length} {items.length === 1 ? "запись" : "записи"}</strong><span className="lib-grow" /><span className="bulk-hint">полоса — есть у части</span></div>
+    <div className="ds-pop-head"><strong>Разметка · {records(items.length)}</strong><span className="lib-grow" /><span className="bulk-hint">полоса — есть у части</span></div>
     <div className="ds-pop-body">
       {groupKeys.map(group => {
         const tags = shown.filter(tag => groupOf(tag) === group);
@@ -116,7 +117,7 @@ function BulkPanel({ ids, catalog, close, onDone }: { ids: string[]; catalog: Ta
     <div className="ds-pop-foot">
       <span className="bulk-foot-note">
         {error ? <span className="danger-text">{error}</span>
-          : changes.length ? <>Изменится <b>{changes.length}</b> {changes.length === 1 ? "запись" : "записей"}{added.length ? <>: <span style={{ color: "var(--ok)" }}>+ {added.map(tag => tag.name).slice(0, 2).join(", ")}</span></> : null}{removed.length ? <> <span style={{ color: "var(--danger)" }}>− {removed.map(tag => tag.name).slice(0, 2).join(", ")}</span></> : null}</>
+          : changes.length ? <>Изменится {records(changes.length)}{added.length ? <>: <span style={{ color: "var(--ok)" }}>+ {added.map(tag => tag.name).slice(0, 2).join(", ")}</span></> : null}{removed.length ? <> <span style={{ color: "var(--danger)" }}>− {removed.map(tag => tag.name).slice(0, 2).join(", ")}</span></> : null}</>
           : "Щёлкните тег, чтобы поставить его всем или снять"}
       </span>
       <span className="lib-grow" />

@@ -39,7 +39,8 @@ export function ItemTagList({
   const candidates = active.filter((t) => groupOf(t) !== "source" && groupOf(t) !== "artist");
   const rank = (t: TagDto) => (selected.includes(t.id) ? 0 : 1) * 10 + ["mood", "genre", "extra"].indexOf(groupOf(t));
   const visible = [...candidates].sort((a, b) => rank(a) - rank(b)).slice(0, 2);
-  const hidden = active.length - visible.length;
+  // Source and artist are already visible in the row, so only hidden descriptive tags count.
+  const hidden = candidates.length - visible.length;
   const info = itemPerformance(performance, voices);
   function select(action: () => void) {
     popup.current?.hidePopover();
@@ -57,7 +58,7 @@ export function ItemTagList({
   return (
     <div className="entry-tags" aria-label="Разметка записи" role="group">
       {visible.map((t) => chip(t, false))}
-      {!visible.length && !hidden && <span className="entry-tags-empty">Без тегов</span>}
+      {!active.length && <span className="entry-tags-empty">Без тегов</span>}
       <button
         type="button"
         ref={trigger}

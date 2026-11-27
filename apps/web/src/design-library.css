@@ -134,6 +134,11 @@
   grid-template: "sel cover main path tags dur tools" 60px / 24px 44px minmax(0, 1.5fr) minmax(0, .9fr) minmax(0, 1.3fr) 48px auto;
   background: transparent; transition: background var(--t-fast);
 }
+/* Off-screen rows skip style, layout and paint; a row with an open in-row menu stays fully rendered (paint containment would clip it). */
+.item-collection .collection-results > .collection-entry { content-visibility: auto; contain-intrinsic-size: auto 60px; }
+.item-collection .collection-results > .collection-entry:has(.dropdown) { content-visibility: visible; }
+/* The last rows of a long list open their menu upwards so it stays on screen. */
+.collection-results > .collection-entry:nth-child(n+5 of .collection-entry):nth-last-child(-n+4 of .collection-entry) .row-menu > .dropdown { top: auto; bottom: 36px; transform-origin: bottom right; }
 .item-collection .collection-results > .collection-entry:has(.reason-details) { height: auto; min-height: 60px; grid-template-rows: minmax(60px, auto); }
 .item-collection .collection-results > .collection-entry:hover { background: var(--s1); }
 .item-collection .collection-results > .collection-entry.current { background: color-mix(in oklab, var(--amb) 11%, transparent); }
@@ -214,6 +219,7 @@
   grid-template: "cover main tools" auto "cover path path" auto "tags tags dur" auto / 64px minmax(0, 1fr) auto;
   transition: background var(--t), box-shadow var(--t), transform var(--t) var(--ease-out);
 }
+.item-collection.collection-cards .collection-results > .collection-entry { contain-intrinsic-size: auto 132px; }
 .item-collection.collection-cards .collection-results > .collection-entry:hover { background: var(--s2); box-shadow: inset 0 0 0 1px var(--line-2); }
 .item-collection.collection-cards .collection-results > .collection-entry.current { box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--amb) 45%, transparent); }
 .item-collection.collection-cards .item-art { width: 64px; height: 64px; border-radius: 12px; grid-row: 1 / 3; }
