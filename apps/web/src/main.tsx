@@ -100,6 +100,7 @@ import { preferenceEvent, type HistoryPreference } from "./listening-client.ts";
 import "./styles.css";
 import "./library-view.css";
 import "./taxonomy.css";
+import "./design.css";
 
 const ImportModal = lazyView(() => import("./ImportModal"));
 const JobsPage = lazyView(() => import("./JobsPage"));
