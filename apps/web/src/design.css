@@ -1,0 +1,268 @@
+/*
+ * Hibiki design system «Тихий звук». Loaded after all legacy styles.
+ * Documented in .ai/design/README.md — extend tokens and primitives here
+ * instead of introducing new colours, radii or timings in component files.
+ */
+:root {
+  /* surfaces */
+  --ink: #0b0a0f;
+  --bg: #0f0e14;
+  --bg-raised: #14121b;
+  --pop: #1b1924;
+  --s1: rgba(255, 255, 255, .035);
+  --s2: rgba(255, 255, 255, .06);
+  --s3: rgba(255, 255, 255, .09);
+  --line: rgba(255, 255, 255, .07);
+  --line-2: rgba(255, 255, 255, .12);
+  /* text */
+  --text: #f2f0f7;
+  --text-2: #b7b3c6;
+  --text-3: #7c788e;
+  --text-4: #575366;
+  /* accent and states */
+  --accent: #b9a4ff;
+  --accent-2: #d6c9ff;
+  --accent-ink: #160f2b;
+  --danger: #ff7a8a;
+  --ok: #7fd6b9;
+  --warn: #f2c66d;
+  /* tag groups */
+  --g-source: #b9a4ff;
+  --g-artist: #f4a8c3;
+  --g-genre: #7fd6b9;
+  --g-mood: #f2c66d;
+  --g-extra: #8fb5ff;
+  --g-performance: #cfc8e6;
+  /* ambient colour of the current track, set by ambient.ts */
+  --amb: #8d74e8;
+  /* shape */
+  --r-xs: 6px; --r-sm: 9px; --r: 12px; --r-lg: 18px; --r-xl: 24px;
+  --shadow-pop: 0 30px 80px -20px rgba(0, 0, 0, .75), 0 0 0 1px rgba(255, 255, 255, .07);
+  --shadow-float: 0 24px 60px -20px rgba(0, 0, 0, .8), inset 0 0 0 1px rgba(255, 255, 255, .08);
+  /* motion */
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
+  --ease-spring: cubic-bezier(.34, 1.4, .64, 1);
+  --t-fast: 120ms; --t: 180ms; --t-slow: 280ms; --t-ambient: 700ms;
+  /* type */
+  --font: "Onest", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --display: "Manrope", "Onest", sans-serif;
+  /* legacy aliases: older component styles follow the new palette */
+  --muted: var(--text-3);
+  --purple: var(--accent);
+  --border: var(--line);
+  --panel: var(--bg-raised);
+  font-family: var(--font);
+  color: var(--text);
+  background: var(--bg);
+}
+@property --amb { syntax: "<color>"; inherits: true; initial-value: #8d74e8; }
+html { transition: --amb var(--t-ambient) ease-in-out; }
+body { background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(900px 520px at 70% -14%, color-mix(in oklab, var(--amb) 20%, transparent), transparent 70%),
+    radial-gradient(700px 420px at 105% 105%, color-mix(in oklab, var(--amb) 8%, transparent), transparent 70%);
+}
+#root { position: relative; z-index: 1; }
+h1, h2, h3 { font-family: var(--display); color: var(--text); }
+h1 { font-size: 34px; line-height: 1.08; font-weight: 800; letter-spacing: -.035em; }
+h2 { font-size: 20px; font-weight: 750; letter-spacing: -.02em; }
+h3 { font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+.num, time { font-variant-numeric: tabular-nums; }
+::selection { background: color-mix(in oklab, var(--accent) 40%, transparent); }
+* { scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, .14) transparent; }
+
+/* ---------- form controls ---------- */
+input, select, textarea {
+  color: var(--text); background: var(--s1); border: 1px solid var(--line-2); border-radius: var(--r-sm);
+  transition: border-color var(--t-fast), background var(--t-fast), box-shadow var(--t-fast);
+}
+input::placeholder, textarea::placeholder { color: var(--text-4); }
+input:not([type="range"]):not([type="checkbox"]):focus, textarea:focus, select:focus { border-color: color-mix(in oklab, var(--accent) 60%, transparent); box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 16%, transparent); }
+select option { background: var(--pop); }
+label { color: var(--text-2); }
+input[type="checkbox"] { width: 17px; height: 17px; min-width: 17px; border-radius: 6px; border: 1.5px solid var(--line-2); background: transparent; transition: background var(--t-fast), border-color var(--t-fast); }
+input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+input[type="checkbox"]:checked::after { color: var(--accent-ink); }
+input[type="checkbox"]:indeterminate { background: var(--accent); border-color: var(--accent); }
+input[type="checkbox"]:indeterminate::after { content: "–"; color: var(--accent-ink); font-weight: 800; font-size: 12px; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- buttons ---------- */
+.button {
+  height: 36px; padding: 0 14px; gap: 8px; border-radius: 11px; border: 0; font: 600 13px/1 var(--font);
+  color: var(--text); background: var(--s2); box-shadow: inset 0 0 0 1px var(--line);
+  transition: background var(--t-fast), box-shadow var(--t-fast), transform var(--t-fast) var(--ease-out), color var(--t-fast);
+}
+.button:hover:not(:disabled) { background: var(--s3); }
+.button:active:not(:disabled) { transform: scale(.97); }
+.button.primary { background: var(--accent); color: var(--accent-ink); box-shadow: 0 8px 24px -12px color-mix(in oklab, var(--accent) 80%, transparent); }
+.button.primary:hover:not(:disabled) { background: var(--accent-2); transform: none; }
+.button.subtle { background: transparent; box-shadow: inset 0 0 0 1px var(--line-2); }
+.button.subtle:hover:not(:disabled) { background: var(--s2); }
+.button.compact { height: 30px; padding: 0 11px; font-size: 12.5px; border-radius: 9px; gap: 7px; }
+.button.danger { background: color-mix(in oklab, var(--danger) 18%, transparent); color: var(--danger); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--danger) 30%, transparent); }
+.icon-button { width: 34px; height: 34px; border-radius: 10px; color: var(--text-3); transition: background var(--t-fast), color var(--t-fast), transform var(--t-fast) var(--ease-out); }
+.icon-button:hover:not(:disabled) { color: var(--text); background: var(--s2); }
+.icon-button:active:not(:disabled) { transform: scale(.92); }
+.icon-button.selected, .icon-button[aria-pressed="true"] { color: var(--accent); }
+.text-button { color: var(--accent-2); font-size: 12.5px; font-weight: 500; transition: color var(--t-fast); }
+.text-button:hover { color: #fff; }
+.danger-text { color: var(--danger) !important; }
+.status-pill, .ds-pill { height: 22px; padding: 0 9px; border: 0; border-radius: 999px; display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; background: var(--s2); color: var(--text-2); white-space: nowrap; }
+.ds-pill.ok { background: color-mix(in oklab, var(--ok) 13%, transparent); color: var(--ok); }
+.ds-pill.err { background: color-mix(in oklab, var(--danger) 13%, transparent); color: var(--danger); }
+.ds-pill.warn { background: color-mix(in oklab, var(--warn) 13%, transparent); color: var(--warn); }
+.ds-pill.acc { background: color-mix(in oklab, var(--accent) 15%, transparent); color: var(--accent-2); }
+.ds-kbd { font: 600 10.5px/1 var(--font); color: var(--text-3); padding: 3px 6px; border-radius: 6px; background: var(--s2); box-shadow: inset 0 -1px 0 rgba(255, 255, 255, .06), inset 0 0 0 1px var(--line); }
+
+/* ---------- segmented control ---------- */
+.ds-seg, .library-segmented { display: inline-flex; padding: 3px; gap: 2px; border-radius: 11px; background: var(--s1); box-shadow: inset 0 0 0 1px var(--line); border: 0; }
+.ds-seg > button, .library-segmented > button {
+  height: 28px; padding: 0 11px; border: 0; border-radius: 8px; display: inline-flex; align-items: center; gap: 6px;
+  background: transparent; color: var(--text-3); font: 500 12.5px var(--font); white-space: nowrap;
+  transition: background var(--t), color var(--t), box-shadow var(--t);
+}
+.ds-seg > button:hover, .library-segmented > button:hover { color: var(--text); }
+.ds-seg > button[aria-pressed="true"], .library-segmented > button[aria-pressed="true"] { background: var(--s3); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .3), inset 0 0 0 1px var(--line); }
+
+/* ---------- tag chip ---------- */
+.ds-chip {
+  --c: var(--g-extra);
+  height: 24px; padding: 0 9px; border: 0; border-radius: 999px; display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%;
+  font: 500 12px/1 var(--font); white-space: nowrap; cursor: default;
+  color: color-mix(in oklab, var(--c) 72%, white); background: color-mix(in oklab, var(--c) 13%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--c) 18%, transparent);
+  transition: background var(--t), color var(--t), box-shadow var(--t), transform var(--t-fast) var(--ease-out);
+}
+button.ds-chip { cursor: pointer; }
+button.ds-chip:hover { background: color-mix(in oklab, var(--c) 22%, transparent); }
+button.ds-chip:active { transform: scale(.95); }
+.ds-chip > .label { overflow: hidden; text-overflow: ellipsis; }
+.ds-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--c); flex: none; transition: background var(--t); }
+.ds-chip.plain::before { display: none; }
+.ds-chip.lg { height: 30px; padding: 0 12px; font-size: 13px; }
+.ds-chip.off { color: var(--text-3); background: transparent; box-shadow: inset 0 0 0 1px var(--line-2); }
+.ds-chip.off::before { opacity: .7; }
+button.ds-chip.off:hover { color: var(--text); background: color-mix(in oklab, var(--c) 9%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--c) 30%, transparent); }
+.ds-chip.on { color: #120f1a; background: var(--c); box-shadow: 0 4px 14px -6px var(--c); }
+.ds-chip.on::before { background: #120f1a; opacity: .5; }
+button.ds-chip.on:hover { background: color-mix(in oklab, var(--c) 86%, white); }
+.ds-chip.part { background: linear-gradient(90deg, color-mix(in oklab, var(--c) 34%, transparent) 50%, color-mix(in oklab, var(--c) 8%, transparent) 50%); color: color-mix(in oklab, var(--c) 82%, white); }
+.ds-chip .n { font-size: 11px; opacity: .62; font-variant-numeric: tabular-nums; }
+.ds-chip .x { width: 18px; height: 18px; padding: 0; border: 0; color: inherit; margin-right: -5px; border-radius: 50%; display: grid; place-items: center; background: color-mix(in oklab, var(--c) 18%, transparent); transition: background var(--t-fast); }
+.ds-chip .x:hover { background: color-mix(in oklab, var(--c) 38%, transparent); }
+.ds-chip.dashed { color: var(--text-3); background: transparent; box-shadow: none; border: 1px dashed var(--line-2); }
+.ds-chip.dashed::before { display: none; }
+.ds-chip.enter { animation: ds-chip-in var(--t-slow) var(--ease-spring) both; }
+@keyframes ds-chip-in { from { opacity: 0; transform: scale(.85); } }
+.g-source { --c: var(--g-source); } .g-artist { --c: var(--g-artist); } .g-genre { --c: var(--g-genre); }
+.g-mood { --c: var(--g-mood); } .g-extra { --c: var(--g-extra); } .g-performance { --c: var(--g-performance); }
+.ds-gi { width: 22px; height: 22px; border-radius: 7px; display: inline-grid; place-items: center; flex: none; background: color-mix(in oklab, var(--c) 16%, transparent); color: var(--c); }
+
+/* ---------- popover ---------- */
+.ds-pop {
+  position: fixed; z-index: 60; min-width: 260px; max-width: min(440px, calc(100vw - 24px)); max-height: min(70vh, 560px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: color-mix(in oklab, var(--pop) 96%, transparent); backdrop-filter: blur(24px) saturate(1.4);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-pop);
+  transform-origin: var(--origin, top left);
+  transition: opacity var(--t) var(--ease-out), transform var(--t) var(--ease-out), display var(--t) allow-discrete, overlay var(--t) allow-discrete;
+}
+.ds-pop[popover] { margin: 0; inset: auto; border: 0; padding: 0; color: var(--text); }
+.ds-pop:not(:popover-open) { display: none; opacity: 0; transform: translateY(-4px) scale(.98); }
+@starting-style { .ds-pop:popover-open { opacity: 0; transform: translateY(-4px) scale(.98); } }
+.ds-pop-head { display: flex; align-items: center; gap: 10px; padding: 14px 14px 10px; }
+.ds-pop-body { overflow-y: auto; overscroll-behavior: contain; padding: 0 6px 6px; }
+.ds-pop-foot { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
+.ds-search { height: 36px; border-radius: 10px; display: flex; flex-direction: row; align-items: center; gap: 9px; padding: 0 11px; background: var(--s1); box-shadow: inset 0 0 0 1px var(--line); color: var(--text-3); }
+.ds-search > input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; background: none; box-shadow: none !important; font-size: 13.5px; }
+.ds-search > input:focus-visible, .lib-search-field > input:focus-visible { outline: none; }
+.ds-search:focus-within { box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 55%, transparent), 0 0 0 3px color-mix(in oklab, var(--accent) 14%, transparent); }
+.ds-section-title { font: 600 10.5px var(--font); letter-spacing: .12em; text-transform: uppercase; color: var(--text-4); padding: 10px 10px 6px; display: flex; align-items: center; gap: 8px; }
+.ds-option {
+  width: 100%; min-height: 36px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border: 0; border-radius: 9px; background: transparent;
+  color: var(--text-2); font: 400 13.5px var(--font); text-align: left; transition: background var(--t-fast), color var(--t-fast), opacity var(--t);
+}
+.ds-option:hover, .ds-option[data-active="true"] { background: var(--s2); color: var(--text); }
+.ds-option .n { margin-left: auto; color: var(--text-4); font-size: 12px; font-variant-numeric: tabular-nums; }
+.ds-option .sub { color: var(--text-4); font-size: 12px; }
+.ds-option.zero { opacity: .42; }
+.ds-box { width: 16px; height: 16px; flex: none; border-radius: 5px; box-shadow: inset 0 0 0 1.5px var(--line-2); display: grid; place-items: center; transition: background var(--t-fast), box-shadow var(--t-fast); }
+.ds-box.on { background: var(--c, var(--accent)); box-shadow: none; color: #120f1a; }
+
+/* ---------- drawer ---------- */
+.ds-drawer {
+  position: fixed; z-index: 70; inset: 12px 12px 12px auto; width: min(620px, calc(100vw - 24px)); height: auto; margin: 0; max-height: none; max-width: none;
+  display: flex; flex-direction: column; overflow: hidden; padding: 0; border: 0; color: var(--text);
+  background: color-mix(in oklab, #17151f 97%, transparent); backdrop-filter: blur(30px);
+  border-radius: 22px; box-shadow: var(--shadow-pop);
+  transition: transform var(--t-slow) var(--ease-out), opacity var(--t-slow) var(--ease-out), display var(--t-slow) allow-discrete, overlay var(--t-slow) allow-discrete;
+}
+.ds-drawer:not([open]) { display: none; transform: translateX(28px); opacity: 0; }
+@starting-style { .ds-drawer[open] { transform: translateX(28px); opacity: 0; } }
+.ds-drawer::backdrop { background: rgba(6, 5, 10, .38); transition: opacity var(--t-slow), display var(--t-slow) allow-discrete, overlay var(--t-slow) allow-discrete; }
+@starting-style { .ds-drawer[open]::backdrop { opacity: 0; } }
+.ds-tabs { display: flex; gap: 20px; padding: 0 22px; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+.ds-tabs > button { position: relative; height: 40px; padding: 0; border: 0; background: none; display: flex; align-items: center; gap: 6px; color: var(--text-3); font: 500 13.5px var(--font); white-space: nowrap; transition: color var(--t-fast); }
+.ds-tabs > button:hover { color: var(--text-2); }
+.ds-tabs > button[aria-selected="true"] { color: var(--text); }
+.ds-tabs > button::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; border-radius: 2px; background: var(--accent); transform: scaleX(0); transition: transform var(--t) var(--ease-out); }
+.ds-tabs > button[aria-selected="true"]::after { transform: none; }
+
+/* ---------- modal (legacy Modal component) ---------- */
+.modal {
+  background: color-mix(in oklab, #17151f 98%, transparent); color: var(--text); border: 0; border-radius: 22px; box-shadow: var(--shadow-pop);
+  transition: opacity var(--t) var(--ease-out), transform var(--t) var(--ease-out), display var(--t) allow-discrete, overlay var(--t) allow-discrete;
+}
+@starting-style { .modal[open] { opacity: 0; transform: translateY(8px) scale(.985); } }
+.modal::backdrop { background: rgba(6, 5, 10, .58); backdrop-filter: blur(3px); }
+.modal-heading h2 { font-size: 21px; }
+.modal-heading p { color: var(--text-3); }
+
+/* ---------- menus ---------- */
+.row-menu > summary { border-radius: 10px; color: var(--text-3); transition: background var(--t-fast), color var(--t-fast); }
+.row-menu > summary:hover, .row-menu[open] > summary { background: var(--s2); color: var(--text); }
+.dropdown {
+  background: color-mix(in oklab, var(--pop) 97%, transparent); backdrop-filter: blur(24px); border: 0; border-radius: 14px; padding: 6px;
+  box-shadow: var(--shadow-pop); animation: ds-pop-in var(--t) var(--ease-out);
+}
+.dropdown > button, .dropdown > a { border-radius: 9px; font-size: 13px; color: var(--text-2); padding: 9px 10px; transition: background var(--t-fast), color var(--t-fast); }
+.dropdown > button:hover:not(:disabled), .dropdown > a:hover { background: var(--s2); color: var(--text); }
+@keyframes ds-pop-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } }
+
+/* ---------- toasts ---------- */
+.toast-stack { z-index: 90; inset: auto auto calc(var(--dock-h, 76px) + 30px) calc(var(--side-w, 232px) + 20px); margin: 0; padding: 0; border: 0; background: transparent; overflow: visible; color: inherit; flex-direction: column-reverse; align-items: flex-start; max-width: min(460px, calc(100vw - 40px)); }
+.toast-stack:not(:popover-open):not(:has(.toast)) { display: none; }
+.toast { pointer-events: auto; }
+.toast {
+  background: #f2f0f7; color: #16131f; border: 0; border-radius: 14px; box-shadow: 0 20px 50px -15px rgba(0, 0, 0, .8); font: 500 13px var(--font);
+  animation: ds-toast-in var(--t-slow) var(--ease-spring);
+}
+.toast > svg { color: #16131f; }
+.toast.error { background: #ffe0e4; }
+.toast .icon-button { color: #16131f; }
+.toast .icon-button:hover:not(:disabled) { background: rgba(0, 0, 0, .08); color: #16131f; }
+.toast .toast-action { height: 28px; padding: 0 10px; border: 0; border-radius: 8px; background: rgba(0, 0, 0, .08); font: 600 12.5px var(--font); color: #16131f; }
+@keyframes ds-toast-in { from { opacity: 0; transform: translateY(10px) scale(.96); } }
+
+/* ---------- loading ---------- */
+.ds-skeleton { border-radius: 8px; background: linear-gradient(90deg, var(--s1) 0%, var(--s2) 40%, var(--s1) 80%); background-size: 300% 100%; animation: ds-shimmer 1.4s linear infinite; }
+@keyframes ds-shimmer { from { background-position: 100% 0; } to { background-position: -200% 0; } }
+.loading-inline { color: var(--text-3); }
+
+/* ---------- generative cover ---------- */
+.ds-gencover { position: relative; overflow: hidden; display: grid; place-items: center; color: rgba(255, 255, 255, .9); font: 800 13px/1 var(--display); letter-spacing: -.02em; }
+.ds-gencover::after { content: ""; position: absolute; inset: 0; background: radial-gradient(120% 80% at 20% 0%, rgba(255, 255, 255, .22), transparent 55%), radial-gradient(80% 70% at 100% 100%, rgba(0, 0, 0, .35), transparent 60%); }
+.ds-gencover > span { position: relative; z-index: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+  html { transition: none; }
+}
+
+/* ---------- progress ring ---------- */
+.ds-ring { position: relative; display: inline-grid; place-items: center; flex: none; }
+.ds-ring > svg { position: absolute; inset: 0; }
+.ds-ring > .num { font: 700 9.5px var(--font); color: var(--text-2); letter-spacing: -.02em; }

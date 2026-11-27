@@ -820,3 +820,69 @@ it("reconstructs the compact directory and its indexed counts including legacy a
   expect(stale.tagCounts).toEqual(full.tagCounts);
   expect(stale.countsByIndex).toBeUndefined();
 });
+
+it("combines tag sets with AND across groups, OR or ALL inside a group, and counts each group without its own choice", async () => {
+  const game = await createTag("Игра", "source");
+  const witcher = await createTag("Witcher", "source", { parentIds: [game] });
+  const anime = await createTag("Аниме", "source");
+  const calm = await createTag("Calm", "mood");
+  const epic = await createTag("Epic", "mood");
+  const folk = await createTag("Folk", "genre");
+  await ctx.db.item.createMany({ data: ["a", "b", "c", "d", "e"].map((id) => track(id)) });
+  for (const [id, tagIds] of [
+    ["a", [witcher, calm, folk]], ["b", [witcher, epic]], ["c", [anime, calm]],
+    ["d", [witcher, calm, epic]], ["e", [anime, epic, folk]],
+  ] as const) expect((await editTrack(id, { tagIds })).statusCode).toBe(200);
+  const ids = async (filters: Record<string, unknown>) =>
+    (await post("ids", { filters: { ...filters, sort: "title-asc" } })).json().ids;
+  const sets = (...list: unknown[]) => ({ tagSets: list });
+  expect(await ids(sets({ group: "source", ids: [game] }, { group: "mood", ids: [calm, epic] }))).toEqual(["a", "b", "d"]);
+  expect(await ids(sets({ group: "source", ids: [game, anime] }, { group: "mood", ids: [calm] }))).toEqual(["a", "c", "d"]);
+  expect(await ids(sets({ group: "mood", ids: [calm, epic], all: true }))).toEqual(["d"]);
+  // Tag sets take precedence over the legacy flat selection.
+  expect(await ids({ tagIds: [anime], tagMode: "and", ...sets({ group: "source", ids: [game] }) })).toEqual(["a", "b", "d"]);
+  const page = (await post("page", { filters: sets({ group: "source", ids: [witcher] }, { group: "mood", ids: [calm] }) })).json();
+  expect(page.total).toBe(2);
+  // Mood counts ignore the mood choice but respect the source; source counts ignore the source choice.
+  expect(page.tagCounts).toMatchObject({ [calm]: 2, [epic]: 2, [game]: 2, [witcher]: 2, [anime]: 1, [folk]: 1 });
+  const plain = (await post("page", { filters: {} })).json();
+  expect(plain.tagCounts).toMatchObject({ [calm]: 3, [epic]: 3, [witcher]: 3, [anime]: 2 });
+  const repeated = (await post("page", { filters: sets({ group: "source", ids: [witcher] }), countsKey: plain.countsKey })).json();
+  expect(repeated.countsUnchanged).toBeUndefined();
+  expect(repeated.tagCounts).toMatchObject({ [calm]: 2, [epic]: 2, [anime]: 2 });
+  expect((await post("ids", { filters: sets({ group: "mood", ids: [] }) })).statusCode).toBe(400);
+});
+
+it("counts a group by its first set and always applies later sets of the same group", async () => {
+  const cover = await createTag("Cover", "extra");
+  const live = await createTag("Live", "extra");
+  const remaster = await createTag("Remaster", "extra");
+  await ctx.db.item.createMany({ data: ["a", "b", "c", "d"].map((id) => track(id)) });
+  for (const [id, tagIds] of [["a", [cover, remaster]], ["b", [live, remaster]], ["c", [cover]], ["d", [live]]] as const)
+    expect((await editTrack(id, { tagIds })).statusCode).toBe(200);
+  // The web app sends archived or deleted selections as an extra trailing set of the same group.
+  const page = (await post("page", { filters: { tagSets: [{ group: "extra", ids: [cover] }, { group: "extra", ids: [remaster], all: true }] } })).json();
+  expect(page.total).toBe(1);
+  expect(page.tagCounts).toMatchObject({ [cover]: 1, [live]: 1, [remaster]: 2 });
+});
+
+it("returns the newest owned YouTube artwork under each source section", async () => {
+  const game = await createTag("Game", "source");
+  const witcher = await createTag("Witcher", "source", { parentIds: [game] });
+  const empty = await createTag("Empty", "source", { parentIds: [game] });
+  await ctx.db.item.createMany({ data: [
+    { ...track("old"), createdAt: new Date("2024-01-01T00:00:00Z") }, { ...track("new"), createdAt: new Date("2025-06-01T00:00:00Z") },
+    track("local"), track("foreign", ctx.otherUserId),
+  ] });
+  const source = (itemId: string, externalId: string, ownerId = ctx.userId) => ({ id: "s-" + itemId, ownerId, itemId, key: "youtube:" + externalId,
+    provider: "youtube", externalId, thumbnail: `https://i.ytimg.com/vi/${externalId}/hqdefault.jpg` });
+  await ctx.db.source.createMany({ data: [source("old", "AAAAAAAAAAA"), source("new", "BBBBBBBBBBB"), source("foreign", "CCCCCCCCCCC", ctx.otherUserId)] });
+  for (const id of ["old", "new", "local"]) expect((await editTrack(id, { tagIds: [witcher] })).statusCode).toBe(200);
+  const covers = (await post("section-covers", { ids: [game, witcher, empty] })).json().covers;
+  expect(covers).toEqual({
+    [game]: "https://i.ytimg.com/vi/BBBBBBBBBBB/mqdefault.jpg",
+    [witcher]: "https://i.ytimg.com/vi/BBBBBBBBBBB/mqdefault.jpg",
+  });
+  expect((await post("section-covers", { ids: [game] }, foreignCookie)).json().covers).toEqual({});
+  expect((await post("section-covers", { ids: Array.from({ length: 101 }, (_, i) => "t" + i) })).statusCode).toBe(400);
+});

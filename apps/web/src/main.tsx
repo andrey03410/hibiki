@@ -1,4 +1,4 @@
-import {Button, DataContext, EmptyState, EMPTY, ErrorMessage, Modal, PageTop, useData} from "./WorkspaceUi";
+import {Button, DataContext, EmptyState, EMPTY, ErrorMessage, Modal, PageTop, useData, type ToastAction} from "./WorkspaceUi";
 import React, {
   useEffect,
   useLayoutEffect,
@@ -55,6 +55,7 @@ import {
   ListPlus,
   RefreshCw,
   Heart,
+  Sparkle,
 } from "lucide-react";
 import type {
   ItemDto,
@@ -71,24 +72,27 @@ import type {
 } from "@hibiki/contracts";
 import { api, ApiError, setWorkspaceOwner, formatDuration, humanDuration, mediaWord } from "./api.ts";
 import { ErrorBoundary, lazyView } from "./ErrorBoundary";
-import { ItemArtwork } from "./ItemArtwork.tsx";
+import { ArtworkImage, ItemArtwork } from "./ItemArtwork.tsx";
+import { GenerativeCover } from "./design/primitives";
+import { useCoverTint } from "./design/ambient";
 import { PlaylistCard, PlaylistCover } from "./PlaylistCard";
 import { ScopedPlaylistPage, usePlaylistLibrary } from "./PlaylistLibrary";
 import type { PlaylistTarget } from "./playlist-library";
 import { PlaylistDetails } from "./playlist-detail";
 import { ruleDescription } from "./playlist-rules";
 import { LibraryPages, LibraryCardReader, fetchItems, searchBody, validateOverview } from "./library-pages";
-import { PlayerProvider, usePlayerCommands, usePlayerCard, useHasPlayer, useQueueEditable } from "./player.tsx";
+import { PlayerProvider, usePlayerCommands, usePlayerCard, useQueueEditable } from "./player.tsx";
 import { missingClassification } from "@hibiki/contracts/classification";
 import type { DirectoryVisit } from "./tag-directory";
-import { TagNavigation } from "./TagNavigation";
-import { GroupSelect, TagPicker, PerformanceEditor } from "./ClassificationEditor";
-import { batchTagChanges, compositionDelta, groupKeys, groups, groupOf, itemPerformance, missingLabels, TagCatalog,
-  type BatchMode, type Performance, type PerformanceFilter, type TagGroup, type Voice } from "./taxonomy";
+import { ActiveFilters, BrowseGrid, FacetBar, LibrarySearchBox, records, ResultsBar, SourceTabs, SourceTrail } from "./LibraryFilters";
+import { addTag, rowSource } from "./library-filters";
+import { ItemDrawer, type DrawerPanels } from "./ItemDrawer";
+import { BulkTagger } from "./BulkTagger";
+import { compositionDelta, groupOf, missingLabels, TagCatalog, type PerformanceFilter } from "./taxonomy";
 import { ItemTagList } from "./LibraryItemControls.tsx";
 import { playbackSources, soundUnavailableReason } from "./player-model.ts";
 import { librarySearchForTag, librarySourceBadges, matchesSearch, sourceAvailability, type LibraryView } from "./library-search.ts";
-import { LibrarySearchControls, useLibrarySearch } from "./LibrarySearchControls.tsx";
+import { useLibrarySearch } from "./LibrarySearchControls.tsx";
 import { NoteEditor, NoteIndicator, NotesContext, NotesLoadError, useNotes, useNotesController } from "./NoteEditor.tsx";
 import { noteFor } from "./note-model.ts";
 import { SharedItemStatus, useSavedSharedPlaylists } from "./LibrarySharing";
@@ -100,6 +104,11 @@ import { preferenceEvent, type HistoryPreference } from "./listening-client.ts";
 import "./styles.css";
 import "./library-view.css";
 import "./taxonomy.css";
+import "./design.css";
+import "./design-shell.css";
+import "./design-library.css";
+import "./design-drawer.css";
+import "./design-pages.css";
 
 const ImportModal = lazyView(() => import("./ImportModal"));
 const JobsPage = lazyView(() => import("./JobsPage"));
@@ -116,7 +125,7 @@ const ShareManager = lazyView(() => loadSharing().then(module => ({ default: mod
 const SharedMediaPage = lazyView(() => loadSharing().then(module => ({ default: module.SharedMediaPage })));
 const SavedSharedPlaylistCard = lazyView(() => loadSharing().then(module => ({ default: module.SavedSharedPlaylistCard })));
 
-type Toast = { id: number; text: string; error?: boolean };
+type Toast = { id: number; text: string; error?: boolean; action?: ToastAction; key?: string };
 
 function Auth({
   kaname,
@@ -336,10 +345,20 @@ function Workspace({
     navigate("/");
     window.scrollTo(0, 0);
   }
-  function notify(text: string, error = false) {
+  // Toasts live in the top layer so they stay visible above modal drawers and dialogs.
+  const toastLayer = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const layer = toastLayer.current;
+    if (!layer?.showPopover) return;
+    if (layer.matches(":popover-open")) layer.hidePopover();
+    if (toasts.length) layer.showPopover();
+  }, [toasts]);
+  function notify(text: string, error = false, action?: ToastAction) {
     const id = Date.now() + Math.random();
-    setToasts((old) => [...old, { id, text, error }]);
-    setTimeout(() => setToasts((old) => old.filter((t) => t.id !== id)), 6000);
+    // Toasts with an action replace the previous one of the same kind (one undo at a time).
+    const key = action?.label;
+    setToasts((old) => [...old.filter(t => !key || t.key !== key).slice(-3), { id, text, error, action, key }]);
+    setTimeout(() => setToasts((old) => old.filter((t) => t.id !== id)), action ? 8000 : 6000);
   }
   async function refresh() {
     const sequence = ++request.current;
@@ -466,95 +485,65 @@ function Workspace({
       >
         {(watchPlayer, miniPlayer) => <>
         <div className="app-shell">
-          <aside className="sidebar">
-            <Link className="brand" to="/">
-              <span className="brand-icon">
-                <AudioLines size={25} />
-              </span>
-              <span>
-                hibiki<span className="brand-kanji">響</span>
-              </span>
+          <aside className="sidebar ds-side">
+            <Link className="brand" to="/" aria-label="hibiki — медиатека">
+              <span className="brand-icon"><AudioLines size={19} /></span>
+              <span className="brand-name">hibiki</span>
+              <span className="brand-kanji" aria-hidden>響</span>
             </Link>
-            <span className="sidebar-label">ВАШЕ ПРОСТРАНСТВО</span>
-            <nav className="main-nav">
-              <NavLink to="/" end aria-label="Медиатека" title="Медиатека">
-                <Library size={19} />
-                <span>Медиатека</span>
-                <span className="nav-count">{overview.total}</span>
+            <nav className="main-nav" aria-label="Разделы">
+              <NavLink to="/" end title="Медиатека">
+                <Library size={18} />
+                <span className="nav-text">Медиатека</span>
+                <span className="nav-count num">{overview.total.toLocaleString("ru")}</span>
               </NavLink>
-              <NavLink to="/player" aria-label="Плеер" title="Плеер">
-                <AudioLines size={19} />
-                <span>Плеер</span>
+              <NavLink to="/playlists" title="Плейлисты">
+                <ListMusic size={18} />
+                <span className="nav-text">Плейлисты</span>
+                <span className="nav-count num">{overview.playlists.length || ""}</span>
               </NavLink>
-              <NavLink to="/playlists" aria-label="Плейлисты" title="Плейлисты">
-                <ListMusic size={19} />
-                <span>Плейлисты</span>
+              <NavLink to="/tags" title="Теги">
+                <Tags size={18} />
+                <span className="nav-text">Теги</span>
+                <span className="nav-count num">{overview.tags.filter(tag => !tag.archived).length.toLocaleString("ru")}</span>
               </NavLink>
-              <NavLink to="/tags" aria-label="Теги" title="Теги">
-                <Tags size={19} />
-                <span>Теги</span>
-              </NavLink>
-              <NavLink to="/jobs" aria-label="Задания" title="Задания">
-                <Download size={19} />
-                <span>Задания</span>
-                {activeJobs > 0 && (
-                  <span className="job-count">{activeJobs}</span>
-                )}
-              </NavLink>
-              <NavLink to="/share-links" aria-label="Мои ссылки" title="Мои ссылки">
-                <Link2 size={19} />
-                <span>Мои ссылки</span>
+              <NavLink to="/jobs" title="Задания">
+                <Download size={18} />
+                <span className="nav-text">Задания</span>
+                {activeJobs > 0 && <span className="job-count">{activeJobs}</span>}
               </NavLink>
             </nav>
             <div className="sidebar-section">
-              <span className="sidebar-label">ПЛЕЙЛИСТЫ</span>
-              <button
-                className="icon-button"
-                aria-label="Создать плейлист"
-                onClick={() => setCreateOpen(true)}
-              >
-                <Plus size={16} />
+              <span className="sidebar-label">Плейлисты</span>
+              <button className="icon-button" aria-label="Создать плейлист" title="Создать плейлист" onClick={() => setCreateOpen(true)}>
+                <Plus size={15} />
               </button>
             </div>
-            <nav className="playlist-nav">
-              {overview.playlists.slice(0, 12).map((p, index) => (
-                <NavLink key={p.id} to={`/playlists/${p.id}`}>
-                  <span className={`playlist-dot dot-${index % 5}`} />
+            <nav className="playlist-nav" aria-label="Плейлисты">
+              {overview.playlists.slice(0, 14).map((p) => (
+                <NavLink key={p.id} to={`/playlists/${p.id}`} title={p.title}>
+                  <span className="playlist-thumb">
+                    <ArtworkImage urls={p.coverUrls ?? []} fallback={<GenerativeCover seed={p.title} />} />
+                  </span>
                   <span className="truncate">{p.title}</span>
-                  {!p.manual && <Sparkles size={12} />}
+                  {!p.manual && <Sparkles size={12} aria-label="Умный плейлист" />}
                 </NavLink>
               ))}
-              {!overview.playlists.length && (
-                <p className="sidebar-hint">
-                  Здесь будут подборки,
-                  <br />
-                  собранные вами.
-                </p>
-              )}
+              {!overview.playlists.length && <p className="sidebar-hint">Здесь будут подборки, собранные вами.</p>}
             </nav>
             <div className="sidebar-bottom">
-              <YoutubeSyncNotifications reload={refresh} />
-              <NavLink className="settings-link" to="/settings" aria-label="Настройки" title="Настройки">
-                <Settings2 size={18} />
-                Настройки
-                <ChevronRight size={15} />
-              </NavLink>
-              <div className="user-card">
-                <span className="avatar">
-                  {user.login.slice(0, 1).toUpperCase()}
-                </span>
-                <div>
-                  <strong>{user.login}</strong>
-                  <small>Ваш личный аккаунт</small>
-                </div>
-                <button
-                  className="icon-button"
-                  aria-label="Выйти"
-                  onClick={() => logout().catch((e) => notify(e.message, true))}
-                >
-                  <LogOut size={17} />
-                </button>
+              <span className="avatar" aria-hidden>{user.login.slice(0, 1).toUpperCase()}</span>
+              <div className="user-name">
+                <strong className="truncate">{user.login}</strong>
+                <small>Личный аккаунт</small>
               </div>
+              <YoutubeSyncNotifications reload={refresh} />
+              <NavLink className="icon-button settings-link" to="/settings" aria-label="Настройки" title="Настройки">
+                <Settings2 size={17} />
+              </NavLink>
+              <button className="icon-button" aria-label="Выйти" title="Выйти" onClick={() => logout().catch((e) => notify(e.message, true))}>
+                <LogOut size={16} />
+              </button>
             </div>
           </aside>
           <main className="main-content">
@@ -612,11 +601,15 @@ function Workspace({
             }}
           />
         )}
-        <div className="toast-stack" aria-live="polite">
+        <div className="toast-stack" aria-live="polite" popover="manual" ref={toastLayer}>
           {toasts.map((t) => (
             <div key={t.id} className={`toast ${t.error ? "error" : ""}`}>
               {t.error ? <CircleAlert size={18} /> : <CheckCircle2 size={18} />}
               <span>{t.text}</span>
+              {t.action && <button type="button" className="toast-action" onClick={() => {
+                t.action!.run();
+                setToasts((old) => old.filter((x) => x.id !== t.id));
+              }}>{t.action.label}</button>}
               <button
                 className="icon-button"
                 aria-label="Закрыть уведомление"
@@ -635,21 +628,17 @@ function Workspace({
     </NotesContext.Provider>
   );
 }
-function LibraryNavigation(props: Omit<React.ComponentProps<typeof TagNavigation>, "hasPlayer">) {
-  return <TagNavigation {...props} hasPlayer={useHasPlayer()} />;
-}
-
 const FavoriteChangeContext = React.createContext<((id: string, favorite: boolean) => void) | undefined>(undefined);
 const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId: string; search: ReturnType<typeof useLibrarySearch> }) {
   const { library, overview, notify, openImport } = useData(),
     player = usePlayerCommands();
   const [filters, setFilters] = search;
-  const [selected, setSelected] = useState<string[]>([]),
-    [batchOpen, setBatchOpen] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
   const viewKey = `hibiki:library-view:${userId}`;
   const [view, setView] = useState<LibraryView>(() => {
     try {
-      return localStorage.getItem(viewKey) === "cards" ? "cards" : "list";
+      const stored = localStorage.getItem(viewKey);
+      return stored === "cards" || stored === "browse" ? stored : "list";
     } catch {
       return "list";
     }
@@ -683,9 +672,11 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   }, [pages, nextCursor, loading, error]);
   const actions = useRef(0);
   useEffect(() => () => {actions.current++;}, [pages, overview.revision]);
+  const tagsById = useRef(new Map<string, TagDto>());
+  tagsById.current = useMemo(() => new Map(library.tags.map(tag => [tag.id, tag])), [library.tags]);
   const idQuery = useMemo(() => {
     let pending: Promise<string[]> | undefined;
-    const read = (id?: string) => api<{ids: string[]}>("/library/ids", "POST", searchBody(filters, id), "low")
+    const read = (id?: string) => api<{ids: string[]}>("/library/ids", "POST", searchBody(filters, id, tagsById.current), "low")
       .then(result => result.ids);
     return () => pending ??= pages.fullOrder(selectionId, read)
       .then(ids => {
@@ -705,7 +696,7 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
   const restrictsFacets = filters.sort === "recent" || filters.query.trim() || filters.kind || filters.provider || filters.availability || filters.favoriteOnly
     || filters.minDuration || filters.maxDuration || filters.addedFrom || filters.addedThrough || filters.performanceFilter
-    || filters.needsClassification || filters.missingGroup;
+    || filters.needsClassification || filters.missingGroup || filters.tagIds.length > 0;
   const selectedIds = new Set(selected);
   const hasSelection = selected.length > 0;
   const [selectionScope, setSelectionScope] = useState<{query: typeof idQuery; ids: string[]}>();
@@ -744,39 +735,41 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
     }
   }
 
+  // While a new search loads, keep the previous counts instead of flashing zeros or unfiltered numbers.
+  const lastCounts = useRef(tagCounts);
+  if (tagCounts) lastCounts.current = tagCounts;
+  const counts = tagCounts ?? (restrictsFacets ? lastCounts.current : overview.tagCounts);
+  const searchProps = {search: filters, onChange: setFilters, catalog, counts};
+  const missing = overview.tags.length ? undefined : null;
   return (
-    <LibraryNavigation catalog={catalog} archivedTagNames={overview.archivedTagNames} counts={tagCounts ?? (restrictsFacets ? undefined : overview.tagCounts)}
-      search={filters} onChange={setFilters} userId={userId}>
-      <div className="title-row library-title-row">
-        <h1>Медиатека</h1>
+    <div className="library-page">
+      <header className="lib-head">
+        <div className="lib-head-text">
+          <h1>Медиатека</h1>
+          <p className="lib-head-sub">{records(overview.total)} · {catalog.active.length.toLocaleString("ru")} тегов{missing}</p>
+        </div>
         <Button className="primary" onClick={openImport} aria-label="Добавить медиа" title="Добавить медиа">
           <Plus size={17} />
-          <span>Добавить медиа</span>
+          <span>Добавить</span>
         </Button>
-      </div>
-      <section className="library-section">
-        <LibrarySearchControls
-          value={filters}
-          onChange={setFilters}
-          tags={library.tags}
-          count={total}
-          selectAll={total > 0 ? selectAll : undefined}
-          view={view}
-          onViewChange={changeView}
-          onPlay={() => void play()}
-        />
+      </header>
+      <LibrarySearchBox {...searchProps} />
+      <SourceTabs {...searchProps} total={total} view={view} onViewChange={changeView} />
+      <SourceTrail {...searchProps} />
+      <FacetBar {...searchProps} />
+      <ActiveFilters search={filters} onChange={setFilters} catalog={catalog} archivedTagNames={overview.archivedTagNames} />
+      <section className="library-section" aria-label="Записи">
         <NotesLoadError />
+        {view === "browse" ? (
+          <BrowseGrid {...searchProps} onShowList={() => changeView("list")} />
+        ) : <>
+        <ResultsBar search={filters} onChange={setFilters} total={total} loading={loading}
+          selectAll={total > 0 ? selectAll : undefined} onPlay={() => void play()} />
         {selected.length > 0 && (
           <div className="selection-toolbar">
             <strong>Выбрано: {selected.length}</strong>
+            <BulkTagger ids={selected} catalog={catalog} onDone={() => {}} />
             <CreateSelectionPlaylist ids={selected} onSaved={() => setSelected([])} />
-            <Button
-              className="subtle compact"
-              onClick={() => setBatchOpen(true)}
-            >
-              <Tags size={15} />
-              Изменить теги
-            </Button>
             <button className="text-button" onClick={() => setSelected([])}>
               Снять выбор
             </button>
@@ -792,13 +785,12 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
           onPerformance={value => setFilters(old => ({...old,performanceFilter:value}))}
           onSelected={setSelected}
           onActivate={item => void play(item)}
-          onTag={(id) => setFilters((old) => (
-            old.tagIds.includes(id) ? old : { ...old, tagIds: [...old.tagIds, id] }
-          ))}
+          onTag={(id) => setFilters((old) => addTag(old, catalog, id))}
         />
         </FavoriteChangeContext.Provider>
         <div ref={sentinel} aria-hidden="true" />
-        {loading && (!items.length || appending) && <div role="status" className="loading-inline"><LoaderCircle className="spin" size={18} /> Загружаем записи…</div>}
+        {loading && !items.length && <LibrarySkeleton view={view} />}
+        {loading && appending && <div role="status" className="loading-inline"><LoaderCircle className="spin" size={18} /> Загружаем записи…</div>}
         {error && <div role="alert"><ErrorMessage error={error} /><Button onClick={() => void pages.retry()}>Повторить загрузку</Button></div>}
         {!loading && !error && !items.length && (
           <EmptyState
@@ -822,13 +814,19 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
             }
           />
         )}
+        </>}
       </section>
-      {batchOpen && (
-        <BatchTags ids={selected} close={() => setBatchOpen(false)} />
-      )}
-    </LibraryNavigation>
+    </div>
   );
 });
+function LibrarySkeleton({ view }: { view: LibraryView }) {
+  return <div className={`lib-skeleton ${view === "cards" ? "cards" : ""}`} role="status" aria-label="Загружаем записи">
+    {Array.from({ length: view === "cards" ? 8 : 9 }, (_, index) => <div key={index} className="lib-skeleton-row">
+      <span className="ds-skeleton cover" /><span className="ds-skeleton line" style={{ width: `${48 + (index * 37) % 36}%` }} />
+      <span className="ds-skeleton line short" />
+    </div>)}
+  </div>;
+}
 function CreateSelectionPlaylist({ ids, onSaved }: { ids: string[]; onSaved: () => void }) {
   const [open, setOpen] = useState(false);
   return <>
@@ -854,7 +852,7 @@ type ItemTableProps = {
   playlistId?: string;
   view?: LibraryView;
 };
-type EditTarget = {id: string; focusSource?: boolean};
+type EditTarget = {id: string; focusSource?: boolean; item?: ItemDto};
 type ShareTarget = {id: string; issued: Promise<ShareLinkDto>};
 function ItemTable({
   items,
@@ -877,7 +875,24 @@ function ItemTable({
     [shareTarget, setShareTarget] = useState<ShareTarget>(),
     [busy, setBusy] = useState(false);
   const currentItems = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
-  const edit = editTarget ? currentItems.get(editTarget.id) : undefined;
+  const latestItems = useRef(currentItems);
+  latestItems.current = currentItems;
+  // The drawer keeps a snapshot so it stays open when an edit filters the item out.
+  const openEdit = React.useCallback((target: EditTarget) => setEditTarget({ ...target, item: latestItems.current.get(target.id) }), []);
+  const edit = editTarget ? currentItems.get(editTarget.id) ?? editTarget.item : undefined;
+  const editIndex = edit ? items.findIndex(item => item.id === edit.id) : -1;
+  // A completed item can leave a «needs classification» list: keep walking from its last place.
+  const lastIndex = useRef(-1);
+  if (editIndex >= 0) lastIndex.current = editIndex;
+  const neighbour = (step: number) => {
+    const at = editIndex >= 0 ? editIndex + step : step < 0 ? lastIndex.current - 1 : lastIndex.current;
+    const next = at >= 0 ? items[at] : undefined;
+    return next && next.id !== edit?.id ? () => openEdit({ id: next.id }) : undefined;
+  };
+  // The drawer stays mounted while it closes so the dialog animates out and returns focus.
+  const lastEdit = useRef<ItemDto>(undefined);
+  if (edit) lastEdit.current = edit;
+  const drawerItem = edit ?? lastEdit.current;
   const inLibrary = view !== undefined;
   const selectedIds = new Set(selected);
   function activate(item: ItemDto, index: number) {
@@ -891,7 +906,7 @@ function ItemTable({
     catalog={catalog} checked={selected && selectedIds.has(item.id)} onSelect={select} activateItem={activate}
     inLibrary={inLibrary} last={index === (playlistOrder?.length ?? items.length) - 1} playlistId={playlistId}
     reasons={reasons} selectedTags={selectedTags} showMissing={showMissing} onTag={onTag} onPerformance={onPerformance}
-    reorder={reorder} setEditTarget={setEditTarget} setShareTarget={setShareTarget} setRemove={setRemove} />);
+    reorder={reorder} setEditTarget={openEdit} setShareTarget={setShareTarget} setRemove={setRemove} />);
 
   return (
     <>
@@ -900,12 +915,18 @@ function ItemTable({
           <div className="collection-results">{results}</div>
         </div>
       )}
-      {edit && (
-        <EditItem
-          key={edit.id}
-          item={edit}
-          focusSource={editTarget?.focusSource}
-          close={() => setEditTarget(undefined)}
+      {drawerItem && (
+        <ItemDrawer
+          open={!!edit}
+          item={drawerItem}
+          catalog={catalog}
+          initialTab={editTarget?.focusSource ? "sources" : "tags"}
+          onClose={() => setEditTarget(undefined)}
+          onPrev={edit ? neighbour(-1) : undefined}
+          onNext={edit ? neighbour(1) : undefined}
+          onPlay={edit ? () => editIndex >= 0 ? activate(edit, editIndex)
+            : player.activateItem([edit], 0, playlistId, { fromLibrary: inLibrary || !!playlistId }) : undefined}
+          panels={itemPanels(drawerItem, refresh, !!editTarget?.focusSource)}
         />
       )}
       {shareTarget && <React.Suspense fallback={null}>
@@ -1152,8 +1173,16 @@ const ItemRow = React.memo(function ItemRow({ item, index, catalog, checked, las
   );
 
   const badges = librarySourceBadges(item);
+  const liveTags = item.tags.filter(tag => !tag.archived);
+  const artists = liveTags.filter(tag => groupOf(tag) === "artist");
+  const sourceTag = rowSource(liveTags, catalog, selectedTags);
+  const fullPath = sourceTag ? (catalog.paths(sourceTag.id)[0] ?? sourceTag.name).split(" › ") : [];
+  const sourcePath = fullPath.length > 2 ? ["…", ...fullPath.slice(-2)] : fullPath;
+  const missing = missingClassification(item.tags, item.performance, item.voices);
+  const sourceSummary = badges.map(badge => badge.label).join(" · ");
+  const problem = playlistSoundError ?? (!available && item.shared?.available !== false ? "Нет рабочего источника" : undefined);
   return (
-    <article className={`collection-entry ${active ? "current" : ""}`}
+    <article className={`collection-entry ${active ? "current" : ""} ${available ? "" : "unavailable"} ${playing ? "playing" : ""}`}
       key={item.id} aria-current={active || undefined}>
       <div className="entry-select">{inLibrary ? selection : (
         <button className="icon-button playlist-track-play" type="button" disabled={!available || !!playlistSoundError} onClick={activate}
@@ -1161,36 +1190,45 @@ const ItemRow = React.memo(function ItemRow({ item, index, catalog, checked, las
           {playing ? <Pause size={15} /> : <Play size={15} />}
         </button>
       )}</div>
-      <div className="entry-identity">
-        {cover}
-        <div className="entry-description">
-          <div className="item-name-actions">{itemTitle}</div>
+      {cover}
+      <div className="entry-main">
+        <div className="item-name-actions">{itemTitle}{video && <Video size={13} className="entry-kind" aria-label="Видео" />}</div>
+        <div className="entry-sub">
+          {showMissing
+            ? <small className="missing-reasons">Не указано · {missing.map(k => missingLabels[k]).join(", ")}</small>
+            : artists.length
+              ? <span className="entry-artists">{artists.map((artist, i) => <React.Fragment key={artist.id}>{i > 0 && ", "}
+                  {onTag ? <button type="button" className="entry-artist" onClick={() => onTag(artist.id)}>{artist.name}</button> : <span>{artist.name}</span>}
+                </React.Fragment>)}</span>
+              : <span className="entry-dim">Исполнитель не указан</span>}
+          {!showMissing && missing.length > 0 && <button type="button" className="entry-need" title={`Не хватает разметки: ${missing.map(k => missingLabels[k].toLocaleLowerCase()).join(", ")}`}
+            aria-label="Дополнить разметку" onClick={() => setEditTarget({ id: item.id })}><Sparkle size={11} /></button>}
+          {itemLoading ? <span className="entry-status">{itemLoading}</span> : problem && <span className="entry-status warn">{problem}</span>}
           <SharedItemStatus item={item} />
-          <ItemTagList tags={item.tags} catalog={catalog} selected={selectedTags} performance={item.performance}
-            voices={item.voices} onTag={onTag} onPerformance={onPerformance}/>
-          {showMissing && <small className="missing-reasons">Не указано · {missingClassification(item.tags,item.performance,item.voices).map(k => missingLabels[k]).join(", ")}</small>}
-          <div className="entry-meta">
-            <span>{itemLoading || kindLabel} · {formatDuration(item.duration)}</span>
-            {badges.map(({ provider, status, label }) => {
-              const Icon = provider === "youtube" ? Youtube : provider === "local" ? HardDrive : provider === "shared" ? Link2 : CircleAlert;
-              return (
-                <span key={provider} className="entry-source" data-provider={provider} data-status={status}
-                  role="img" aria-label={label} title={label}>
-                  <Icon size={13} aria-hidden="true" />
-                </span>
-              );
-            })}
-            {playlistSoundError ? <span>{playlistSoundError}</span> : !available && item.shared?.available !== false && <span>Нет рабочего источника</span>}
-          </div>
-          {reasons?.[item.id] && (
-            <details className="reason-details">
-              <summary>Почему в плейлисте</summary>
-              <p>{reasons[item.id]!.join(" · ")}</p>
-            </details>
-          )}
         </div>
+        {reasons?.[item.id] && (
+          <details className="reason-details">
+            <summary>Почему в плейлисте</summary>
+            <p>{reasons[item.id]!.join(" · ")}</p>
+          </details>
+        )}
       </div>
-      <div className="entry-tools">{favorite}{menu}</div>
+      <div className="entry-source-path" title={fullPath.join(" › ")}>
+        {sourcePath.map((part, i) => <React.Fragment key={i}>
+          {i > 0 && <span className="sep">›</span>}
+          {i === sourcePath.length - 1 && onTag && sourceTag
+            ? <button type="button" className="leaf" onClick={() => onTag(sourceTag.id)}>{part}</button>
+            : <span className={i === sourcePath.length - 1 ? "leaf" : ""}>{part}</span>}
+        </React.Fragment>)}
+      </div>
+      <ItemTagList tags={item.tags} catalog={catalog} selected={selectedTags} performance={item.performance}
+        voices={item.voices} onTag={onTag} onPerformance={onPerformance}/>
+      <div className="entry-duration num" title={sourceSummary}>{formatDuration(item.duration)}</div>
+      <div className="entry-tools">
+        <button type="button" className="icon-button entry-tag-button" title="Разметка" aria-label={`Разметка · ${item.title}`}
+          onClick={() => setEditTarget({ id: item.id })}><Tags size={15} /></button>
+        {favorite}{menu}
+      </div>
     </article>
   );
 });
@@ -1228,104 +1266,36 @@ function FavoriteButton({ item, withLabel = false }: { item: ItemDto; withLabel?
     </button>
   );
 }
-function EditItem({ item, close, focusSource }: { item: ItemDto; close: () => void; focusSource?: boolean }) {
-  const { library, refresh, notify } = useData(),
-    [title, setTitle] = useState(item.title),
-    [tagIds, setTagIds] = useState(item.tags.filter(t => !t.archived).map((t) => t.id)),
-    [performance,setPerformance] = useState<Performance>(item.performance ?? "unknown"),
-    [voices,setVoices] = useState<Voice[]>(item.voices ?? []),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
+function itemPanels(item: ItemDto, refresh: () => Promise<void>, focusSource: boolean): DrawerPanels {
   const borrowedOnly = !!item.shared && item.sources.every(source => source.shared);
-  const missing = missingClassification(tagIds.flatMap(id => catalog.byId.get(id) ?? []),performance,voices);
-  return (
-    <Modal
-      title="Детали записи"
-      subtitle="Ваше название сохраняется, даже если источник исчезнет."
-      close={close}
-    >
-      <FavoriteButton item={item} withLabel />
-      <SharedItemStatus item={item} />
-      <form
-        onSubmit={async (e) => {
-          e.preventDefault();
-          setBusy(true);
-          try {
-            const submitter = (e.nativeEvent as SubmitEvent).submitter;
-            await api(`/items/${item.id}`, "PATCH", {
-              ...(title !== item.title && {title}), tagIds, performance, voices,
-              completeClassification: submitter instanceof HTMLButtonElement && submitter.name === "complete",
-            });
-            await refresh();
-            notify("Запись обновлена");
-            close();
-          } catch (e) {
-            setError((e as Error).message);
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
-        <label>
-          Название
-          <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            maxLength={1000}
-            required
-          />
-        </label>
-        <p className="small muted">
-          Название источника: {item.originalTitle || "Неизвестно"}
-        </p>
-        <div className="edit-classification">{groupKeys.map(key => <details key={key} className="edit-group">
-          <summary>{groups[key]}<span>{catalog.active.filter(tag => tagIds.includes(tag.id) && groupOf(tag) === key).length}</span></summary>
-          <TagPicker catalog={catalog} group={key} ids={tagIds} onChange={setTagIds}/>
-        </details>)}</div>
-        <PerformanceEditor performance={performance} voices={voices} onChange={(p,v) => {setPerformance(p);setVoices(v);}}/>
-        <p className="small muted" role="status">{missing.length ? "Осталось указать: " + missing.map(key => missingLabels[key]).join(", ") : "Все обязательные поля заполнены"}</p>
-        <ErrorMessage error={error} />
-        <div className="modal-actions">
-          <Button type="button" className="subtle" onClick={close}>
-            Закрыть
-          </Button>
-          <Button type="submit" className={missing.length ? "primary" : "subtle"} busy={busy}>Сохранить</Button>
-          <Button type="submit" name="complete" className="primary" disabled={!!missing.length} busy={busy}>Завершить разметку</Button>
+  return {
+    favorite: <FavoriteButton item={item} withLabel />,
+    shared: <SharedItemStatus item={item} />,
+    note: <NoteEditor kind="item" id={item.id} />,
+    sources: <>
+      {item.sources.map((s) => (
+        <div className="source-details drawer-source" key={s.id}>
+          <div>
+            <span>
+              {s.shared ? <Link2 size={16} /> : s.provider === "local" ? <HardDrive size={16} /> : <Youtube size={16} />}
+              {s.shared ? "Источник по ссылке" : s.provider === "local" ? "Локальный файл" : "YouTube"}
+            </span>
+            <span className={`ds-pill ${s.status === "available" ? "ok" : s.status === "unavailable" ? "err" : ""}`}>
+              {s.status === "available" ? "Доступен" : s.status === "unavailable" ? "Недоступен" : "Не проверен"}
+            </span>
+            {s.reason && <p>{s.reason}</p>}
+          </div>
+          {!s.shared && <NoteEditor kind="source" id={s.id} />}
         </div>
-      </form>
-      <NoteEditor kind="item" id={item.id} />
-      {item.sources.length > 0 && (
-        <section className="item-source-notes" aria-label="Источники">
-          <h3>Источники</h3>
-          {item.sources.map((s) => (
-            <div className="source-details" key={s.id}>
-              <div>
-                <span>
-                  {s.shared ? <Link2 size={16} /> : s.provider === "local" ? <HardDrive size={16} /> : <Youtube size={16} />}
-                  {s.shared ? "Источник по ссылке" : s.provider === "local" ? "Локальный файл" : "YouTube"}
-                </span>
-                <span className={s.status === "unavailable" ? "danger-text" : "muted"}>
-                  {s.status === "available"
-                    ? "Доступен"
-                    : s.status === "unavailable"
-                      ? "Недоступен"
-                      : "Не проверен"}
-                </span>
-                {s.reason && <p>{s.reason}</p>}
-              </div>
-              {!s.shared && <NoteEditor kind="source" id={s.id} />}
-            </div>
-          ))}
-        </section>
-      )}
-      <React.Suspense fallback={<div role="status">Загружаем источники…</div>}>
-        {!borrowedOnly && <VisualEditor key={item.id} item={item} reload={refresh} />}
+      ))}
+      <React.Suspense fallback={<div role="status" className="loading-inline">Загружаем…</div>}>
         <SourceReplacement item={item} reload={refresh} localOnly={borrowedOnly} focusSource={focusSource} />
       </React.Suspense>
-      <ItemListeningSummary itemId={item.id} />
-    </Modal>
-  );
+    </>,
+    visual: borrowedOnly ? <p className="drawer-hint">Видеоряд доступен только для своих записей.</p>
+      : <React.Suspense fallback={<div role="status" className="loading-inline">Загружаем…</div>}><VisualEditor key={item.id} item={item} reload={refresh} /></React.Suspense>,
+    history: <ItemListeningSummary itemId={item.id} />,
+  };
 }
 
 type ItemHistorySummary = {
@@ -1386,58 +1356,6 @@ function ItemListeningSummary({ itemId }: { itemId: string }) {
       )}
     </details>
   );
-}
-function BatchTags({ ids, close }: { ids: string[]; close: () => void }) {
-  const {library,refresh,notify} = useData();
-  const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
-  const [group,setGroup] = useState<TagGroup|"performance">("source"), [chosen,setChosen] = useState<string[]>([]);
-  const [mode,setMode] = useState<BatchMode>("add"), [busy,setBusy] = useState(false), [error,setError] = useState("");
-  const [performance,setPerformance] = useState<Performance>("unknown"), [voices,setVoices] = useState<Voice[]>([]);
-  const [preview,setPreview] = useState<{revision:string; changes:{id:string;tagIds?:string[];performance?:Performance;voices?:Voice[]}[];
-    removed:{label:string;count:number}[] }>();
-  async function prepare() {
-    const {revision} = await api<LibraryCardOverviewDto>("/library/overview?playlists=summary");
-    const items = await fetchItems(ids);
-    if(items.length !== ids.length) throw Error("Состав выборки изменился. Выберите записи заново.");
-    if (group !== "performance") {
-      const {changes,removed} = batchTagChanges(items,chosen,group,mode);
-      setPreview({revision, changes, removed:removed.map(({tag,count}) => ({label:catalog.paths(tag.id).join(" / ") || tag.name,count}))});
-    } else {
-      const current = itemPerformance(performance,voices).label;
-      const changes = items.filter(t => itemPerformance(t.performance,t.voices).label !== current);
-      const removed = new Map<string,number>();
-      for (const item of changes) {
-        const label = itemPerformance(item.performance,item.voices).label;
-        removed.set(label, (removed.get(label) ?? 0)+1);
-      }
-      setPreview({revision, changes:changes.map(({id}) => ({id,performance,voices})),removed:[...removed].map(([label,count]) => ({label,count}))});
-    }
-  }
-  async function submit() {
-    setBusy(true);setError("");
-    try {
-      if (!preview) await prepare();
-      else {
-        await api("/items/batch","POST",{expectedRevision:preview.revision,changes:preview.changes});
-        await refresh(); notify("Разметка обновлена"); close();
-      }
-    } catch(e) {setPreview(undefined);setError((e as Error).message);} finally {setBusy(false);}
-  }
-  return <Modal title={`Разметка для ${ids.length} записей`} close={close}>
-    <fieldset className="batch-choices" disabled={busy} onChange={() => setPreview(undefined)}>
-      <GroupSelect value={group} allowPerformance onChange={g => {setGroup(g);setChosen([]);}}/>
-      {group === "performance" ? <PerformanceEditor performance={performance} voices={voices} onChange={(p,v) => {setPerformance(p);setVoices(v);}}/>
-        : <><label>Действие<select value={mode} onChange={e => setMode(e.target.value as BatchMode)}>
-          <option value="add">Добавить к существующим</option><option value="replace">Заменить значения раздела</option>
-          <option value="remove">Убрать выбранные значения</option></select></label>
-          <TagPicker key={group} group={group} catalog={catalog} ids={chosen} onChange={setChosen}/></>}
-    </fieldset>
-    {preview && <section className="batch-preview" aria-live="polite"><h3>Изменится записей: {preview.changes.length}</h3>
-      {preview.removed.length > 0 && <><p>Будут сняты</p><ul>{preview.removed.map(r => <li key={r.label}>{r.label} · {r.count}</li>)}</ul></>}
-    </section>}
-    <ErrorMessage error={error}/><div className="modal-actions"><Button className="subtle" onClick={close}>Отмена</Button>
-      <Button className="primary" disabled={preview?.changes.length === 0} busy={busy} onClick={() => void submit()}>{preview ? "Применить" : "Показать изменения"}</Button>
-    </div></Modal>;
 }
 function CatalogPlaylistEditor({ id, close }: { id: string; close: () => void }) {
   const [playlist, setPlaylist] = useState<PlaylistDto>();
@@ -1704,6 +1622,8 @@ function PlaylistPage({ id, onBrowseTag }: { id: string; onBrowseTag: (id: strin
     observer.observe(sentinel.current);
     return () => observer.disconnect();
   }, [resolved, edit, hasMore, loadingMore, moreError]);
+  const heroCover = resolved?.cover?.url ?? card?.coverUrls?.[0];
+  const heroTint = useCoverTint(heroCover?.startsWith("https://i.ytimg.com/") ? heroCover.replace(/\/(sd|hq|maxres)default\.jpg$/, "/mqdefault.jpg") : heroCover);
   if (notFound)
     return (
       <>
@@ -1754,7 +1674,7 @@ function PlaylistPage({ id, onBrowseTag }: { id: string; onBrowseTag: (id: strin
           <ArrowLeft size={14} />К подборкам
         </Link>
       </PageTop>
-      <section className="playlist-detail-hero">
+      <section className="playlist-detail-hero" style={heroTint ? { "--hero": heroTint } as React.CSSProperties : undefined}>
         <PlaylistCover title={playlist.title} items={resolved?.items}
           coverUrls={resolved?.cover?.url ? [resolved.cover.url, ...(card?.coverUrls ?? [])] : card?.coverUrls} large />
         <div>

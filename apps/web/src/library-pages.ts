@@ -1,11 +1,14 @@
-import type { CompactLibraryOverviewDto, ItemDto, LibraryCardPageDto, LibraryPageDto, LibraryCardOverviewDto } from "@hibiki/contracts";
+import type { CompactLibraryOverviewDto, ItemDto, TagDto, LibraryCardPageDto, LibraryPageDto, LibraryCardOverviewDto } from "@hibiki/contracts";
 import { api, ApiError } from "./api";
 import type { LibrarySearch } from "./library-search";
+import { tagSetsFor } from "./library-filters";
 
 const emptyPage: LibraryPageDto = {items: [], total: 0, nextCursor: null};
 
-export function searchBody({ previousSort, ...filters }: LibrarySearch, selectionId?: string) {
-  return {filters, selectionId, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone};
+export function searchBody({ previousSort, tagAll, ...filters }: LibrarySearch, selectionId: string | undefined, tags: ReadonlyMap<string, TagDto>) {
+  const tagSets = filters.tagIds.length ? tagSetsFor({ tagIds: filters.tagIds, tagAll }, tags) : undefined;
+  const tagged = tagSets ? {...filters, tagSets} : filters;
+  return {filters: tagged, selectionId, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone};
 }
 
 // The overview supplies the first set of counts. Keep the last filtered set as
@@ -16,7 +19,7 @@ export class LibraryCardReader {
   async page(filters: LibrarySearch, overview: LibraryCardOverviewDto, cursor: string | undefined, signal: AbortSignal, selectionId?: string): Promise<LibraryPageDto> {
     const previous = this.last ?? { key: overview.countsKey, counts: overview.tagCounts };
     const page = await api<LibraryCardPageDto>("/library/page", "POST", {
-      ...searchBody(filters, selectionId), cursor, cards: true, indexedCounts: true, tagRevision: overview.revision, countsKey: previous.key,
+      ...searchBody(filters, selectionId, new Map(overview.tags.map(tag => [tag.id, tag]))), cursor, cards: true, indexedCounts: true, tagRevision: overview.revision, countsKey: previous.key,
     }, "high", signal);
     const tags = new Map([...overview.tags, ...page.tags].map(tag => [tag.id, tag]));
     const items = page.items.map(({tagRefs, ...card}) => ({ ...card, updatedAt: card.updatedAt ?? card.createdAt,

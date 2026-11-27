@@ -2,13 +2,15 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { ItemDto, SourceDto } from "@hibiki/contracts";
-import { LibrarySearchControls } from "./LibrarySearchControls";
+import { ActiveFilters, FacetBar, ResultsBar, SourceTabs } from "./LibraryFilters";
+import { TagCatalog } from "./taxonomy";
 import {
   changeLibrarySort,
   restoreLibrarySearch,
   countLibraryTags,
   defaultLibrarySearch,
   libraryFilterConditions,
+  librarySorts,
   librarySourceBadges,
   libraryTagChoices,
   matchesSearch,
@@ -191,38 +193,36 @@ describe("library search", () => {
     expect(selectLibraryResults(selected, results, false)).toEqual(["hidden"]);
   });
 
-  it("shows quick filters and removable advanced conditions while the advanced panel is collapsed", () => {
-    const html = renderToStaticMarkup(createElement(LibrarySearchControls, {
-      value: { ...defaultLibrarySearch, kind: "video", tagIds: [tag.id], provider: "youtube" },
-      tags: [tag], count: 3, view: "cards", onViewChange: () => {}, onChange: () => {}, onPlay: () => {},
-    }));
-    expect(html).toMatch(/<button[^>]*aria-pressed="true"[^>]*>Видео<\/button>/);
-    expect(html).toContain('aria-label="Карточки" aria-pressed="true"');
-    expect(html).toMatch(/<button[^>]*aria-label="Фильтры \(1\)"[^>]*aria-expanded="false"[^>]*>/);
+  it("shows removable conditions, the result count and the chosen view", () => {
+    const catalog = new TagCatalog([tag]);
+    const value = { ...defaultLibrarySearch, kind: "video" as const, tagIds: [tag.id], provider: "youtube" as const };
+    const html = renderToStaticMarkup(createElement("div", null,
+      createElement(ActiveFilters, { search: value, catalog, onChange: () => {} }),
+      createElement(ResultsBar, { search: value, total: 3, loading: false, onChange: () => {}, onPlay: () => {} }),
+      createElement(SourceTabs, { search: value, catalog, counts: {}, total: 3, view: "cards", onViewChange: () => {}, onChange: () => {} })));
     expect(html).toContain('aria-label="Снять фильтр «YouTube»"');
-    expect(html).toContain('role="status">Найдено: 3');
-    expect(html).toContain("Сбросить фильтры");
+    expect(html).toContain('aria-label="Снять фильтр «Видео»"');
+    expect(html).toContain('aria-label="Убрать «Саундтрек»"');
+    expect(html).toMatch(/<b class="num">3<\/b> записи/);
+    expect(html).toMatch(/title="Карточки" aria-pressed="true"/);
+    expect(html).toContain("Сбросить");
   });
 
   it("offers one direct playback action for a filtered collection", () => {
-    const html = renderToStaticMarkup(createElement(LibrarySearchControls, {
-      value: defaultLibrarySearch, tags: [], count: 3, view: "list",
-      onViewChange: () => {}, onChange: () => {}, onPlay: () => {},
+    const html = renderToStaticMarkup(createElement(ResultsBar, {
+      search: defaultLibrarySearch, total: 3, loading: false, onChange: () => {}, onPlay: () => {},
     }));
-    expect(html).toMatch(/<button[^>]+aria-label="Играть выдачу"[^>]*>/);
-    expect(html).not.toContain("Слушать найденное");
+    expect(html).toMatch(/<button[^>]*>.*Играть выдачу<\/button>/);
   });
 
-  it("shows the three independent performance controls and a filter for incomplete records", () => {
-    const html = renderToStaticMarkup(createElement(LibrarySearchControls, {
-      value: { ...defaultLibrarySearch, performanceFilter: "vocal" }, tags: [], count: 3, view: "list",
-      onViewChange: () => {}, onChange: () => {}, onPlay: () => {},
+  it("shows performance and voice controls next to the tag facets", () => {
+    const html = renderToStaticMarkup(createElement(FacetBar, {
+      search: { ...defaultLibrarySearch, performanceFilter: "vocal" }, catalog: new TagCatalog([]), counts: {}, onChange: () => {},
     }));
-    expect(html).toMatch(/aria-pressed="true"[^>]*>Мужской/);
-    expect(html).toMatch(/aria-pressed="true"[^>]*>Женский/);
-    expect(html).toMatch(/aria-pressed="false"[^>]*>OST/);
-    expect(html).toContain("Требуют разметки");
-    expect(html).toContain("Где доступно");
+    expect(html).toMatch(/aria-pressed="true"[^>]*>.*Вокал/);
+    expect(html).toMatch(/aria-pressed="true"[^>]*>Любой</);
+    expect(html).toMatch(/aria-pressed="false"[^>]*>.*OST/);
+    for (const label of ["Исполнитель", "Жанр", "Настроение", "Метки", "Ещё"]) expect(html).toContain(label);
   });
 });
 
@@ -237,15 +237,15 @@ it("restores the previous random order and current filters after leaving recent 
 });
 
 it("offers personal sorts and shows the reshuffle action only for random results", () => {
-  const controls = (sort: typeof defaultLibrarySearch.sort) => renderToStaticMarkup(createElement(LibrarySearchControls, {
-    value: { ...defaultLibrarySearch, sort }, tags: [], count: 3, view: "list",
-    onViewChange: () => {}, onChange: () => {}, onPlay: () => {},
+  const bar = (sort: typeof defaultLibrarySearch.sort) => renderToStaticMarkup(createElement(ResultsBar, {
+    search: { ...defaultLibrarySearch, sort }, total: 3, loading: false, onChange: () => {}, onPlay: () => {},
   }));
-  const random = controls("random");
-  for (const label of ["Чаще слушаю", "Недавно слушал", "В случайном порядке"]) expect(random).toContain(label);
-  expect(random).toContain('aria-label="Перемешать ещё раз"');
-  expect(controls("recent")).not.toContain('aria-label="Перемешать ещё раз"');
-  expect(controls("recent")).toContain('aria-label="Выключить режим «Недавно слушал»"');
+  for (const label of ["Чаще слушаю", "Недавно слушал", "В случайном порядке"]) expect(Object.values(librarySorts)).toContain(label);
+  expect(renderToStaticMarkup(createElement(FacetBar, { search: { ...defaultLibrarySearch, sort: "random" }, catalog: new TagCatalog([]), counts: {}, onChange: () => {} })))
+    .toContain('aria-label="Сортировка: В случайном порядке"');
+  expect(bar("random")).toContain("Перемешать ещё раз");
+  expect(bar("recent")).not.toContain("Перемешать ещё раз");
+  expect(bar("recent")).toContain("Выключить «Недавно слушал»");
 });
 
 it("keeps valid saved criteria when a field from a previous version is unsupported", () => {

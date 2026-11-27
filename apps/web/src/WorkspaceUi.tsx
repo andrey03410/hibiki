@@ -2,12 +2,14 @@ import React, {createContext, useContext, useEffect, useRef, type ReactNode} fro
 import {ChevronRight, CircleAlert, LoaderCircle, Music2, X} from "lucide-react";
 import type {LibraryCardOverviewDto, LibraryDto} from "@hibiki/contracts";
 
+/** Optional toast button, e.g. «Отменить» after an autosave. */
+export type ToastAction = { label: string; run: () => void };
 export const EMPTY: LibraryDto = { items: [], tags: [], playlists: [], jobs: [] };
 export const DataContext = createContext<{
   library: LibraryDto;
   overview: LibraryCardOverviewDto;
   refresh: () => Promise<void>;
-  notify: (text: string, error?: boolean) => void;
+  notify: (text: string, error?: boolean, action?: ToastAction) => void;
   openImport: () => void;
 }>({
   library: EMPTY,

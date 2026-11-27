@@ -2,7 +2,15 @@ import { useState } from "react";
 import { Download, Plus, LoaderCircle, CircleAlert, CheckCircle2, RefreshCw } from "lucide-react";
 import type { JobDto } from "@hibiki/contracts";
 import { api } from "./api";
-import { Button, EmptyState, ErrorMessage, Modal, PageTop, useData } from "./WorkspaceUi";
+import { Button, EmptyState, ErrorMessage, Modal, useData } from "./WorkspaceUi";
+import { Segmented } from "./design/primitives";
+
+const isActive = (job: JobDto) => job.state === "running" || job.state === "queued";
+/** «Сейчас» — running and queued work, «Ранее» — finished jobs. */
+export function groupsOf(jobs: JobDto[]) {
+  const now = jobs.filter(isActive), earlier = jobs.filter(job => !isActive(job));
+  return [{ title: "Сейчас", jobs: now }, { title: "Ранее", jobs: earlier }].filter(group => group.jobs.length);
+}
 
 const JOB_NAMES: Record<string, string> = {
   "youtube-import": "Импорт из YouTube",
@@ -133,56 +141,7 @@ export default function JobsPage() {
       setPending("");
     }
   }
-  async function openResult(previewId: string, appliedJobId: string) {
-    setPending(`${previewId}:result`);
-    try {
-      setImportResult(await api<JobDto>(`/jobs/${encodeURIComponent(appliedJobId)}`));
-    } catch (e) {
-      notify((e as Error).message, true);
-    } finally {
-      setPending("");
-    }
-  }
-  return (
-    <>
-      <PageTop label="Задания">
-        <span className="status-pill">
-          <span className="online-dot" />
-          Обновляется автоматически
-        </span>
-      </PageTop>
-      <div className="title-row">
-        <div>
-          <span className="eyebrow">ПУСТЬ HIBIKI ЗАЙМЁТСЯ ЭТИМ</span>
-          <h1>
-            Задания<span className="heading-dot">.</span>
-          </h1>
-          <p className="muted">
-            Импорт, скачивание и перенос продолжаются, пока вы слушаете.
-          </p>
-        </div>
-        <Button className="primary" onClick={openImport}>
-          <Plus size={17} />
-          Добавить медиа
-        </Button>
-      </div>
-      <div className="segmented jobs-filter">
-        {[
-          ["all", "Все задания"],
-          ["active", "В работе"],
-          ["failed", "С ошибками"],
-        ].map(([id, label]) => (
-          <button
-            key={id}
-            className={filter === id ? "active" : ""}
-            onClick={() => setFilter(id!)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-      <div className="jobs-list">
-        {jobs.map((job) => {
+  function renderJob(job: JobDto) {
           const active = job.state === "running" || job.state === "queued",
             result = job.result as any;
           const isPreview =
@@ -291,8 +250,39 @@ export default function JobsPage() {
               </div>
             </article>
           );
-        })}
-      </div>
+  }
+  async function openResult(previewId: string, appliedJobId: string) {
+    setPending(`${previewId}:result`);
+    try {
+      setImportResult(await api<JobDto>(`/jobs/${encodeURIComponent(appliedJobId)}`));
+    } catch (e) {
+      notify((e as Error).message, true);
+    } finally {
+      setPending("");
+    }
+  }
+  return (
+    <>
+      <header className="page-head with-actions">
+        <div>
+          <h1>Задания</h1>
+          <p>Импорт, скачивание и перенос продолжаются, пока вы слушаете.</p>
+        </div>
+        <span className="ds-pill ok"><span className="online-dot" />Обновляется автоматически</span>
+        <Button className="primary" onClick={openImport}>
+          <Plus size={17} />
+          Добавить медиа
+        </Button>
+      </header>
+      <Segmented label="Фильтр заданий" value={filter} onChange={setFilter} options={[
+        { value: "all", label: "Все задания" },
+        { value: "active", label: "В работе" },
+        { value: "failed", label: "С ошибками" },
+      ]} />
+      {groupsOf(jobs).map(group => <section className="jobs-group" key={group.title}>
+        <h2 className="jobs-group-title">{group.title}<span className="n num">{group.jobs.length}</span></h2>
+        <div className="jobs-list">{group.jobs.map(renderJob)}</div>
+      </section>)}
       {!jobs.length && (
         <EmptyState
           title={

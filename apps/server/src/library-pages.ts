@@ -40,7 +40,8 @@ function facetToken(ownerId: string, revision: string, search: BrowserLibrarySea
   const scope = [ownerId, revision, search.query.trim(), search.kind, search.provider, search.availability, search.favoriteOnly,
     search.minDuration, search.maxDuration, search.addedFrom, search.addedThrough,
     search.addedFrom || search.addedThrough ? zone : "", search.performanceFilter || "", !!search.needsClassification,
-    search.missingGroup || "", search.sort === "recent"];
+    search.missingGroup || "", search.sort === "recent",
+    ...(search.tagSets?.length ? [search.tagSets.map(set => [set.group, [...set.ids].sort(), !!set.all])] : [])];
   return createHash("sha256").update(JSON.stringify(scope)).digest("hex").slice(0, 24);
 }
 
@@ -156,13 +157,14 @@ async function borrowedStatus(tx: Tx, ownerId: string, search: BrowserLibrarySea
   return status;
 }
 
-function tagFilter(ownerId: string, search: BrowserLibrarySearch) {
-  const tagIds = [...new Set(search.tagIds)];
-  if (!tagIds.length) return;
+type TagSet = { ids: string[]; all?: boolean };
+
+function tagSetFilter(ownerId: string, set: TagSet) {
+  const tagIds = [...new Set(set.ids)];
   const selected = tagIds.length === 1
     ? Prisma.sql`= ${tagIds[0]}`
     : Prisma.sql`IN (SELECT value FROM json_each(${JSON.stringify(tagIds)}))`;
-  if (tagIds.length === 1 || search.tagMode === "or") {
+  if (tagIds.length === 1 || !set.all) {
     return Prisma.sql`i.id IN (
       SELECT it.itemId FROM ItemTag it WHERE it.tagId IN (
         SELECT descendant FROM ancestry WHERE ancestor ${selected}
@@ -179,6 +181,18 @@ function tagFilter(ownerId: string, search: BrowserLibrarySearch) {
   )`;
 }
 
+/** The tag sets a search applies: explicit site sets, or the legacy flat selection. */
+function searchTagSets(search: BrowserLibrarySearch): (TagSet & { group?: string })[] {
+  if (search.tagSets?.length) return search.tagSets;
+  const tagIds = [...new Set(search.tagIds)];
+  return tagIds.length ? [{ ids: tagIds, all: search.tagMode !== "or" }] : [];
+}
+
+function tagFilter(ownerId: string, sets: TagSet[]) {
+  if (!sets.length) return;
+  return Prisma.join(sets.map(set => tagSetFilter(ownerId, set)), " AND ");
+}
+
 function itemFilter(ownerId: string, search: BrowserLibrarySearch, zone?: string, borrowed?: BorrowedStatus) {
   const sql = Prisma.sql;
   const clauses = [sql`i.ownerId = ${ownerId}`];
@@ -193,7 +207,7 @@ function itemFilter(ownerId: string, search: BrowserLibrarySearch, zone?: string
   if (from) clauses.push(sql`julianday(i.createdAt) >= julianday(${from.toISOString()})`);
   if (end) clauses.push(sql`julianday(i.createdAt) < julianday(${end.toISOString()})`);
 
-  const tags = tagFilter(ownerId, search);
+  const tags = tagFilter(ownerId, searchTagSets(search));
   if (tags) clauses.push(tags);
   if (search.sort === "recent") clauses.push(sql`i.id IN (
     SELECT itemId FROM ListeningSummary WHERE ownerId = ${ownerId} AND lastStartedAt IS NOT NULL
@@ -369,16 +383,41 @@ export async function itemSummaries(tx: Tx, ownerId: string, ids: string[]) {
   return ids.flatMap(id => byId.get(id) ?? []);
 }
 
-async function facetCounts(tx: Tx, ownerId: string, where: Prisma.Sql) {
-  const rows = await tx.$queryRaw<{ id: string; total: bigint }[]>(Prisma.sql`
+async function facetRows(tx: Tx, ownerId: string, where: Prisma.Sql) {
+  return tx.$queryRaw<{ id: string; tagGroup: string | null; total: bigint }[]>(Prisma.sql`
     ${catalogCte(ownerId)}, counts AS (
       SELECT a.ancestor, count(DISTINCT i.id) AS total FROM Item i
       JOIN ItemTag it ON it.itemId = i.id JOIN ancestry a ON a.descendant = it.tagId
       WHERE ${where} GROUP BY a.ancestor
     )
-    SELECT c.id, coalesce(counts.total, 0) AS total FROM catalog c LEFT JOIN counts ON counts.ancestor = c.id
+    SELECT c.id, c.tagGroup, coalesce(counts.total, 0) AS total FROM catalog c LEFT JOIN counts ON counts.ancestor = c.id
   `);
-  return Object.fromEntries(rows.map(row => [row.id, Number(row.total)]));
+}
+
+async function facetCounts(tx: Tx, ownerId: string, where: Prisma.Sql) {
+  return Object.fromEntries((await facetRows(tx, ownerId, where)).map(row => [row.id, Number(row.total)]));
+}
+
+/**
+ * Faceted counts for grouped tag sets: tags of a group with a chosen set are
+ * counted without that set (so siblings stay comparable), every other tag with
+ * all sets applied. Costs one query per chosen group plus one.
+ * Only the first set of a group is skipped for that group's counts.
+ */
+async function groupedFacetCounts(tx: Tx, ownerId: string, eligible: Prisma.Sql, sets: NonNullable<BrowserLibrarySearch["tagSets"]>) {
+  const narrowed = (skip?: number) => {
+    const filter = tagFilter(ownerId, sets.filter((_, index) => index !== skip));
+    return filter ? Prisma.sql`${eligible} AND ${filter}` : eligible;
+  };
+  const counts = await facetCounts(tx, ownerId, narrowed());
+  // The first set of a group is its facet choice; later sets of that group always apply.
+  for (const [index, set] of sets.entries()) {
+    if (sets.findIndex(other => other.group === set.group) !== index) continue;
+    for (const row of await facetRows(tx, ownerId, narrowed(index))) {
+      if ((row.tagGroup ?? "extra") === set.group) counts[row.id] = Number(row.total);
+    }
+  }
+  return counts;
 }
 
 function cursorOffset(input: string | undefined, key: string, revision: string) {
@@ -408,7 +447,7 @@ async function selectionIds(
 ) {
   let all = textMatches;
   if (all) {
-    const tags = tagFilter(ownerId, search);
+    const tags = tagFilter(ownerId, searchTagSets(search));
     if (tags) {
       const tagged = await tx.$queryRaw<{id: string}[]>(Prisma.sql`
         ${catalogCte(ownerId)} SELECT i.id FROM Item i WHERE i.ownerId = ${ownerId} AND ${tags} AND ${idFilter(all)}
@@ -509,7 +548,7 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
     const where = itemFilter(ownerId, search, zone, borrowed);
     const cacheKey = key + "." + current;
     const text = Boolean(search.query.trim());
-    const facets = { ...search, tagIds: [], tagMode: undefined, randomSeed: undefined,
+    const facets = { ...search, tagIds: [], tagMode: undefined, tagSets: undefined, randomSeed: undefined,
       sort: search.sort === "recent" ? "recent" as const : "added-desc" as const };
     const facetKey = countsKey;
     // New recent snapshots must include starts since the previous first page.
@@ -527,7 +566,7 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
         // matches. Use the complete untagged result, never one page of visible rows.
         const prior = !frozen && previousText?.scope === scope && query.startsWith(previousText.query)
           ? previousText.ids : undefined;
-        if (all && !search.tagIds.length) textMatches = all;
+        if (all && !search.tagIds.length && !search.tagSets?.length) textMatches = all;
         else if (prior?.length === 0) textMatches = [];
         else {
           const candidates = prior ? Prisma.sql`${eligible} AND ${idFilter(prior)}` : eligible;
@@ -536,7 +575,9 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
         if (!frozen && textMatches.length <= 4096) previousText = {scope, query, ids: textMatches};
         eligible = Prisma.sql`i.ownerId = ${ownerId} AND ${idFilter(textMatches)}`;
       }
-      tagCounts = await facetCounts(tx, ownerId, eligible);
+      tagCounts = search.tagSets?.length
+        ? await groupedFacetCounts(tx, ownerId, eligible, search.tagSets)
+        : await facetCounts(tx, ownerId, eligible);
       if (search.sort !== "recent") {
         if (countsCache.size >= 8) countsCache.delete(countsCache.keys().next().value!);
         countsCache.set(facetKey, tagCounts);
@@ -604,6 +645,25 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
     const ownerId = browserOwner(request, reply);
     const input = searchInput.parse(request.body);
     return whileConnected(reply, signal => db.$transaction(tx => select(tx, ownerId, input, true, signal)));
+  });
+  // Browse tiles: the newest YouTube artwork under each source section.
+  app.post("/api/library/section-covers", async (request, reply) => {
+    const ownerId = browserOwner(request, reply);
+    const { ids } = z.object({ ids: z.array(id).max(100) }).parse(request.body);
+    if (!ids.length) return { covers: {} };
+    const rows = await db.$transaction(tx => tx.$queryRaw<{ tagId: string; externalId: string }[]>`${catalogCte(ownerId)}, picked AS (
+        SELECT a.ancestor AS tagId, s.externalId AS externalId,
+          row_number() OVER (PARTITION BY a.ancestor ORDER BY i.createdAt DESC, i.id) AS rank
+        FROM ancestry a
+        JOIN ItemTag it ON it.tagId = a.descendant
+        JOIN Item i ON i.id = it.itemId AND i.ownerId = ${ownerId}
+        JOIN Source s ON s.itemId = i.id AND s.ownerId = i.ownerId
+        WHERE a.ancestor IN (${Prisma.join(ids)}) AND s.provider = 'youtube' AND s.externalId IS NOT NULL AND s.thumbnail IS NOT NULL
+      )
+      SELECT tagId, externalId FROM picked WHERE rank = 1`);
+    const covers: Record<string, string> = {};
+    for (const row of rows) if (/^[\w-]{11}$/.test(row.externalId)) covers[row.tagId] = `https://i.ytimg.com/vi/${row.externalId}/mqdefault.jpg`;
+    return { covers };
   });
   app.post("/api/library/items", async (request, reply) => {
     const ownerId = browserOwner(request, reply);

@@ -36,7 +36,9 @@ import {
 import { moveQueueItem, removeUpcomingItem, undoQueueRemoval, type QueueRemoval } from "@hibiki/core";
 import type { ItemDto, PlaybackMode, PlaylistDto, SourceDto } from "@hibiki/contracts";
 import { api, formatDuration, mediaWord } from "./api.ts";
-import { ItemArtwork } from "./ItemArtwork.tsx";
+import { ItemArtwork, artworkUrl } from "./ItemArtwork.tsx";
+import { ambientColor, applyAmbient } from "./design/ambient";
+import { TagChip } from "./design/primitives";
 import { fetchItems } from "./library-pages";
 import { completeLibraryOrder, LibraryQueueLoad, QueueCatalog, QueueIntents } from "./queue-catalog";
 import { CompactPlaybackQueue, QueueRows, playbackBuffer, PlaybackSeekBar, PlaybackVolume, type BufferedRanges } from "./PlaybackControls";
@@ -443,6 +445,12 @@ export function PlayerProvider({
       ? { sourceId: previousSource.sourceId, preferredSourceId: previousSource.preferredSourceId }
       : undefined, rejected);
   const source = transport?.source;
+  const ambientUrl = current ? artworkUrl(current.sources.find(candidate => candidate.thumbnail), "thumb") : undefined;
+  useEffect(() => {
+    let live = true;
+    void ambientColor(ambientUrl).then(color => { if (live) applyAmbient(color); });
+    return () => { live = false; };
+  }, [ambientUrl]);
   const presentationKind = transport?.kind;
   const videoSource = transport?.video;
   const isYoutube = source?.provider === "youtube";
@@ -2058,7 +2066,7 @@ export function PlayerProvider({
               </div>
               <div className="watch-metadata">
                 <span className="watch-kind-icon">{watchVideo ? <Video size={20} /> : <Music2 size={20} />}</span>
-                <div><h2>{current.title}</h2><p>{watchClip ? "Клип" : audioFallback ? "Доступен только звук" : watchVideo ? "Видео" : "Аудио"}<span>·</span>{sourceLabel}{current.tags.slice(0, 2).map((tag) => <span className="watch-tag" key={tag.id}>{tag.name}</span>)}</p></div>
+                <div><h2>{current.title}</h2><p>{watchClip ? "Клип" : audioFallback ? "Доступен только звук" : watchVideo ? "Видео" : "Аудио"}<span>·</span>{sourceLabel}{current.tags.filter(tag => !tag.archived).slice(0, 3).map((tag) => <TagChip key={tag.id} tag={tag} />)}</p></div>
               </div>
               <p className="watch-shortcuts"><kbd>K</kbd> пауза <span>·</span> <kbd>← →</kbd> 5 с <span>·</span> <kbd>J L</kbd> 10 с <span>·</span> <kbd>0–9</kbd> позиция <span>·</span> <kbd>↑ ↓</kbd> громкость <span>·</span> <kbd>F</kbd> полный экран</p>
             </div>
@@ -2126,7 +2134,6 @@ export function PlayerProvider({
       )}
       {current && (
         <section className="mini-player-body" aria-label="Управление воспроизведением">
-          <PlaybackSeekBar key={sourceKey} {...seekBar} className="mini-player-seek" />
           <Link className="mini-player-track" to="/player" aria-label={`Открыть плеер: ${current.title}`}>
             <span className={`mini-player-art art-${current.title.length % 6}`}>
               <ItemArtwork source={source?.thumbnail ? source : current.sources.find(candidate => candidate.thumbnail)}
@@ -2140,6 +2147,7 @@ export function PlayerProvider({
                 : playing && phase === "playing" ? "Сейчас играет" : playing ? "" : "На паузе")}</small>
             </span>
           </Link>
+          <div className="mini-player-center">
           <div className="mini-player-transport">
             <button className="icon-button" aria-label="Предыдущая запись" onClick={() => live.current.position > 3 ? seek(0) : next(-1)}>
               <SkipBack size={17} fill="currentColor" />
@@ -2152,8 +2160,13 @@ export function PlayerProvider({
               <SkipForward size={17} fill="currentColor" />
             </button>
           </div>
+          <div className="mini-player-scrub">
+            <span className="num">{formatDuration(settings.position)}</span>
+            <PlaybackSeekBar key={sourceKey} {...seekBar} className="mini-player-seek" />
+            <span className="num">{formatDuration(total)}</span>
+          </div>
+          </div>
           <div className="mini-player-side">
-            <span>{formatDuration(settings.position)} / {formatDuration(total)}</span>
             {(current.visual || videoSource) && (
               <button type="button" className="icon-button" aria-label={current.visual ? "Смотреть клип" : "Открыть видео"} title={current.visual ? "Смотреть клип" : "Открыть видео"} onClick={watchCurrent}
                 onPointerEnter={event => { if (event.pointerType === "mouse") setVideoIntent(true); }}
