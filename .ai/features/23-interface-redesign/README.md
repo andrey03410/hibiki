@@ -2,11 +2,11 @@
 id: 23
 title: Редизайн интерфейса «Тихий звук»
 track: product
-stage: review
+stage: merged
 branch: codex/23-interface-redesign
 pr: https://github.com/andrey03410/hibiki/pull/36
 started: 2026-11-27
-merged:
+merged: 2026-11-27
 ---
 
 # 23. Редизайн интерфейса «Тихий звук»
@@ -28,8 +28,8 @@ merged:
 - [x] Техника — [tech.md](tech.md)
 - [x] План — [plan.md](plan.md)
 - [x] Реализация и QG — [verify.md](verify.md)
-- [ ] Проверка владельцем (автономно)
-- [ ] Влито
+- [x] Проверка владельцем (автономно)
+- [x] Влито
 
 Дизайн-система — живой документ [`.ai/design/`](../../design/README.md).
 

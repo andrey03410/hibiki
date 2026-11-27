@@ -19,6 +19,7 @@
 | [19. Свой видеоряд, быстрый старт и каталог тегов](19-media-visuals-startup-tags/README.md) | `product` | Продуктовая и техническая спецификации на обсуждении, подготовлен макет каталога |
 | [20. Запуск плейлистов и непрерывное воспроизведение](20-playlist-player-flow/README.md) | `merged` | [PR №30](https://github.com/andrey03410/hibiki/pull/30), [проверка очереди, непрерывности звука и управления](20-playlist-player-flow/verify.md) |
 | [21. Быстрый старт, плавное видео и открытие плейлистов](21-media-playlist-performance/README.md) | `merged` | [PR №31](https://github.com/andrey03410/hibiki/pull/31), [замеры звука, движения видео и поиска](21-media-playlist-performance/verify.md) |
+| [23. Редизайн интерфейса «Тихий звук»](23-interface-redesign/README.md) | `merged` | [PR №36](https://github.com/andrey03410/hibiki/pull/36), автономно, [плавность, замеры сервера и ревью](23-interface-redesign/verify.md) |
 
 Процесс — [feature](../../.claude/skills/feature/SKILL.md).
 
