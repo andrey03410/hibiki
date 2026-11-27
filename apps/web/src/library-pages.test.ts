@@ -119,7 +119,7 @@ it("keeps the page selection for subsequent pages, revalidation and the full-ord
   await pages.refresh(true);
   expect(read.mock.calls[2]![2]).toBe("snapshot1");
   expect(pages.snapshot()).toMatchObject({ selectionId: "snapshot1", tagCounts: { mood: 2 } });
-  const body = searchBody({ ...defaultLibrarySearch, sort: "recent", previousSort: "popular" }, pages.snapshot().selectionId);
+  const body = searchBody({ ...defaultLibrarySearch, sort: "recent", previousSort: "popular" }, pages.snapshot().selectionId, new Map());
   expect(body.selectionId).toBe("snapshot1");
   expect(body.filters).not.toHaveProperty("previousSort");
 });

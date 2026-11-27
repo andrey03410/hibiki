@@ -212,7 +212,7 @@ export const librarySearchSchema = z.object({
     group: tagGroupSchema,
     ids: z.array(z.string().min(1).max(256)).min(1).max(1000),
     all: z.boolean().optional(),
-  })).max(5).optional(),
+  })).max(8).optional(),
   performanceFilter: z.enum(["", "ost", "male", "female", "vocal"]).optional(),
   needsClassification: z.boolean().optional(),
   missingGroup: missingGroupSchema.optional(),

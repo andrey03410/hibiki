@@ -1,10 +1,11 @@
 import type { BrowserLibrarySearch, ItemDto, SourceDto, TagDto } from "@hibiki/contracts";
 import { noteFor, type NotesIndex } from "./note-model";
 
-import { filterLabels, missingLabels } from "./taxonomy";
+import { filterLabels, groupKeys, missingLabels, type TagGroup } from "./taxonomy";
 
 type PreviousSort = Exclude<BrowserLibrarySearch["sort"], "recent">;
-export type LibrarySearch = BrowserLibrarySearch & { previousSort?: PreviousSort };
+/** `tagAll` lists tag groups whose selected tags must all match (default: any of them). */
+export type LibrarySearch = BrowserLibrarySearch & { previousSort?: PreviousSort; tagAll?: TagGroup[] };
 
 export const librarySorts = {
   "added-desc": "Сначала новые", "added-asc": "Сначала старые",
@@ -35,7 +36,9 @@ export function restoreLibrarySearch(raw: string | null): LibrarySearch {
   if (stored.availability && Object.hasOwn(libraryStatuses, stored.availability)) initial.availability = stored.availability;
   if (stored.sort && Object.hasOwn(librarySorts, stored.sort)) initial.sort = stored.sort;
   if (Array.isArray(stored.tagIds)) initial.tagIds = stored.tagIds.filter(id => typeof id === "string" && id.length > 0 && id.length <= 256);
-  if (stored.tagMode === "or") initial.tagMode = "or";
+  // The former global AND/OR switch is replaced by per-group modes.
+  const tagAll = (stored as { tagAll?: unknown }).tagAll;
+  if (Array.isArray(tagAll)) initial.tagAll = groupKeys.filter(group => tagAll.includes(group));
   if (stored.performanceFilter && Object.hasOwn(filterLabels, stored.performanceFilter)) initial.performanceFilter = stored.performanceFilter;
   if (stored.missingGroup && Object.hasOwn(missingLabels, stored.missingGroup)) initial.missingGroup = stored.missingGroup;
   initial.needsClassification = stored.needsClassification === true;
@@ -55,7 +58,7 @@ export const defaultLibrarySearch: LibrarySearch = {
   sort: "added-desc", tagMode: "and", performanceFilter: "", needsClassification: false,
 };
 
-export type LibraryView = "list" | "cards";
+export type LibraryView = "list" | "cards" | "browse";
 
 export const libraryKinds = { "": "Все", audio: "Аудио", video: "Видео" } satisfies Record<LibrarySearch["kind"], string>;
 export const libraryProviders = {

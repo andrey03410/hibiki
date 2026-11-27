@@ -151,7 +151,7 @@ button.ds-chip.off:hover { color: var(--text); background: color-mix(in oklab, v
 button.ds-chip.on:hover { background: color-mix(in oklab, var(--c) 86%, white); }
 .ds-chip.part { background: linear-gradient(90deg, color-mix(in oklab, var(--c) 34%, transparent) 50%, color-mix(in oklab, var(--c) 8%, transparent) 50%); color: color-mix(in oklab, var(--c) 82%, white); }
 .ds-chip .n { font-size: 11px; opacity: .62; font-variant-numeric: tabular-nums; }
-.ds-chip .x { width: 18px; height: 18px; margin-right: -5px; border-radius: 50%; display: grid; place-items: center; background: color-mix(in oklab, var(--c) 18%, transparent); transition: background var(--t-fast); }
+.ds-chip .x { width: 18px; height: 18px; padding: 0; border: 0; color: inherit; margin-right: -5px; border-radius: 50%; display: grid; place-items: center; background: color-mix(in oklab, var(--c) 18%, transparent); transition: background var(--t-fast); }
 .ds-chip .x:hover { background: color-mix(in oklab, var(--c) 38%, transparent); }
 .ds-chip.dashed { color: var(--text-3); background: transparent; box-shadow: none; border: 1px dashed var(--line-2); }
 .ds-chip.dashed::before { display: none; }
@@ -171,13 +171,14 @@ button.ds-chip.on:hover { background: color-mix(in oklab, var(--c) 86%, white); 
   transition: opacity var(--t) var(--ease-out), transform var(--t) var(--ease-out), display var(--t) allow-discrete, overlay var(--t) allow-discrete;
 }
 .ds-pop[popover] { margin: 0; inset: auto; border: 0; padding: 0; color: var(--text); }
-.ds-pop:not(:popover-open) { opacity: 0; transform: translateY(-4px) scale(.98); }
+.ds-pop:not(:popover-open) { display: none; opacity: 0; transform: translateY(-4px) scale(.98); }
 @starting-style { .ds-pop:popover-open { opacity: 0; transform: translateY(-4px) scale(.98); } }
 .ds-pop-head { display: flex; align-items: center; gap: 10px; padding: 14px 14px 10px; }
 .ds-pop-body { overflow-y: auto; overscroll-behavior: contain; padding: 0 6px 6px; }
 .ds-pop-foot { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
-.ds-search { height: 36px; border-radius: 10px; display: flex; align-items: center; gap: 9px; padding: 0 11px; background: var(--s1); box-shadow: inset 0 0 0 1px var(--line); color: var(--text-3); }
+.ds-search { height: 36px; border-radius: 10px; display: flex; flex-direction: row; align-items: center; gap: 9px; padding: 0 11px; background: var(--s1); box-shadow: inset 0 0 0 1px var(--line); color: var(--text-3); }
 .ds-search > input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; background: none; box-shadow: none !important; font-size: 13.5px; }
+.ds-search > input:focus-visible, .lib-search-field > input:focus-visible { outline: none; }
 .ds-search:focus-within { box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 55%, transparent), 0 0 0 3px color-mix(in oklab, var(--accent) 14%, transparent); }
 .ds-section-title { font: 600 10.5px var(--font); letter-spacing: .12em; text-transform: uppercase; color: var(--text-4); padding: 10px 10px 6px; display: flex; align-items: center; gap: 8px; }
 .ds-option {
@@ -199,7 +200,7 @@ button.ds-chip.on:hover { background: color-mix(in oklab, var(--c) 86%, white); 
   border-radius: 22px; box-shadow: var(--shadow-pop);
   transition: transform var(--t-slow) var(--ease-out), opacity var(--t-slow) var(--ease-out), display var(--t-slow) allow-discrete, overlay var(--t-slow) allow-discrete;
 }
-.ds-drawer:not([open]) { transform: translateX(28px); opacity: 0; }
+.ds-drawer:not([open]) { display: none; transform: translateX(28px); opacity: 0; }
 @starting-style { .ds-drawer[open] { transform: translateX(28px); opacity: 0; } }
 .ds-drawer::backdrop { background: rgba(6, 5, 10, .5); backdrop-filter: blur(2px); transition: opacity var(--t-slow), display var(--t-slow) allow-discrete, overlay var(--t-slow) allow-discrete; }
 @starting-style { .ds-drawer[open]::backdrop { opacity: 0; } }

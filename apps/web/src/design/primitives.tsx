@@ -6,7 +6,7 @@ import { generativeCover, tagColor, type ColorGroup } from "./tag-colors";
 export type ChipState = "plain" | "off" | "on" | "part";
 
 /** Tag chip: the only way tags are drawn. See .ai/design/README.md → «Чип». */
-export function TagChip({ tag, state = "plain", count, onClick, onRemove, size, title, className = "", enter }: {
+export function TagChip({ tag, state = "plain", count, onClick, onRemove, size, title, className = "", enter, color }: {
   tag: Pick<TagDto, "name" | "color" | "group">;
   state?: ChipState;
   count?: number;
@@ -16,8 +16,10 @@ export function TagChip({ tag, state = "plain", count, onClick, onRemove, size, 
   title?: string;
   className?: string;
   enter?: boolean;
+  /** Overrides the tag colour, e.g. `var(--g-performance)`. */
+  color?: string;
 }) {
-  const style = { "--c": tagColor(tag) } as CSSProperties;
+  const style = { "--c": color ?? tagColor(tag) } as CSSProperties;
   const classes = `ds-chip ${state === "plain" ? "" : state} ${size ?? ""} ${enter ? "enter" : ""} ${className}`;
   const body = <>
     <span className="label">{tag.name}</span>

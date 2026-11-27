@@ -643,6 +643,25 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
     const input = searchInput.parse(request.body);
     return whileConnected(reply, signal => db.$transaction(tx => select(tx, ownerId, input, true, signal)));
   });
+  // Browse tiles: the newest YouTube artwork under each source section.
+  app.post("/api/library/section-covers", async (request, reply) => {
+    const ownerId = browserOwner(request, reply);
+    const { ids } = z.object({ ids: z.array(id).max(100) }).parse(request.body);
+    if (!ids.length) return { covers: {} };
+    const rows = await db.$transaction(tx => tx.$queryRaw<{ tagId: string; externalId: string }[]>`${catalogCte(ownerId)}, picked AS (
+        SELECT a.ancestor AS tagId, s.externalId AS externalId,
+          row_number() OVER (PARTITION BY a.ancestor ORDER BY i.createdAt DESC, i.id) AS rank
+        FROM ancestry a
+        JOIN ItemTag it ON it.tagId = a.descendant
+        JOIN Item i ON i.id = it.itemId AND i.ownerId = ${ownerId}
+        JOIN Source s ON s.itemId = i.id AND s.ownerId = i.ownerId
+        WHERE a.ancestor IN (${Prisma.join(ids)}) AND s.provider = 'youtube' AND s.externalId IS NOT NULL AND s.thumbnail IS NOT NULL
+      )
+      SELECT tagId, externalId FROM picked WHERE rank = 1`);
+    const covers: Record<string, string> = {};
+    for (const row of rows) if (/^[\w-]{11}$/.test(row.externalId)) covers[row.tagId] = `https://i.ytimg.com/vi/${row.externalId}/mqdefault.jpg`;
+    return { covers };
+  });
   app.post("/api/library/items", async (request, reply) => {
     const ownerId = browserOwner(request, reply);
     const { ids, verifyShared, picker } = z.object({ ids: z.array(id).max(pageSize), verifyShared: z.boolean().optional(), picker: z.boolean().optional() }).parse(request.body);

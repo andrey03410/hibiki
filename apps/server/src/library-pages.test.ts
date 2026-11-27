@@ -852,3 +852,24 @@ it("combines tag sets with AND across groups, OR or ALL inside a group, and coun
   expect(repeated.tagCounts).toMatchObject({ [calm]: 2, [epic]: 2, [anime]: 2 });
   expect((await post("ids", { filters: sets({ group: "mood", ids: [] }) })).statusCode).toBe(400);
 });
+
+it("returns the newest owned YouTube artwork under each source section", async () => {
+  const game = await createTag("Game", "source");
+  const witcher = await createTag("Witcher", "source", { parentIds: [game] });
+  const empty = await createTag("Empty", "source", { parentIds: [game] });
+  await ctx.db.item.createMany({ data: [
+    { ...track("old"), createdAt: new Date("2024-01-01T00:00:00Z") }, { ...track("new"), createdAt: new Date("2025-06-01T00:00:00Z") },
+    track("local"), track("foreign", ctx.otherUserId),
+  ] });
+  const source = (itemId: string, externalId: string, ownerId = ctx.userId) => ({ id: "s-" + itemId, ownerId, itemId, key: "youtube:" + externalId,
+    provider: "youtube", externalId, thumbnail: `https://i.ytimg.com/vi/${externalId}/hqdefault.jpg` });
+  await ctx.db.source.createMany({ data: [source("old", "AAAAAAAAAAA"), source("new", "BBBBBBBBBBB"), source("foreign", "CCCCCCCCCCC", ctx.otherUserId)] });
+  for (const id of ["old", "new", "local"]) expect((await editTrack(id, { tagIds: [witcher] })).statusCode).toBe(200);
+  const covers = (await post("section-covers", { ids: [game, witcher, empty] })).json().covers;
+  expect(covers).toEqual({
+    [game]: "https://i.ytimg.com/vi/BBBBBBBBBBB/mqdefault.jpg",
+    [witcher]: "https://i.ytimg.com/vi/BBBBBBBBBBB/mqdefault.jpg",
+  });
+  expect((await post("section-covers", { ids: [game] }, foreignCookie)).json().covers).toEqual({});
+  expect((await post("section-covers", { ids: Array.from({ length: 101 }, (_, i) => "t" + i) })).statusCode).toBe(400);
+});

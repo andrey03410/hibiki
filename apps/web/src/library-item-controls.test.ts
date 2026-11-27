@@ -5,6 +5,7 @@ import type { TagDto } from "@hibiki/contracts";
 import { ItemTagList } from "./LibraryItemControls";
 
 import { TagCatalog } from "./taxonomy";
+import { rowSource } from "./library-filters";
 
 describe("compact entry classification", () => {
   const tags: TagDto[] = [
@@ -30,7 +31,9 @@ describe("compact entry classification", () => {
     const [row, detail] = html.split('popover="auto"');
     expect(row).toContain("Джаз");
     expect(row).not.toContain("Альт");
-    expect(row).toContain("+3");
+    expect(row).toContain("Спокойная");
+    expect(row).not.toContain("Версия");
+    expect(row).toContain("+4");
     expect(row).toContain("Мужской и женский вокал");
     expect(detail).toContain("Альт");
     expect(detail).toContain("Дополнительно");
@@ -41,16 +44,10 @@ describe("compact entry classification", () => {
     const studio: TagDto = { id: "s", name: "Студия", group: "source", color: "#acf" };
     const earlier: TagDto = { id: "a", name: "Альфа", group: "source", color: "#acf" };
     const matched: TagDto = { id: "b", name: "Бета", group: "source", color: "#acf", parentIds: ["s"] };
-    const html = renderToStaticMarkup(
-      createElement(ItemTagList, {
-        tags: [earlier, matched],
-        catalog: new TagCatalog([studio, earlier, matched]),
-        selected: ["s"],
-      }),
-    );
-    const [row] = html.split('popover="auto"');
-    expect(row).toContain("Бета");
-    expect(row).not.toContain("Альфа");
+    const catalog = new TagCatalog([studio, earlier, matched]);
+    expect(rowSource([earlier, matched], catalog, ["s"])?.id).toBe("b");
+    expect(rowSource([earlier, matched], catalog)?.id).toBe("a");
+    expect(rowSource([earlier, matched], catalog, ["a"])?.id).toBe("a");
   });
 
   it("exposes empty groups for an unclassified entry", () => {
