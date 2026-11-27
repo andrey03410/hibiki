@@ -735,7 +735,10 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
     }
   }
 
-  const counts = tagCounts ?? (restrictsFacets ? undefined : overview.tagCounts);
+  // While a new search loads, keep the previous counts instead of flashing zeros or unfiltered numbers.
+  const lastCounts = useRef(tagCounts);
+  if (tagCounts) lastCounts.current = tagCounts;
+  const counts = tagCounts ?? (restrictsFacets ? lastCounts.current : overview.tagCounts);
   const searchProps = {search: filters, onChange: setFilters, catalog, counts};
   const missing = overview.tags.length ? undefined : null;
   return (
@@ -921,7 +924,8 @@ function ItemTable({
           onClose={() => setEditTarget(undefined)}
           onPrev={edit ? neighbour(-1) : undefined}
           onNext={edit ? neighbour(1) : undefined}
-          onPlay={edit && editIndex >= 0 ? () => activate(edit, editIndex) : undefined}
+          onPlay={edit ? () => editIndex >= 0 ? activate(edit, editIndex)
+            : player.activateItem([edit], 0, playlistId, { fromLibrary: inLibrary || !!playlistId }) : undefined}
           panels={itemPanels(drawerItem, refresh, !!editTarget?.focusSource)}
         />
       )}

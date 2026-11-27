@@ -58,9 +58,17 @@ function DrawerBody({ item, catalog, onClose, onPrev, onNext, onPlay, initialTab
     clearTimeout(refreshTimer.current);
     refreshTimer.current = setTimeout(() => void refresh().catch(() => {}), delay);
   };
-  const queue = useMemo(() => new AutosaveQueue(initial, next => api<ItemDto>(`/items/${encodeURIComponent(item.id)}`, "PATCH", {
-    tagIds: next.tagIds, performance: next.performance, voices: next.voices,
-  }).then(saved => { savedDrafts.set(item.id, { draft: next, updatedAt: saved?.updatedAt, at: Date.now() }); }), {
+  const queue = useMemo(() => new AutosaveQueue(initial, next => {
+    // Remembered before the request so a reopen during the save already sees it.
+    const previous = savedDrafts.get(item.id);
+    savedDrafts.set(item.id, { draft: next, at: Date.now() });
+    return api<ItemDto>(`/items/${encodeURIComponent(item.id)}`, "PATCH", {
+      tagIds: next.tagIds, performance: next.performance, voices: next.voices,
+    }).then(saved => { savedDrafts.set(item.id, { draft: next, updatedAt: saved?.updatedAt, at: Date.now() }); }, error => {
+      if (previous) savedDrafts.set(item.id, previous); else savedDrafts.delete(item.id);
+      throw error;
+    });
+  }, {
     busy: busy => setStatus(old => busy ? "saving" : old === "error" ? "error" : "saved"),
     saved: (before, after) => {
       scheduleRefresh();
