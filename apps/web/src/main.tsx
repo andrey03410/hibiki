@@ -71,7 +71,8 @@ import type {
 } from "@hibiki/contracts";
 import { api, ApiError, setWorkspaceOwner, formatDuration, humanDuration, mediaWord } from "./api.ts";
 import { ErrorBoundary, lazyView } from "./ErrorBoundary";
-import { ItemArtwork } from "./ItemArtwork.tsx";
+import { ArtworkImage, ItemArtwork } from "./ItemArtwork.tsx";
+import { GenerativeCover } from "./design/primitives";
 import { PlaylistCard, PlaylistCover } from "./PlaylistCard";
 import { ScopedPlaylistPage, usePlaylistLibrary } from "./PlaylistLibrary";
 import type { PlaylistTarget } from "./playlist-library";
@@ -101,6 +102,7 @@ import "./styles.css";
 import "./library-view.css";
 import "./taxonomy.css";
 import "./design.css";
+import "./design-shell.css";
 
 const ImportModal = lazyView(() => import("./ImportModal"));
 const JobsPage = lazyView(() => import("./JobsPage"));
@@ -467,95 +469,65 @@ function Workspace({
       >
         {(watchPlayer, miniPlayer) => <>
         <div className="app-shell">
-          <aside className="sidebar">
-            <Link className="brand" to="/">
-              <span className="brand-icon">
-                <AudioLines size={25} />
-              </span>
-              <span>
-                hibiki<span className="brand-kanji">響</span>
-              </span>
+          <aside className="sidebar ds-side">
+            <Link className="brand" to="/" aria-label="hibiki — медиатека">
+              <span className="brand-icon"><AudioLines size={19} /></span>
+              <span className="brand-name">hibiki</span>
+              <span className="brand-kanji" aria-hidden>響</span>
             </Link>
-            <span className="sidebar-label">ВАШЕ ПРОСТРАНСТВО</span>
-            <nav className="main-nav">
-              <NavLink to="/" end aria-label="Медиатека" title="Медиатека">
-                <Library size={19} />
-                <span>Медиатека</span>
-                <span className="nav-count">{overview.total}</span>
+            <nav className="main-nav" aria-label="Разделы">
+              <NavLink to="/" end title="Медиатека">
+                <Library size={18} />
+                <span className="nav-text">Медиатека</span>
+                <span className="nav-count num">{overview.total.toLocaleString("ru")}</span>
               </NavLink>
-              <NavLink to="/player" aria-label="Плеер" title="Плеер">
-                <AudioLines size={19} />
-                <span>Плеер</span>
+              <NavLink to="/playlists" title="Плейлисты">
+                <ListMusic size={18} />
+                <span className="nav-text">Плейлисты</span>
+                <span className="nav-count num">{overview.playlists.length || ""}</span>
               </NavLink>
-              <NavLink to="/playlists" aria-label="Плейлисты" title="Плейлисты">
-                <ListMusic size={19} />
-                <span>Плейлисты</span>
+              <NavLink to="/tags" title="Теги">
+                <Tags size={18} />
+                <span className="nav-text">Теги</span>
+                <span className="nav-count num">{overview.tags.filter(tag => !tag.archived).length.toLocaleString("ru")}</span>
               </NavLink>
-              <NavLink to="/tags" aria-label="Теги" title="Теги">
-                <Tags size={19} />
-                <span>Теги</span>
-              </NavLink>
-              <NavLink to="/jobs" aria-label="Задания" title="Задания">
-                <Download size={19} />
-                <span>Задания</span>
-                {activeJobs > 0 && (
-                  <span className="job-count">{activeJobs}</span>
-                )}
-              </NavLink>
-              <NavLink to="/share-links" aria-label="Мои ссылки" title="Мои ссылки">
-                <Link2 size={19} />
-                <span>Мои ссылки</span>
+              <NavLink to="/jobs" title="Задания">
+                <Download size={18} />
+                <span className="nav-text">Задания</span>
+                {activeJobs > 0 && <span className="job-count">{activeJobs}</span>}
               </NavLink>
             </nav>
             <div className="sidebar-section">
-              <span className="sidebar-label">ПЛЕЙЛИСТЫ</span>
-              <button
-                className="icon-button"
-                aria-label="Создать плейлист"
-                onClick={() => setCreateOpen(true)}
-              >
-                <Plus size={16} />
+              <span className="sidebar-label">Плейлисты</span>
+              <button className="icon-button" aria-label="Создать плейлист" title="Создать плейлист" onClick={() => setCreateOpen(true)}>
+                <Plus size={15} />
               </button>
             </div>
-            <nav className="playlist-nav">
-              {overview.playlists.slice(0, 12).map((p, index) => (
-                <NavLink key={p.id} to={`/playlists/${p.id}`}>
-                  <span className={`playlist-dot dot-${index % 5}`} />
+            <nav className="playlist-nav" aria-label="Плейлисты">
+              {overview.playlists.slice(0, 14).map((p) => (
+                <NavLink key={p.id} to={`/playlists/${p.id}`} title={p.title}>
+                  <span className="playlist-thumb">
+                    <ArtworkImage urls={p.coverUrls ?? []} fallback={<GenerativeCover seed={p.title} />} />
+                  </span>
                   <span className="truncate">{p.title}</span>
-                  {!p.manual && <Sparkles size={12} />}
+                  {!p.manual && <Sparkles size={12} aria-label="Умный плейлист" />}
                 </NavLink>
               ))}
-              {!overview.playlists.length && (
-                <p className="sidebar-hint">
-                  Здесь будут подборки,
-                  <br />
-                  собранные вами.
-                </p>
-              )}
+              {!overview.playlists.length && <p className="sidebar-hint">Здесь будут подборки, собранные вами.</p>}
             </nav>
             <div className="sidebar-bottom">
-              <YoutubeSyncNotifications reload={refresh} />
-              <NavLink className="settings-link" to="/settings" aria-label="Настройки" title="Настройки">
-                <Settings2 size={18} />
-                Настройки
-                <ChevronRight size={15} />
-              </NavLink>
-              <div className="user-card">
-                <span className="avatar">
-                  {user.login.slice(0, 1).toUpperCase()}
-                </span>
-                <div>
-                  <strong>{user.login}</strong>
-                  <small>Ваш личный аккаунт</small>
-                </div>
-                <button
-                  className="icon-button"
-                  aria-label="Выйти"
-                  onClick={() => logout().catch((e) => notify(e.message, true))}
-                >
-                  <LogOut size={17} />
-                </button>
+              <span className="avatar" aria-hidden>{user.login.slice(0, 1).toUpperCase()}</span>
+              <div className="user-name">
+                <strong className="truncate">{user.login}</strong>
+                <small>Личный аккаунт</small>
               </div>
+              <YoutubeSyncNotifications reload={refresh} />
+              <NavLink className="icon-button settings-link" to="/settings" aria-label="Настройки" title="Настройки">
+                <Settings2 size={17} />
+              </NavLink>
+              <button className="icon-button" aria-label="Выйти" title="Выйти" onClick={() => logout().catch((e) => notify(e.message, true))}>
+                <LogOut size={16} />
+              </button>
             </div>
           </aside>
           <main className="main-content">

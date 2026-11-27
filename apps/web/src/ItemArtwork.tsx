@@ -9,7 +9,7 @@ interface Props {
   size?: "thumb" | "cover";
 }
 
-function artworkUrl(source: Props["source"], size: NonNullable<Props["size"]>) {
+export function artworkUrl(source: Props["source"], size: NonNullable<Props["size"]>) {
   if (!source?.thumbnail) return;
   if (source.shared && /^\/api\/(?:(?:shared|shared-playlists)\/[\w-]+\/items|shared-items)\/[\w-]+\/artwork$/.test(source.thumbnail))
     return `${source.thumbnail}?size=${size}`;
