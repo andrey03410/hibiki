@@ -57,7 +57,9 @@ export function offerAudioResponse(port: MessagePort, response?: Response, onClo
   return close;
 }
 
-export function listenForAudioRanges(delivery: AudioDelivery) {
+type MediaResponder = (token: string, range: string | null) => Response | undefined;
+// One relay listener serves both tab-owned stores: sound and the original video.
+export function listenForAudioRanges(delivery: AudioDelivery, video?: MediaResponder) {
   if (!workers) return;
   const offers = new Set<() => void>();
   const receive = (event: MessageEvent) => {
@@ -65,7 +67,7 @@ export function listenForAudioRanges(delivery: AudioDelivery) {
     const port = event.ports[0];
     if (!port) return;
     if (Date.now() >= event.data.deadline) { port.close(); return; }
-    const response = delivery.decoderResponse(event.data.token, event.data.range);
+    const response = delivery.decoderResponse(event.data.token, event.data.range) ?? video?.(event.data.token, event.data.range);
     let stop: () => void;
     stop = offerAudioResponse(port, response, () => offers.delete(stop));
     if (response?.body) offers.add(stop);
