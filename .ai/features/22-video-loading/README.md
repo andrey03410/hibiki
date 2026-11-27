@@ -2,11 +2,11 @@
 id: 22
 title: Быстрое видео и единая загрузка звука и видеоряда
 track: product
-stage: review
+stage: merged
 branch: codex/22-video-loading
 pr: https://github.com/andrey03410/hibiki/pull/33
 started: 2026-11-27
-merged:
+merged: 2026-11-27
 ---
 
 # 22. Быстрое видео и единая загрузка звука и видеоряда
@@ -16,7 +16,7 @@ merged:
 - [x] [Техника](tech.md)
 - [x] [План](plan.md)
 - [x] [Проверка](verify.md)
-- [ ] Вливание через PR
+- [x] [Вливание через PR №33](https://github.com/andrey03410/hibiki/pull/33)
 
 Аудит и замеры на боевом аккаунте andrey сделаны 27 ноября 2026 года.
 
