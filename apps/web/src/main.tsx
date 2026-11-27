@@ -1,4 +1,4 @@
-import {Button, DataContext, EmptyState, EMPTY, ErrorMessage, Modal, PageTop, useData} from "./WorkspaceUi";
+import {Button, DataContext, EmptyState, EMPTY, ErrorMessage, Modal, PageTop, useData, type ToastAction} from "./WorkspaceUi";
 import React, {
   useEffect,
   useLayoutEffect,
@@ -80,14 +80,14 @@ import type { PlaylistTarget } from "./playlist-library";
 import { PlaylistDetails } from "./playlist-detail";
 import { ruleDescription } from "./playlist-rules";
 import { LibraryPages, LibraryCardReader, fetchItems, searchBody, validateOverview } from "./library-pages";
-import { PlayerProvider, usePlayerCommands, usePlayerCard, useHasPlayer, useQueueEditable } from "./player.tsx";
+import { PlayerProvider, usePlayerCommands, usePlayerCard, useQueueEditable } from "./player.tsx";
 import { missingClassification } from "@hibiki/contracts/classification";
 import type { DirectoryVisit } from "./tag-directory";
 import { ActiveFilters, BrowseGrid, FacetBar, LibrarySearchBox, records, ResultsBar, SourceTabs, SourceTrail } from "./LibraryFilters";
 import { addTag, rowSource } from "./library-filters";
-import { GroupSelect, TagPicker, PerformanceEditor } from "./ClassificationEditor";
-import { batchTagChanges, compositionDelta, groupKeys, groups, groupOf, itemPerformance, missingLabels, TagCatalog,
-  type BatchMode, type Performance, type PerformanceFilter, type TagGroup, type Voice } from "./taxonomy";
+import { ItemDrawer, type DrawerPanels } from "./ItemDrawer";
+import { BulkTagger } from "./BulkTagger";
+import { compositionDelta, groupOf, missingLabels, TagCatalog, type PerformanceFilter } from "./taxonomy";
 import { ItemTagList } from "./LibraryItemControls.tsx";
 import { playbackSources, soundUnavailableReason } from "./player-model.ts";
 import { librarySearchForTag, librarySourceBadges, matchesSearch, sourceAvailability, type LibraryView } from "./library-search.ts";
@@ -106,6 +106,7 @@ import "./taxonomy.css";
 import "./design.css";
 import "./design-shell.css";
 import "./design-library.css";
+import "./design-drawer.css";
 
 const ImportModal = lazyView(() => import("./ImportModal"));
 const JobsPage = lazyView(() => import("./JobsPage"));
@@ -122,7 +123,7 @@ const ShareManager = lazyView(() => loadSharing().then(module => ({ default: mod
 const SharedMediaPage = lazyView(() => loadSharing().then(module => ({ default: module.SharedMediaPage })));
 const SavedSharedPlaylistCard = lazyView(() => loadSharing().then(module => ({ default: module.SavedSharedPlaylistCard })));
 
-type Toast = { id: number; text: string; error?: boolean };
+type Toast = { id: number; text: string; error?: boolean; action?: ToastAction; key?: string };
 
 function Auth({
   kaname,
@@ -342,10 +343,20 @@ function Workspace({
     navigate("/");
     window.scrollTo(0, 0);
   }
-  function notify(text: string, error = false) {
+  // Toasts live in the top layer so they stay visible above modal drawers and dialogs.
+  const toastLayer = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const layer = toastLayer.current;
+    if (!layer?.showPopover) return;
+    if (layer.matches(":popover-open")) layer.hidePopover();
+    if (toasts.length) layer.showPopover();
+  }, [toasts]);
+  function notify(text: string, error = false, action?: ToastAction) {
     const id = Date.now() + Math.random();
-    setToasts((old) => [...old, { id, text, error }]);
-    setTimeout(() => setToasts((old) => old.filter((t) => t.id !== id)), 6000);
+    // Toasts with an action replace the previous one of the same kind (one undo at a time).
+    const key = action?.label;
+    setToasts((old) => [...old.filter(t => !key || t.key !== key).slice(-3), { id, text, error, action, key }]);
+    setTimeout(() => setToasts((old) => old.filter((t) => t.id !== id)), action ? 8000 : 6000);
   }
   async function refresh() {
     const sequence = ++request.current;
@@ -588,11 +599,15 @@ function Workspace({
             }}
           />
         )}
-        <div className="toast-stack" aria-live="polite">
+        <div className="toast-stack" aria-live="polite" popover="manual" ref={toastLayer}>
           {toasts.map((t) => (
             <div key={t.id} className={`toast ${t.error ? "error" : ""}`}>
               {t.error ? <CircleAlert size={18} /> : <CheckCircle2 size={18} />}
               <span>{t.text}</span>
+              {t.action && <button type="button" className="toast-action" onClick={() => {
+                t.action!.run();
+                setToasts((old) => old.filter((x) => x.id !== t.id));
+              }}>{t.action.label}</button>}
               <button
                 className="icon-button"
                 aria-label="Закрыть уведомление"
@@ -616,8 +631,7 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   const { library, overview, notify, openImport } = useData(),
     player = usePlayerCommands();
   const [filters, setFilters] = search;
-  const [selected, setSelected] = useState<string[]>([]),
-    [batchOpen, setBatchOpen] = useState(false);
+  const [selected, setSelected] = useState<string[]>([]);
   const viewKey = `hibiki:library-view:${userId}`;
   const [view, setView] = useState<LibraryView>(() => {
     try {
@@ -749,14 +763,8 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
         {selected.length > 0 && (
           <div className="selection-toolbar">
             <strong>Выбрано: {selected.length}</strong>
+            <BulkTagger ids={selected} catalog={catalog} onDone={() => {}} />
             <CreateSelectionPlaylist ids={selected} onSaved={() => setSelected([])} />
-            <Button
-              className="subtle compact"
-              onClick={() => setBatchOpen(true)}
-            >
-              <Tags size={15} />
-              Изменить теги
-            </Button>
             <button className="text-button" onClick={() => setSelected([])}>
               Снять выбор
             </button>
@@ -803,9 +811,6 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
         )}
         </>}
       </section>
-      {batchOpen && (
-        <BatchTags ids={selected} close={() => setBatchOpen(false)} />
-      )}
     </div>
   );
 });
@@ -842,7 +847,7 @@ type ItemTableProps = {
   playlistId?: string;
   view?: LibraryView;
 };
-type EditTarget = {id: string; focusSource?: boolean};
+type EditTarget = {id: string; focusSource?: boolean; item?: ItemDto};
 type ShareTarget = {id: string; issued: Promise<ShareLinkDto>};
 function ItemTable({
   items,
@@ -865,7 +870,16 @@ function ItemTable({
     [shareTarget, setShareTarget] = useState<ShareTarget>(),
     [busy, setBusy] = useState(false);
   const currentItems = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
-  const edit = editTarget ? currentItems.get(editTarget.id) : undefined;
+  const latestItems = useRef(currentItems);
+  latestItems.current = currentItems;
+  // The drawer keeps a snapshot so it stays open when an edit filters the item out.
+  const openEdit = React.useCallback((target: EditTarget) => setEditTarget({ ...target, item: latestItems.current.get(target.id) }), []);
+  const edit = editTarget ? currentItems.get(editTarget.id) ?? editTarget.item : undefined;
+  const editIndex = edit ? items.findIndex(item => item.id === edit.id) : -1;
+  const neighbour = (step: number) => {
+    const next = editIndex >= 0 ? items[editIndex + step] : undefined;
+    return next ? () => openEdit({ id: next.id }) : undefined;
+  };
   const inLibrary = view !== undefined;
   const selectedIds = new Set(selected);
   function activate(item: ItemDto, index: number) {
@@ -879,7 +893,7 @@ function ItemTable({
     catalog={catalog} checked={selected && selectedIds.has(item.id)} onSelect={select} activateItem={activate}
     inLibrary={inLibrary} last={index === (playlistOrder?.length ?? items.length) - 1} playlistId={playlistId}
     reasons={reasons} selectedTags={selectedTags} showMissing={showMissing} onTag={onTag} onPerformance={onPerformance}
-    reorder={reorder} setEditTarget={setEditTarget} setShareTarget={setShareTarget} setRemove={setRemove} />);
+    reorder={reorder} setEditTarget={openEdit} setShareTarget={setShareTarget} setRemove={setRemove} />);
 
   return (
     <>
@@ -889,11 +903,16 @@ function ItemTable({
         </div>
       )}
       {edit && (
-        <EditItem
-          key={edit.id}
+        <ItemDrawer
+          open
           item={edit}
-          focusSource={editTarget?.focusSource}
-          close={() => setEditTarget(undefined)}
+          catalog={catalog}
+          initialTab={editTarget?.focusSource ? "sources" : "tags"}
+          onClose={() => setEditTarget(undefined)}
+          onPrev={neighbour(-1)}
+          onNext={neighbour(1)}
+          onPlay={() => activate(edit, Math.max(0, editIndex))}
+          panels={itemPanels(edit, refresh, !!editTarget?.focusSource)}
         />
       )}
       {shareTarget && <React.Suspense fallback={null}>
@@ -1233,104 +1252,36 @@ function FavoriteButton({ item, withLabel = false }: { item: ItemDto; withLabel?
     </button>
   );
 }
-function EditItem({ item, close, focusSource }: { item: ItemDto; close: () => void; focusSource?: boolean }) {
-  const { library, refresh, notify } = useData(),
-    [title, setTitle] = useState(item.title),
-    [tagIds, setTagIds] = useState(item.tags.filter(t => !t.archived).map((t) => t.id)),
-    [performance,setPerformance] = useState<Performance>(item.performance ?? "unknown"),
-    [voices,setVoices] = useState<Voice[]>(item.voices ?? []),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
+function itemPanels(item: ItemDto, refresh: () => Promise<void>, focusSource: boolean): DrawerPanels {
   const borrowedOnly = !!item.shared && item.sources.every(source => source.shared);
-  const missing = missingClassification(tagIds.flatMap(id => catalog.byId.get(id) ?? []),performance,voices);
-  return (
-    <Modal
-      title="Детали записи"
-      subtitle="Ваше название сохраняется, даже если источник исчезнет."
-      close={close}
-    >
-      <FavoriteButton item={item} withLabel />
-      <SharedItemStatus item={item} />
-      <form
-        onSubmit={async (e) => {
-          e.preventDefault();
-          setBusy(true);
-          try {
-            const submitter = (e.nativeEvent as SubmitEvent).submitter;
-            await api(`/items/${item.id}`, "PATCH", {
-              ...(title !== item.title && {title}), tagIds, performance, voices,
-              completeClassification: submitter instanceof HTMLButtonElement && submitter.name === "complete",
-            });
-            await refresh();
-            notify("Запись обновлена");
-            close();
-          } catch (e) {
-            setError((e as Error).message);
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
-        <label>
-          Название
-          <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            maxLength={1000}
-            required
-          />
-        </label>
-        <p className="small muted">
-          Название источника: {item.originalTitle || "Неизвестно"}
-        </p>
-        <div className="edit-classification">{groupKeys.map(key => <details key={key} className="edit-group">
-          <summary>{groups[key]}<span>{catalog.active.filter(tag => tagIds.includes(tag.id) && groupOf(tag) === key).length}</span></summary>
-          <TagPicker catalog={catalog} group={key} ids={tagIds} onChange={setTagIds}/>
-        </details>)}</div>
-        <PerformanceEditor performance={performance} voices={voices} onChange={(p,v) => {setPerformance(p);setVoices(v);}}/>
-        <p className="small muted" role="status">{missing.length ? "Осталось указать: " + missing.map(key => missingLabels[key]).join(", ") : "Все обязательные поля заполнены"}</p>
-        <ErrorMessage error={error} />
-        <div className="modal-actions">
-          <Button type="button" className="subtle" onClick={close}>
-            Закрыть
-          </Button>
-          <Button type="submit" className={missing.length ? "primary" : "subtle"} busy={busy}>Сохранить</Button>
-          <Button type="submit" name="complete" className="primary" disabled={!!missing.length} busy={busy}>Завершить разметку</Button>
+  return {
+    favorite: <FavoriteButton item={item} withLabel />,
+    shared: <SharedItemStatus item={item} />,
+    note: <NoteEditor kind="item" id={item.id} />,
+    sources: <>
+      {item.sources.map((s) => (
+        <div className="source-details drawer-source" key={s.id}>
+          <div>
+            <span>
+              {s.shared ? <Link2 size={16} /> : s.provider === "local" ? <HardDrive size={16} /> : <Youtube size={16} />}
+              {s.shared ? "Источник по ссылке" : s.provider === "local" ? "Локальный файл" : "YouTube"}
+            </span>
+            <span className={`ds-pill ${s.status === "available" ? "ok" : s.status === "unavailable" ? "err" : ""}`}>
+              {s.status === "available" ? "Доступен" : s.status === "unavailable" ? "Недоступен" : "Не проверен"}
+            </span>
+            {s.reason && <p>{s.reason}</p>}
+          </div>
+          {!s.shared && <NoteEditor kind="source" id={s.id} />}
         </div>
-      </form>
-      <NoteEditor kind="item" id={item.id} />
-      {item.sources.length > 0 && (
-        <section className="item-source-notes" aria-label="Источники">
-          <h3>Источники</h3>
-          {item.sources.map((s) => (
-            <div className="source-details" key={s.id}>
-              <div>
-                <span>
-                  {s.shared ? <Link2 size={16} /> : s.provider === "local" ? <HardDrive size={16} /> : <Youtube size={16} />}
-                  {s.shared ? "Источник по ссылке" : s.provider === "local" ? "Локальный файл" : "YouTube"}
-                </span>
-                <span className={s.status === "unavailable" ? "danger-text" : "muted"}>
-                  {s.status === "available"
-                    ? "Доступен"
-                    : s.status === "unavailable"
-                      ? "Недоступен"
-                      : "Не проверен"}
-                </span>
-                {s.reason && <p>{s.reason}</p>}
-              </div>
-              {!s.shared && <NoteEditor kind="source" id={s.id} />}
-            </div>
-          ))}
-        </section>
-      )}
-      <React.Suspense fallback={<div role="status">Загружаем источники…</div>}>
-        {!borrowedOnly && <VisualEditor key={item.id} item={item} reload={refresh} />}
+      ))}
+      <React.Suspense fallback={<div role="status" className="loading-inline">Загружаем…</div>}>
         <SourceReplacement item={item} reload={refresh} localOnly={borrowedOnly} focusSource={focusSource} />
       </React.Suspense>
-      <ItemListeningSummary itemId={item.id} />
-    </Modal>
-  );
+    </>,
+    visual: borrowedOnly ? <p className="drawer-hint">Видеоряд доступен только для своих записей.</p>
+      : <React.Suspense fallback={<div role="status" className="loading-inline">Загружаем…</div>}><VisualEditor key={item.id} item={item} reload={refresh} /></React.Suspense>,
+    history: <ItemListeningSummary itemId={item.id} />,
+  };
 }
 
 type ItemHistorySummary = {
@@ -1391,58 +1342,6 @@ function ItemListeningSummary({ itemId }: { itemId: string }) {
       )}
     </details>
   );
-}
-function BatchTags({ ids, close }: { ids: string[]; close: () => void }) {
-  const {library,refresh,notify} = useData();
-  const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
-  const [group,setGroup] = useState<TagGroup|"performance">("source"), [chosen,setChosen] = useState<string[]>([]);
-  const [mode,setMode] = useState<BatchMode>("add"), [busy,setBusy] = useState(false), [error,setError] = useState("");
-  const [performance,setPerformance] = useState<Performance>("unknown"), [voices,setVoices] = useState<Voice[]>([]);
-  const [preview,setPreview] = useState<{revision:string; changes:{id:string;tagIds?:string[];performance?:Performance;voices?:Voice[]}[];
-    removed:{label:string;count:number}[] }>();
-  async function prepare() {
-    const {revision} = await api<LibraryCardOverviewDto>("/library/overview?playlists=summary");
-    const items = await fetchItems(ids);
-    if(items.length !== ids.length) throw Error("Состав выборки изменился. Выберите записи заново.");
-    if (group !== "performance") {
-      const {changes,removed} = batchTagChanges(items,chosen,group,mode);
-      setPreview({revision, changes, removed:removed.map(({tag,count}) => ({label:catalog.paths(tag.id).join(" / ") || tag.name,count}))});
-    } else {
-      const current = itemPerformance(performance,voices).label;
-      const changes = items.filter(t => itemPerformance(t.performance,t.voices).label !== current);
-      const removed = new Map<string,number>();
-      for (const item of changes) {
-        const label = itemPerformance(item.performance,item.voices).label;
-        removed.set(label, (removed.get(label) ?? 0)+1);
-      }
-      setPreview({revision, changes:changes.map(({id}) => ({id,performance,voices})),removed:[...removed].map(([label,count]) => ({label,count}))});
-    }
-  }
-  async function submit() {
-    setBusy(true);setError("");
-    try {
-      if (!preview) await prepare();
-      else {
-        await api("/items/batch","POST",{expectedRevision:preview.revision,changes:preview.changes});
-        await refresh(); notify("Разметка обновлена"); close();
-      }
-    } catch(e) {setPreview(undefined);setError((e as Error).message);} finally {setBusy(false);}
-  }
-  return <Modal title={`Разметка для ${ids.length} записей`} close={close}>
-    <fieldset className="batch-choices" disabled={busy} onChange={() => setPreview(undefined)}>
-      <GroupSelect value={group} allowPerformance onChange={g => {setGroup(g);setChosen([]);}}/>
-      {group === "performance" ? <PerformanceEditor performance={performance} voices={voices} onChange={(p,v) => {setPerformance(p);setVoices(v);}}/>
-        : <><label>Действие<select value={mode} onChange={e => setMode(e.target.value as BatchMode)}>
-          <option value="add">Добавить к существующим</option><option value="replace">Заменить значения раздела</option>
-          <option value="remove">Убрать выбранные значения</option></select></label>
-          <TagPicker key={group} group={group} catalog={catalog} ids={chosen} onChange={setChosen}/></>}
-    </fieldset>
-    {preview && <section className="batch-preview" aria-live="polite"><h3>Изменится записей: {preview.changes.length}</h3>
-      {preview.removed.length > 0 && <><p>Будут сняты</p><ul>{preview.removed.map(r => <li key={r.label}>{r.label} · {r.count}</li>)}</ul></>}
-    </section>}
-    <ErrorMessage error={error}/><div className="modal-actions"><Button className="subtle" onClick={close}>Отмена</Button>
-      <Button className="primary" disabled={preview?.changes.length === 0} busy={busy} onClick={() => void submit()}>{preview ? "Применить" : "Показать изменения"}</Button>
-    </div></Modal>;
 }
 function CatalogPlaylistEditor({ id, close }: { id: string; close: () => void }) {
   const [playlist, setPlaylist] = useState<PlaylistDto>();

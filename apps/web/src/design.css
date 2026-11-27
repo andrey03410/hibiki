@@ -194,7 +194,7 @@ button.ds-chip.on:hover { background: color-mix(in oklab, var(--c) 86%, white); 
 
 /* ---------- drawer ---------- */
 .ds-drawer {
-  position: fixed; z-index: 70; top: 12px; right: 12px; bottom: 12px; width: min(620px, calc(100vw - 24px)); margin: 0; max-height: none; max-width: none;
+  position: fixed; z-index: 70; inset: 12px 12px 12px auto; width: min(620px, calc(100vw - 24px)); height: auto; margin: 0; max-height: none; max-width: none;
   display: flex; flex-direction: column; overflow: hidden; padding: 0; border: 0; color: var(--text);
   background: color-mix(in oklab, #17151f 97%, transparent); backdrop-filter: blur(30px);
   border-radius: 22px; box-shadow: var(--shadow-pop);
@@ -202,7 +202,7 @@ button.ds-chip.on:hover { background: color-mix(in oklab, var(--c) 86%, white); 
 }
 .ds-drawer:not([open]) { display: none; transform: translateX(28px); opacity: 0; }
 @starting-style { .ds-drawer[open] { transform: translateX(28px); opacity: 0; } }
-.ds-drawer::backdrop { background: rgba(6, 5, 10, .5); backdrop-filter: blur(2px); transition: opacity var(--t-slow), display var(--t-slow) allow-discrete, overlay var(--t-slow) allow-discrete; }
+.ds-drawer::backdrop { background: rgba(6, 5, 10, .38); transition: opacity var(--t-slow), display var(--t-slow) allow-discrete, overlay var(--t-slow) allow-discrete; }
 @starting-style { .ds-drawer[open]::backdrop { opacity: 0; } }
 .ds-tabs { display: flex; gap: 20px; padding: 0 22px; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
 .ds-tabs > button { position: relative; height: 40px; padding: 0; border: 0; background: none; display: flex; align-items: center; gap: 6px; color: var(--text-3); font: 500 13.5px var(--font); white-space: nowrap; transition: color var(--t-fast); }
@@ -233,7 +233,9 @@ button.ds-chip.on:hover { background: color-mix(in oklab, var(--c) 86%, white); 
 @keyframes ds-pop-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } }
 
 /* ---------- toasts ---------- */
-.toast-stack { z-index: 90; }
+.toast-stack { z-index: 90; inset: auto auto calc(var(--dock-h, 76px) + 30px) calc(var(--side-w, 232px) + 20px); margin: 0; padding: 0; border: 0; background: transparent; overflow: visible; color: inherit; flex-direction: column-reverse; align-items: flex-start; max-width: min(460px, calc(100vw - 40px)); }
+.toast-stack:not(:popover-open):not(:has(.toast)) { display: none; }
+.toast { pointer-events: auto; }
 .toast {
   background: #f2f0f7; color: #16131f; border: 0; border-radius: 14px; box-shadow: 0 20px 50px -15px rgba(0, 0, 0, .8); font: 500 13px var(--font);
   animation: ds-toast-in var(--t-slow) var(--ease-spring);
