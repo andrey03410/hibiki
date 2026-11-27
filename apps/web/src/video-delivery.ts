@@ -61,6 +61,7 @@ export class VideoBytes {
   position = 0;
   fillAllowed = false;
   background = false;
+  private targetPosition = -Infinity;
   onChange?: () => void;
   onFailure?: (denied: boolean) => void;
   constructor(readonly file: VideoFile, private read: ReadFile, private budget = VIDEO_BUDGET) {}
@@ -73,11 +74,22 @@ export class VideoBytes {
       playable: this.index ? playableTimes(this.index, this.ranges) : [] };
   }
   configure(mode: VideoMode, position = this.position, fillAllowed = this.fillAllowed) {
-    const changed = mode !== this.mode || fillAllowed !== this.fillAllowed || Math.abs(position - this.position) > 1;
+    // Compare with the playhead of the last decision, so the window also moves during playback.
+    const changed = mode !== this.mode || fillAllowed !== this.fillAllowed || Math.abs(position - this.targetPosition) > 1;
     this.mode = mode;
     this.position = Math.max(0, position);
     this.fillAllowed = fillAllowed;
-    if (changed) this.retarget();
+    if (changed) {
+      this.targetPosition = this.position;
+      this.retarget();
+    }
+    this.checkAccess();
+  }
+  // A prepared next recording becomes the current one: its background request yields.
+  promote() {
+    this.background = false;
+    this.transfer?.controller.abort();
+    this.schedule();
   }
 
   private wake() {
@@ -225,7 +237,8 @@ export class VideoBytes {
     if (demand) {
       // Stream on from a read near the playhead. A stale read elsewhere gets a bounded range.
       const near = window && demand.at >= window[0] && demand.at < window[1];
-      const limit = near && this.mode === "watch" ? size : Math.max(near ? window[1] : 0, Math.min(size, demand.at + 2 * MiB));
+      // The paced fill, not a decoder read, continues past the window.
+      const limit = near ? window[1] : Math.min(size, demand.at + 2 * MiB);
       const gap = this.gap(demand.at, demand.at < this.file.indexEnd ? this.file.indexEnd : limit);
       if (gap) return { start: gap[0], end: gap[1], kind: "demand", priority: "high", paced: false };
     }
@@ -273,6 +286,7 @@ export class VideoBytes {
     const openEnded = job.end === this.file.size;
     for (let attempt = 1; ; attempt++) {
       stop.throwIfAborted();
+      const resumedAt = job.cursor;
       const timeout = new AbortController();
       const signal = AbortSignal.any([stop, timeout.signal]);
       const expire = () => timeout.abort(new Error("Video transfer stalled"));
@@ -330,12 +344,16 @@ export class VideoBytes {
         return;
       } catch (error) {
         if (!stop.aborted && job.cursor === job.end) return;
-        if (stop.aborted || error instanceof AccessDenied || attempt >= 3) throw error;
+        if (stop.aborted || error instanceof AccessDenied) throw error;
+        // A long fill can stall now and then. Only repeated failures without progress stop it.
+        if (job.cursor > resumedAt) attempt = 0;
+        else if (attempt >= 3) throw error;
       } finally { clearTimeout(timer); }
       await new Promise<void>(resolve => setTimeout(resolve, attempt * 200));
     }
   }
   async chunk(key: symbol, at: number, end: number) {
+    this.checkAccess();
     if (!this.rangeAt(at)) {
       this.demands.delete(key);
       this.demands.set(key, { at });
@@ -357,15 +375,15 @@ export class VideoBytes {
   }
   // Retained bytes of a shared video still need the current grant.
   checkAccess() {
-    if (!this.file.shared || this.checking || Date.now() - this.checkedAt < 15_000) return;
+    if (!this.file.shared || this.checking || this.lifetime.signal.aborted || Date.now() - this.checkedAt < 10_000) return;
     this.checking = true;
     const signal = AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(10_000)]);
     void this.read(this.file.url, { method: "HEAD", signal, cache: "no-store" }).then(async response => {
       await response.body?.cancel();
       if ([401, 403, 404].includes(response.status)) throw new AccessDenied("Video access denied");
-      if (!response.ok) throw new Error("Video unavailable");
-      this.checkedAt = Date.now();
-    }).catch(error => { if (!this.lifetime.signal.aborted) this.fail(error); })
+      // A slow or failing check is retried later; only a refused grant stops the video.
+      if (response.ok) this.checkedAt = Date.now();
+    }).catch(error => { if (error instanceof AccessDenied && !this.lifetime.signal.aborted) this.fail(error); })
       .finally(() => { this.checking = false; });
   }
   close() {
@@ -415,15 +433,15 @@ export class VideoDelivery {
     if (this.nextFile?.url === file?.url) this.nextFile = undefined;
     if (!file) { this.current = undefined; this.publish(); return; }
     const bytes = reuse ?? new VideoBytes(file, this.read);
-    bytes.background = false;
     this.current = { token, bytes };
     bytes.onChange = () => {
       if (bytes.complete) { this.publish(); this.prepareNext(); }
-      else this.timer ??= setTimeout(this.publish, 250);
+      else this.timer ??= setTimeout(this.publish, 500);
     };
     bytes.onFailure = onFailure;
     bytes.configure(this.mode, this.position, this.fillAllowed);
-    bytes.schedule();
+    if (reuse) bytes.promote();
+    else bytes.schedule();
     this.publish();
   }
   configure(mode: VideoMode, position: number, fillAllowed: boolean) {

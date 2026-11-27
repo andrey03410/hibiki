@@ -554,7 +554,7 @@ export function PlayerProvider({
   const [videoIntent, setVideoIntent] = useState(false);
   useLayoutEffect(() => () => { delivery.clear(); videoDelivery.clear(); }, [delivery, videoDelivery]);
   useLayoutEffect(() => listenForAudioRanges(delivery, (token, range) => videoDelivery.response(token, range)),
-    [delivery, videoDelivery, audioToken, videoToken]);
+    [delivery, videoDelivery, audioToken]);
   useLayoutEffect(() => {
     videoDelivery.select(videoToken ? relayVideo : undefined, videoToken ?? "", () => {
       // The direct URL reports a revoked grant through the ordinary picture failure.
@@ -1990,6 +1990,7 @@ export function PlayerProvider({
                   ) : companion?.streamUrl ? (
                     <ClipVideo key={JSON.stringify([relayKey ?? sourceKey, companion.id, companion.streamUrl])} url={companionRelay ?? companion.streamUrl}
                       fallbackUrl={companion.streamUrl} poster={showArtwork ? artwork : undefined} loop={false}
+                      onDirect={() => { if (videoToken) setDirectVideoKey(videoToken); }}
                       audio={native} running={playing} onFailure={failPicture}
                       onClick={event => videoClick.click(event.detail, toggle, () => { void toggleFullscreen(); })} />
                   ) : (

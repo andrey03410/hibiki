@@ -4,9 +4,11 @@ import { playbackMark } from "./playback-debug";
 
 // Silent picture that follows the leading sound clock. Sound never waits for it:
 // until the first frame the cover stays in place, and a seek keeps the last frame.
-export function ClipVideo({ url, fallbackUrl, poster, audio, running, onClick, loop = true, onFailure }: {
+export function ClipVideo({ url, fallbackUrl, poster, audio, running, onClick, loop = true, onFailure, onDirect }: {
   url: string; fallbackUrl?: string; poster?: string; audio: RefObject<HTMLMediaElement | null>; running: boolean;
   loop?: boolean; onFailure?: () => void;
+  // The relayed bytes failed and the picture now reads the direct URL.
+  onDirect?: () => void;
   onClick: MouseEventHandler<HTMLVideoElement>;
 }) {
   const video = useRef<HTMLVideoElement>(null);
@@ -17,6 +19,8 @@ export function ClipVideo({ url, fallbackUrl, poster, audio, running, onClick, l
   const [posterFailed, setPosterFailed] = useState(false);
   const notifyFailure = useRef(onFailure);
   notifyFailure.current = onFailure;
+  const notifyDirect = useRef(onDirect);
+  notifyDirect.current = onDirect;
   const wantsPlayback = useRef(running);
   wantsPlayback.current = running;
   const syncNow = useRef<() => void>(undefined);
@@ -25,10 +29,9 @@ export function ClipVideo({ url, fallbackUrl, poster, audio, running, onClick, l
   useLayoutEffect(() => {
     const element = video.current;
     if (!element) return;
-    // Start the decoder at the sound position instead of reading the file start first.
-    const at = audio.current?.currentTime ?? 0;
-    const duration = element.duration;
-    const start = loop && Number.isFinite(duration) && duration > 0 ? at % duration : at;
+    // Start the original at the sound position instead of reading the file start first.
+    // A looping clip's own position is unknown before its metadata arrives.
+    const start = loop ? 0 : audio.current?.currentTime ?? 0;
     element.src = source + (start > .5 ? `#t=${start.toFixed(2)}` : "");
     playbackMark("video-attach", { relayed, at: start });
     // A detached, paused native video can keep its HTTP Range open.
@@ -43,7 +46,7 @@ export function ClipVideo({ url, fallbackUrl, poster, audio, running, onClick, l
     function failed() {
       if (!active || blocked) return;
       blocked = true;
-      if (relayed) { playbackMark("video-relay-failed"); setDirect(true); return; }
+      if (relayed) { playbackMark("video-relay-failed"); setDirect(true); notifyDirect.current?.(); return; }
       picture?.pause();
       setState("error");
       notifyFailure.current?.();

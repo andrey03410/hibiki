@@ -88,10 +88,10 @@ describe("tab-owned video delivery", () => {
     delivery.select(file(), "t");
     await until(() => server.ranges.length >= 3);
     delivery.configure("index", 0, false);
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await new Promise(resolve => setTimeout(resolve, 700));
     const count = server.ranges.length;
     const covered = JSON.stringify(delivery.snapshot());
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await new Promise(resolve => setTimeout(resolve, 700));
     expect(server.ranges.length).toBe(count);
     expect(delivery.snapshot()?.complete).toBe(false);
     expect(JSON.stringify(delivery.snapshot())).toBe(covered);
@@ -154,6 +154,52 @@ describe("tab-owned video delivery", () => {
     await new Promise(resolve => setTimeout(resolve, 200));
     expect(server.ranges.length).toBe(requests);
     bytes.close();
+  });
+
+  it("bounds a decoder read to the window until the sound lets the fill start", async () => {
+    const server = origin({ slow: true });
+    const delivery = new VideoDelivery(server.fetcher);
+    delivery.configure("watch", 10, false);
+    delivery.select(file(), "t");
+    await until(() => !!delivery.snapshot()?.indexed || server.ranges.length >= 2);
+    // The decoder reads the window start while the head of the window is still loading.
+    const response = delivery.response("t", `bytes=${movie.mdatBody}-`)!;
+    const reader = response.body!.getReader();
+    await reader.read();
+    await until(() => server.ranges.some(range => range.startsWith(`bytes=${movie.mdatBody}-`)));
+    const read = server.ranges.find(range => range.startsWith(`bytes=${movie.mdatBody}-`))!;
+    expect(read).not.toBe(`bytes=${movie.mdatBody}-`);
+    expect(Number(read.split("-")[1])).toBeLessThan(movie.file.length / 2);
+    await reader.cancel();
+  });
+
+  it("moves the window with continuous playback", async () => {
+    const server = origin();
+    const delivery = new VideoDelivery(server.fetcher);
+    delivery.configure("window", 5, false);
+    delivery.select(file(), "t");
+    await until(() => server.ranges.length >= 3);
+    await settle();
+    const before = server.ranges.length;
+    for (let t = 5.25; t <= 25; t += .25) delivery.follow(t);
+    await until(() => server.ranges.length > before);
+    await until(() => (delivery.snapshot()?.playable.at(-1)?.[1] ?? 0) >= 35);
+  });
+
+  it("rechecks a shared grant while retained bytes keep playing", async () => {
+    const server = origin();
+    const delivery = new VideoDelivery(server.fetcher);
+    const failed = vi.fn();
+    delivery.configure("watch", 0, true);
+    delivery.select({ ...file("/api/shared-items/x/sources/y"), shared: true }, "t", failed);
+    await until(() => !!delivery.snapshot()?.complete);
+    server.revoke();
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now + 11_000);
+    delivery.follow(1);
+    await until(() => failed.mock.calls.length > 0);
+    expect(failed).toHaveBeenCalledWith(true);
+    vi.restoreAllMocks();
   });
 
   it("accepts only original MP4 files with an index hint", () => {
