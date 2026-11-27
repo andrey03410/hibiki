@@ -3,7 +3,7 @@ import type { TagDto } from "@hibiki/contracts";
 import { TagCatalog } from "./taxonomy";
 import {
   AutosaveQueue, bulkChanges, bulkState, completeness, describeChange, draftOf, effectiveState, nextBulkTarget,
-  sameDraft, setPerformance, toggleDraftTag, toggleVoice, type Draft,
+  sameDraft, setPerformance, startDraft, toggleDraftTag, toggleVoice, type Draft,
 } from "./tag-editing";
 
 const tag = (id: string, group: TagDto["group"], archived = false): TagDto => ({ id, name: id.toUpperCase(), color: "#b8a5ff", group, archived });
@@ -116,6 +116,34 @@ describe("bulk tagging", () => {
       { id: "3", tagIds: ["gen"] },
     ]);
     expect(bulkChanges(items, new Map([["calm", true]]))).toEqual([]);
-    expect(bulkChanges(items, new Map(), { performance: "ost", voices: [] }).map(change => change.id)).toEqual(["2", "3"]);
+    expect(bulkChanges(items, new Map(), { performance: "ost", voices: [] }).map(change => change.id)).toEqual(["2", "3"]);  });
+  it("sets vocal without touching voices already chosen", () => {
+    const voiced = [
+      { id: "a", tags: [], performance: "vocal" as const, voices: ["female" as const] },
+      { id: "b", tags: [], performance: "ost" as const, voices: [] },
+      { id: "c", tags: [], performance: "unknown" as const, voices: [] },
+    ];
+    // Vocal records keep their voices; others become vocal and the server keeps their (empty) voices.
+    expect(bulkChanges(voiced, new Map(), { performance: "vocal", voices: [] })).toEqual([
+      { id: "b", performance: "vocal" },
+      { id: "c", performance: "vocal" },
+    ]);
+  });
+});
+
+describe("start draft", () => {
+  const item = { tags: [tags[1]!], performance: "unknown" as const, voices: [], updatedAt: "2026-11-27T10:00:00.000Z" };
+  const saved = { draft: draft(["art", "calm"]), updatedAt: "2026-11-27T10:00:05.000Z", at: 1_000 };
+  it("prefers a newer save than the list copy", () => {
+    expect(startDraft(item, saved, 2_000)).toEqual(draft(["art", "calm"]));
+  });
+  it("uses the item once the list has caught up or the save is older", () => {
+    expect(startDraft({ ...item, updatedAt: "2026-11-27T10:00:05.000Z" }, saved, 2_000)).toEqual(draft(["art"]));
+    expect(startDraft(item, undefined, 2_000)).toEqual(draft(["art"]));
+  });
+  it("trusts a recent save when the card has no timestamp", () => {
+    const card = { tags: [tags[1]!], performance: "unknown" as const, voices: [] };
+    expect(startDraft(card, saved, 20_000)).toEqual(draft(["art", "calm"]));
+    expect(startDraft(card, saved, 120_000)).toEqual(draft(["art"]));
   });
 });

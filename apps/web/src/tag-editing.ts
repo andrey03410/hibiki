@@ -13,6 +13,15 @@ export function draftOf(item: Pick<ItemDto, "tags" | "performance" | "voices">):
   };
 }
 
+/** Last saved classification of an item, kept while the list still shows the older copy. */
+export type SavedDraft = { draft: Draft; updatedAt?: string; at: number };
+
+/** Draft to start editing from: a save newer than the list copy wins (lists refresh with a delay). */
+export function startDraft(item: Pick<ItemDto, "tags" | "performance" | "voices"> & { updatedAt?: string }, saved: SavedDraft | undefined, now = Date.now()) {
+  if (saved && (item.updatedAt && saved.updatedAt ? saved.updatedAt > item.updatedAt : now - saved.at < 60_000)) return saved.draft;
+  return draftOf(item);
+}
+
 export function sameDraft(a: Draft, b: Draft) {
   const ids = new Set(a.tagIds);
   return a.performance === b.performance && a.tagIds.length === b.tagIds.length && b.tagIds.every(id => ids.has(id))
@@ -145,7 +154,10 @@ export function bulkChanges(items: readonly BulkItem[], plan: BulkPlan, performa
     const tagIds = [...kept, ...added];
     const change: (typeof changes)[number] = { id: item.id };
     if (tagIds.length !== before.length || added.length) change.tagIds = tagIds;
-    if (performance && (item.performance !== performance.performance
+    if (performance?.performance === "vocal" && !performance.voices.length) {
+      // «С вокалом» without chosen voices keeps the voices records already have.
+      if (item.performance !== "vocal") change.performance = "vocal";
+    } else if (performance && (item.performance !== performance.performance
       || (item.voices ?? []).length !== performance.voices.length || performance.voices.some(voice => !(item.voices ?? []).includes(voice)))) {
       change.performance = performance.performance;
       change.voices = performance.voices;

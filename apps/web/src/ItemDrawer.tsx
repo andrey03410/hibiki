@@ -11,8 +11,11 @@ import { useData } from "./WorkspaceUi";
 import { groupOf, groups, missingLabels, normalize, type TagCatalog, type TagGroup } from "./taxonomy";
 import { sourceChildren, sourceTrail } from "./library-filters";
 import {
-  AutosaveQueue, completeness, describeChange, draftOf, setPerformance, toggleDraftTag, toggleVoice, type Draft,
+  AutosaveQueue, completeness, describeChange, setPerformance, startDraft, toggleDraftTag, toggleVoice, type Draft, type SavedDraft,
 } from "./tag-editing";
+
+/** Saves the list may not show yet: reopening an item starts from them, not from the stale row. */
+const savedDrafts = new Map<string, SavedDraft>();
 
 export type DrawerTab = "tags" | "about" | "sources" | "visual" | "history";
 
@@ -46,7 +49,8 @@ export function ItemDrawer({ item, catalog, open, onClose, onPrev, onNext, onPla
 function DrawerBody({ item, catalog, onClose, onPrev, onNext, onPlay, initialTab, panels }: Omit<React.ComponentProps<typeof ItemDrawer>, "open">) {
   const { refresh, notify } = useData();
   const [tab, setTab] = useState<DrawerTab>(initialTab ?? "tags");
-  const [draft, setDraft] = useState<Draft>(() => draftOf(item));
+  const initial = useMemo(() => startDraft(item, savedDrafts.get(item.id)), [item.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [draft, setDraft] = useState<Draft>(initial);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [title, setTitle] = useState(item.title);
   const refreshTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -54,9 +58,9 @@ function DrawerBody({ item, catalog, onClose, onPrev, onNext, onPlay, initialTab
     clearTimeout(refreshTimer.current);
     refreshTimer.current = setTimeout(() => void refresh().catch(() => {}), delay);
   };
-  const queue = useMemo(() => new AutosaveQueue(draftOf(item), next => api(`/items/${encodeURIComponent(item.id)}`, "PATCH", {
+  const queue = useMemo(() => new AutosaveQueue(initial, next => api<ItemDto>(`/items/${encodeURIComponent(item.id)}`, "PATCH", {
     tagIds: next.tagIds, performance: next.performance, voices: next.voices,
-  }), {
+  }).then(saved => { savedDrafts.set(item.id, { draft: next, updatedAt: saved?.updatedAt, at: Date.now() }); }), {
     busy: busy => setStatus(old => busy ? "saving" : old === "error" ? "error" : "saved"),
     saved: (before, after) => {
       scheduleRefresh();

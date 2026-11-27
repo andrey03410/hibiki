@@ -853,6 +853,19 @@ it("combines tag sets with AND across groups, OR or ALL inside a group, and coun
   expect((await post("ids", { filters: sets({ group: "mood", ids: [] }) })).statusCode).toBe(400);
 });
 
+it("counts a group by its first set and always applies later sets of the same group", async () => {
+  const cover = await createTag("Cover", "extra");
+  const live = await createTag("Live", "extra");
+  const remaster = await createTag("Remaster", "extra");
+  await ctx.db.item.createMany({ data: ["a", "b", "c", "d"].map((id) => track(id)) });
+  for (const [id, tagIds] of [["a", [cover, remaster]], ["b", [live, remaster]], ["c", [cover]], ["d", [live]]] as const)
+    expect((await editTrack(id, { tagIds })).statusCode).toBe(200);
+  // The web app sends archived or deleted selections as an extra trailing set of the same group.
+  const page = (await post("page", { filters: { tagSets: [{ group: "extra", ids: [cover] }, { group: "extra", ids: [remaster], all: true }] } })).json();
+  expect(page.total).toBe(1);
+  expect(page.tagCounts).toMatchObject({ [cover]: 1, [live]: 1, [remaster]: 2 });
+});
+
 it("returns the newest owned YouTube artwork under each source section", async () => {
   const game = await createTag("Game", "source");
   const witcher = await createTag("Witcher", "source", { parentIds: [game] });

@@ -696,7 +696,7 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   const catalog = useMemo(() => new TagCatalog(library.tags), [library.tags]);
   const restrictsFacets = filters.sort === "recent" || filters.query.trim() || filters.kind || filters.provider || filters.availability || filters.favoriteOnly
     || filters.minDuration || filters.maxDuration || filters.addedFrom || filters.addedThrough || filters.performanceFilter
-    || filters.needsClassification || filters.missingGroup;
+    || filters.needsClassification || filters.missingGroup || filters.tagIds.length > 0;
   const selectedIds = new Set(selected);
   const hasSelection = selected.length > 0;
   const [selectionScope, setSelectionScope] = useState<{query: typeof idQuery; ids: string[]}>();
@@ -878,10 +878,18 @@ function ItemTable({
   const openEdit = React.useCallback((target: EditTarget) => setEditTarget({ ...target, item: latestItems.current.get(target.id) }), []);
   const edit = editTarget ? currentItems.get(editTarget.id) ?? editTarget.item : undefined;
   const editIndex = edit ? items.findIndex(item => item.id === edit.id) : -1;
+  // A completed item can leave a «needs classification» list: keep walking from its last place.
+  const lastIndex = useRef(-1);
+  if (editIndex >= 0) lastIndex.current = editIndex;
   const neighbour = (step: number) => {
-    const next = editIndex >= 0 ? items[editIndex + step] : undefined;
-    return next ? () => openEdit({ id: next.id }) : undefined;
+    const at = editIndex >= 0 ? editIndex + step : step < 0 ? lastIndex.current - 1 : lastIndex.current;
+    const next = at >= 0 ? items[at] : undefined;
+    return next && next.id !== edit?.id ? () => openEdit({ id: next.id }) : undefined;
   };
+  // The drawer stays mounted while it closes so the dialog animates out and returns focus.
+  const lastEdit = useRef<ItemDto>(undefined);
+  if (edit) lastEdit.current = edit;
+  const drawerItem = edit ?? lastEdit.current;
   const inLibrary = view !== undefined;
   const selectedIds = new Set(selected);
   function activate(item: ItemDto, index: number) {
@@ -904,17 +912,17 @@ function ItemTable({
           <div className="collection-results">{results}</div>
         </div>
       )}
-      {edit && (
+      {drawerItem && (
         <ItemDrawer
-          open
-          item={edit}
+          open={!!edit}
+          item={drawerItem}
           catalog={catalog}
           initialTab={editTarget?.focusSource ? "sources" : "tags"}
           onClose={() => setEditTarget(undefined)}
-          onPrev={neighbour(-1)}
-          onNext={neighbour(1)}
-          onPlay={() => activate(edit, Math.max(0, editIndex))}
-          panels={itemPanels(edit, refresh, !!editTarget?.focusSource)}
+          onPrev={edit ? neighbour(-1) : undefined}
+          onNext={edit ? neighbour(1) : undefined}
+          onPlay={edit && editIndex >= 0 ? () => activate(edit, editIndex) : undefined}
+          panels={itemPanels(drawerItem, refresh, !!editTarget?.focusSource)}
         />
       )}
       {shareTarget && <React.Suspense fallback={null}>

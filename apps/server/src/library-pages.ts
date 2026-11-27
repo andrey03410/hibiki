@@ -402,6 +402,7 @@ async function facetCounts(tx: Tx, ownerId: string, where: Prisma.Sql) {
  * Faceted counts for grouped tag sets: tags of a group with a chosen set are
  * counted without that set (so siblings stay comparable), every other tag with
  * all sets applied. Costs one query per chosen group plus one.
+ * Only the first set of a group is skipped for that group's counts.
  */
 async function groupedFacetCounts(tx: Tx, ownerId: string, eligible: Prisma.Sql, sets: NonNullable<BrowserLibrarySearch["tagSets"]>) {
   const narrowed = (skip?: number) => {
@@ -409,7 +410,9 @@ async function groupedFacetCounts(tx: Tx, ownerId: string, eligible: Prisma.Sql,
     return filter ? Prisma.sql`${eligible} AND ${filter}` : eligible;
   };
   const counts = await facetCounts(tx, ownerId, narrowed());
+  // The first set of a group is its facet choice; later sets of that group always apply.
   for (const [index, set] of sets.entries()) {
+    if (sets.findIndex(other => other.group === set.group) !== index) continue;
     for (const row of await facetRows(tx, ownerId, narrowed(index))) {
       if ((row.tagGroup ?? "extra") === set.group) counts[row.id] = Number(row.total);
     }
@@ -563,7 +566,7 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
         // matches. Use the complete untagged result, never one page of visible rows.
         const prior = !frozen && previousText?.scope === scope && query.startsWith(previousText.query)
           ? previousText.ids : undefined;
-        if (all && !search.tagIds.length) textMatches = all;
+        if (all && !search.tagIds.length && !search.tagSets?.length) textMatches = all;
         else if (prior?.length === 0) textMatches = [];
         else {
           const candidates = prior ? Prisma.sql`${eligible} AND ${idFilter(prior)}` : eligible;

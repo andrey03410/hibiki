@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { CloudSun, Disc3, FolderTree, Hash, LoaderCircle, Mic, MicVocal, Plus, Search, Tags } from "lucide-react";
 import type { ItemDto } from "@hibiki/contracts";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { fetchItems } from "./library-pages";
 import { records } from "./LibraryFilters";
 import { Popover, Segmented, TagChip, usePopover } from "./design/primitives";
@@ -36,16 +36,18 @@ function BulkPanel({ ids, catalog, close, onDone }: { ids: string[]; catalog: Ta
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState<TagGroup>();
   const [query, setQuery] = useState("");
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let live = true;
     setRevision(overview.revision);
+    setError("");
     fetchItems(ids).then(loaded => {
       if (!live) return;
       if (loaded.length !== ids.length) setError("Состав выборки изменился. Выберите записи заново.");
       setItems(loaded);
     }).catch(e => { if (live) setError((e as Error).message); });
     return () => { live = false; };
-  }, [ids.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [ids.join(","), attempt]); // eslint-disable-line react-hooks/exhaustive-deps
   const present = useMemo(() => items ? bulkTags(items, catalog) : [], [items, catalog]);
   const shown = useMemo(() => {
     const extra = [...plan.keys()].filter(id => !present.some(tag => tag.id === id)).flatMap(id => catalog.byId.get(id) ?? []);
@@ -69,7 +71,13 @@ function BulkPanel({ ids, catalog, close, onDone }: { ids: string[]; catalog: Ta
       close();
       onDone();
     } catch (e) {
-      setError((e as Error).message);
+      if (e instanceof ApiError && e.code === "library_changed") {
+        // Reload the records and the revision; the planned changes stay and apply to the fresh state.
+        await refresh().catch(() => {});
+        setItems(undefined);
+        setAttempt(value => value + 1);
+        notify("Медиатека изменилась: состояние записей обновлено, проверьте и примените ещё раз", true);
+      } else setError((e as Error).message);
     } finally {
       setBusy(false);
     }
