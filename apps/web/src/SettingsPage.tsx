@@ -1,13 +1,14 @@
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router";
-import { Download, Plus, Check, Upload, KeyRound, Copy, FolderOpen } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { useNavigate, useSearchParams } from "react-router";
+import { Download, Plus, Check, Upload, KeyRound, Copy, FolderOpen, HardDrive, Youtube, History, Link2, UserRound, Bot } from "lucide-react";
 import type { UserDto } from "@hibiki/contracts";
 import { api } from "./api";
-import { Button, ErrorMessage, Modal, PageTop, useData } from "./WorkspaceUi";
+import { Button, ErrorMessage, Modal, useData } from "./WorkspaceUi";
 import { KanameSettings } from "./KanameSettings";
 import { StorageSettings } from "./StorageSettings";
 import { YoutubeSyncSettings } from "./YoutubeSync";
 import { HistorySettings } from "./HistorySettings";
+import { ShareManager } from "./Sharing";
 
 export default function SettingsPage({ user, kaname }: { user: UserDto; kaname: boolean }) {
   const { overview, notify, refresh, openImport } = useData(),
@@ -23,6 +24,18 @@ export default function SettingsPage({ user, kaname }: { user: UserDto; kaname: 
     [exportBusy, setExportBusy] = useState(false),
     [error, setError] = useState("");
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const sections: { id: string; label: string; icon: ReactNode }[] = [
+    { id: "storage", label: "Хранилище", icon: <HardDrive size={16} /> },
+    { id: "youtube", label: "YouTube", icon: <Youtube size={16} /> },
+    { id: "history", label: "История", icon: <History size={16} /> },
+    { id: "links", label: "Мои ссылки", icon: <Link2 size={16} /> },
+    { id: "agent", label: "ИИ-агент (MCP)", icon: <Bot size={16} /> },
+    { id: "transfer", label: "Перенос", icon: <FolderOpen size={16} /> },
+    { id: "account", label: "Аккаунт", icon: <UserRound size={16} /> },
+  ];
+  const section = sections.some(item => item.id === params.get("section")) ? params.get("section")! : "storage";
+  const show = (id: string) => section === id;
   async function loadTokens() {
     try {
       const data = await api("/tokens");
@@ -48,24 +61,23 @@ export default function SettingsPage({ user, kaname }: { user: UserDto; kaname: 
   }
   return (
     <>
-      <PageTop label="Настройки" />
-      <div className="title-row">
-        <div>
-          <span className="eyebrow">ВАШЕ ПРОСТРАНСТВО ПОД КОНТРОЛЕМ</span>
-          <h1>
-            Настройки<span className="heading-dot">.</span>
-          </h1>
-          <p className="muted">
-            Подключайте агента и берите медиатеку с собой.
-          </p>
-        </div>
-      </div>
-      <div className="settings-layout">
-        {kaname && <KanameSettings userId={user.id} />}
-        <StorageSettings key={user.id} />
-        <YoutubeSyncSettings />
-        <HistorySettings playlists={overview.playlists} revision={overview.revision} />
-        <section className="settings-card">
+      <header className="page-head">
+        <h1>Настройки</h1>
+        <p>Хранилище, ссылки, агент и перенос медиатеки.</p>
+      </header>
+      <div className="settings-shell">
+      <nav className="settings-nav" aria-label="Разделы настроек">
+        {sections.map(item => <button key={item.id} type="button" aria-current={show(item.id) ? "page" : undefined}
+          onClick={() => setParams(item.id === "storage" ? {} : { section: item.id }, { replace: true })}>{item.icon}{item.label}</button>)}
+      </nav>
+      <div className="settings-layout" key={section}>
+        {show("storage") && <StorageSettings key={user.id} />}
+        {show("youtube") && <YoutubeSyncSettings />}
+        {show("history") && <HistorySettings playlists={overview.playlists} revision={overview.revision} />}
+        {show("links") && <section className="settings-card"><div className="settings-card-heading"><span className="settings-icon"><Link2 size={22} /></span>
+          <div><h2>Мои ссылки</h2><p>Записи и плейлисты, которыми вы поделились: срок, доступ и отзыв.</p></div></div>
+          <ShareManager embedded /></section>}
+        {show("agent") && <section className="settings-card">
           <div className="settings-card-heading">
             <span className="settings-icon">
               <KeyRound size={22} />
@@ -173,8 +185,8 @@ export default function SettingsPage({ user, kaname }: { user: UserDto; kaname: 
               Создать токен
             </Button>
           </form>
-        </section>
-        <section className="settings-card">
+        </section>}
+        {show("transfer") && <section className="settings-card">
           <div className="settings-card-heading">
             <span className="settings-icon warm">
               <FolderOpen size={22} />
@@ -251,8 +263,9 @@ export default function SettingsPage({ user, kaname }: { user: UserDto; kaname: 
               Выбрать архив
             </Button>
           </div>
-        </section>
-        <section className="settings-card account-settings">
+        </section>}
+        {show("account") && kaname && <KanameSettings userId={user.id} />}
+        {show("account") && <section className="settings-card account-settings">
           <div className="settings-card-heading">
             <span className="avatar">
               {user.login.slice(0, 1).toUpperCase()}
@@ -271,7 +284,8 @@ export default function SettingsPage({ user, kaname }: { user: UserDto; kaname: 
             автоматически. После перезагрузки нажмите «Воспроизвести», чтобы
             продолжить.
           </p>
-        </section>
+        </section>}
+      </div>
       </div>
       {newToken && (
         <Modal

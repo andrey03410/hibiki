@@ -12,6 +12,7 @@ import { noteFor } from "./note-model";
 import { useHasPlayer } from "./player";
 import { lazyView } from "./ErrorBoundary";
 import "./tag-directory.css";
+import { tagColor } from "./design/tag-colors";
 
 const Migration = lazyView(() => import("./ClassificationMigration").then(m => ({ default: m.ClassificationMigration })));
 const pageSize = 80;
@@ -148,7 +149,7 @@ export default function TagsPage({ userId, visits, onBrowse }: {
       <nav className="directory-sections" aria-label="Разделы каталога">
         {sections.map(value => {
           const Icon = icons[value];
-          return <button type="button" key={value} aria-current={section === value ? "true" : undefined}
+          return <button type="button" key={value} className={"g-" + value} aria-current={section === value ? "true" : undefined}
             onClick={() => selectSection(value)}><Icon size={17} />{names[value]}</button>;
         })}
       </nav>
@@ -182,7 +183,7 @@ export default function TagsPage({ userId, visits, onBrowse }: {
               const { tag } = row;
               const count = overview.tagCounts[tag.id] ?? 0;
               return <li className="directory-row" key={row.key}
-                style={{ "--depth": row.depth, "--tag-color": tag.color } as CSSProperties}>
+                style={{ "--depth": row.depth, "--tag-color": tagColor(tag) } as CSSProperties}>
                 <div className="directory-node">
                   {row.branch ? <button type="button" className="directory-arrow" aria-expanded={row.expanded}
                     aria-label={(row.expanded ? "Свернуть " : "Раскрыть ") + tag.name}

@@ -38,6 +38,7 @@ import type { ItemDto, PlaybackMode, PlaylistDto, SourceDto } from "@hibiki/cont
 import { api, formatDuration, mediaWord } from "./api.ts";
 import { ItemArtwork, artworkUrl } from "./ItemArtwork.tsx";
 import { ambientColor, applyAmbient } from "./design/ambient";
+import { TagChip } from "./design/primitives";
 import { fetchItems } from "./library-pages";
 import { completeLibraryOrder, LibraryQueueLoad, QueueCatalog, QueueIntents } from "./queue-catalog";
 import { CompactPlaybackQueue, QueueRows, playbackBuffer, PlaybackSeekBar, PlaybackVolume, type BufferedRanges } from "./PlaybackControls";
@@ -2065,7 +2066,7 @@ export function PlayerProvider({
               </div>
               <div className="watch-metadata">
                 <span className="watch-kind-icon">{watchVideo ? <Video size={20} /> : <Music2 size={20} />}</span>
-                <div><h2>{current.title}</h2><p>{watchClip ? "Клип" : audioFallback ? "Доступен только звук" : watchVideo ? "Видео" : "Аудио"}<span>·</span>{sourceLabel}{current.tags.slice(0, 2).map((tag) => <span className="watch-tag" key={tag.id}>{tag.name}</span>)}</p></div>
+                <div><h2>{current.title}</h2><p>{watchClip ? "Клип" : audioFallback ? "Доступен только звук" : watchVideo ? "Видео" : "Аудио"}<span>·</span>{sourceLabel}{current.tags.filter(tag => !tag.archived).slice(0, 3).map((tag) => <TagChip key={tag.id} tag={tag} />)}</p></div>
               </div>
               <p className="watch-shortcuts"><kbd>K</kbd> пауза <span>·</span> <kbd>← →</kbd> 5 с <span>·</span> <kbd>J L</kbd> 10 с <span>·</span> <kbd>0–9</kbd> позиция <span>·</span> <kbd>↑ ↓</kbd> громкость <span>·</span> <kbd>F</kbd> полный экран</p>
             </div>

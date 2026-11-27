@@ -74,6 +74,7 @@ import { api, ApiError, setWorkspaceOwner, formatDuration, humanDuration, mediaW
 import { ErrorBoundary, lazyView } from "./ErrorBoundary";
 import { ArtworkImage, ItemArtwork } from "./ItemArtwork.tsx";
 import { GenerativeCover } from "./design/primitives";
+import { useCoverTint } from "./design/ambient";
 import { PlaylistCard, PlaylistCover } from "./PlaylistCard";
 import { ScopedPlaylistPage, usePlaylistLibrary } from "./PlaylistLibrary";
 import type { PlaylistTarget } from "./playlist-library";
@@ -107,6 +108,7 @@ import "./design.css";
 import "./design-shell.css";
 import "./design-library.css";
 import "./design-drawer.css";
+import "./design-pages.css";
 
 const ImportModal = lazyView(() => import("./ImportModal"));
 const JobsPage = lazyView(() => import("./JobsPage"));
@@ -1608,6 +1610,8 @@ function PlaylistPage({ id, onBrowseTag }: { id: string; onBrowseTag: (id: strin
     observer.observe(sentinel.current);
     return () => observer.disconnect();
   }, [resolved, edit, hasMore, loadingMore, moreError]);
+  const heroCover = resolved?.cover?.url ?? card?.coverUrls?.[0];
+  const heroTint = useCoverTint(heroCover?.startsWith("https://i.ytimg.com/") ? heroCover.replace(/\/(sd|hq|maxres)default\.jpg$/, "/mqdefault.jpg") : heroCover);
   if (notFound)
     return (
       <>
@@ -1658,7 +1662,7 @@ function PlaylistPage({ id, onBrowseTag }: { id: string; onBrowseTag: (id: strin
           <ArrowLeft size={14} />К подборкам
         </Link>
       </PageTop>
-      <section className="playlist-detail-hero">
+      <section className="playlist-detail-hero" style={heroTint ? { "--hero": heroTint } as React.CSSProperties : undefined}>
         <PlaylistCover title={playlist.title} items={resolved?.items}
           coverUrls={resolved?.cover?.url ? [resolved.cover.url, ...(card?.coverUrls ?? [])] : card?.coverUrls} large />
         <div>

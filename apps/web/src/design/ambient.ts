@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 /**
  * Ambient colour of the current track: the average colour of a small copy of
  * its artwork, softened so text stays readable. Results are cached per URL.
@@ -68,4 +70,15 @@ export function ambientColor(url: string | undefined): Promise<string | undefine
 /** Smoothly retints the whole interface (see `--amb` in design.css). */
 export function applyAmbient(color: string | undefined) {
   document.documentElement.style.setProperty("--amb", color ?? NEUTRAL_AMBIENT);
+}
+
+/** Tint of a cover for local accents (playlist hero); undefined until known. */
+export function useCoverTint(url: string | undefined) {
+  const [tint, setTint] = useState<string>();
+  useEffect(() => {
+    let live = true;
+    void ambientColor(url).then(color => { if (live) setTint(color); });
+    return () => { live = false; };
+  }, [url]);
+  return tint;
 }

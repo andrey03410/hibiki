@@ -226,7 +226,7 @@ function Loading({ children }: { children: ReactNode }) {
   return <div className="loading-inline" role="status"><LoaderCircle className="spin" size={18} />{children}</div>;
 }
 
-export function ShareManager() {
+export function ShareManager({ embedded = false }: { embedded?: boolean } = {}) {
   const { data, error, refresh, setData } = useSharingRequest<{ links: ShareLinkDto[] }>("/share-links");
   const [target, setTarget] = useState<ShareLinkDto>();
   const [editingId, setEditingId] = useState<string>();
@@ -257,7 +257,7 @@ export function ShareManager() {
   }
   return (
     <section className="sharing-page">
-      <div className="title-row library-title-row"><h1>Мои ссылки</h1></div>
+      {!embedded && <div className="title-row library-title-row"><h1>Мои ссылки</h1></div>}
       {error && <p className="error-box" role="alert">{error.message}</p>}
       {!data && !error && <Loading>Загружаем ссылки…</Loading>}
       {data?.links.length === 0 && <div className="empty-state">
