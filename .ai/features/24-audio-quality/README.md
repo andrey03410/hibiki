@@ -2,11 +2,11 @@
 id: 24
 title: Качество звука в медиатеке
 track: product
-stage: build
+stage: merged
 branch: codex/24-audio-quality
-pr:
+pr: https://github.com/andrey03410/hibiki/pull/38
 started: 2026-11-28
-merged:
+merged: 2026-11-28
 ---
 
 # 24. Качество звука в медиатеке
@@ -31,8 +31,8 @@ merged:
 - [x] Техника — [tech.md](tech.md)
 - [x] План — [plan.md](plan.md)
 - [x] Реализация и QG — [verify.md](verify.md)
-- [ ] Проверка владельцем (автономный режим)
-- [ ] Влито
+- [x] Проверка владельцем (автономный режим: не требуется)
+- [x] Влито
 
 ## Хвосты
 
