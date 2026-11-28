@@ -2,7 +2,7 @@
 id: 24
 title: Качество звука в медиатеке
 track: product
-stage: plan
+stage: build
 branch: codex/24-audio-quality
 pr:
 started: 2026-11-28
