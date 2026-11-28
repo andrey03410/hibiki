@@ -11,6 +11,8 @@ import { jobDto, type LibraryService } from "./library";
 import { listTags } from "./taxonomy";
 import { browserOwner } from "./notes";
 import { LibrarySelections } from "./library-selections";
+import { audioClasses } from "@hibiki/contracts";
+import { parseStoredQuality } from "./media-quality";
 
 const pageSize = 100;
 const titleOrder = new Intl.Collator("ru", { sensitivity: "base", numeric: true });
@@ -22,6 +24,7 @@ const searchInput = z.object({
 const pageInput = searchInput.extend({ cursor: z.string().max(100).optional(), countsKey: z.string().max(100).optional(),
   cards: z.boolean().optional(), indexedCounts: z.boolean().optional(), picker: z.boolean().optional(), tagRevision: z.string().max(100).optional() });
 type SearchInput = z.infer<typeof pageInput>;
+type FacetCounts = { tags: Record<string, number>; audio: Record<string, number> };
 type Tx = Prisma.TransactionClient;
 
 async function revision(tx: Tx, ownerId: string) {
@@ -40,7 +43,7 @@ function facetToken(ownerId: string, revision: string, search: BrowserLibrarySea
   const scope = [ownerId, revision, search.query.trim(), search.kind, search.provider, search.availability, search.favoriteOnly,
     search.minDuration, search.maxDuration, search.addedFrom, search.addedThrough,
     search.addedFrom || search.addedThrough ? zone : "", search.performanceFilter || "", !!search.needsClassification,
-    search.missingGroup || "", search.sort === "recent",
+    search.missingGroup || "", search.sort === "recent", [...(search.audioQuality ?? [])].sort(),
     ...(search.tagSets?.length ? [search.tagSets.map(set => [set.group, [...set.ids].sort(), !!set.all])] : [])];
   return createHash("sha256").update(JSON.stringify(scope)).digest("hex").slice(0, 24);
 }
@@ -110,6 +113,40 @@ function dateBound(value: string, nextDay: boolean, zone?: string) {
 
 const ownedSource = Prisma.sql`s.itemId = i.id AND s.ownerId = i.ownerId AND
   (s.fileId IS NULL OR EXISTS (SELECT 1 FROM MediaFile f WHERE f.id = s.fileId AND f.ownerId = i.ownerId))`;
+
+// The file that represents a recording, chosen like `itemAudioQuality`: the sound of an
+// assigned visual, the preferred source, then the first available local file.
+const qualityFile = Prisma.sql`(SELECT f.id FROM Source s JOIN MediaFile f ON f.id = s.fileId AND f.ownerId = s.ownerId
+  WHERE s.itemId = i.id AND s.ownerId = i.ownerId AND s.provider = 'local' AND s.status = 'available'
+  ORDER BY s.id = (SELECT v.soundSourceId FROM ItemVisual v WHERE v.itemId = i.id) DESC,
+    s.id = i.preferredSourceId DESC, s.rowid LIMIT 1)`;
+const qualityScore = Prisma.sql`(SELECT q.audioScore FROM MediaFile q WHERE q.id = ${qualityFile})`;
+const qualitySort = (sort: string) => sort.startsWith("quality");
+
+/** Values are a class, a format or `class.format`, combined with OR. */
+function audioQualityFilter(values: readonly string[] | undefined) {
+  if (!values?.length) return;
+  const sql = Prisma.sql;
+  const parts = [...new Set(values)].map(value => {
+    if ((audioClasses as readonly string[]).includes(value)) return sql`q.audioClass = ${value}`;
+    const [quality, format] = value.split(".");
+    return format ? sql`(q.audioClass = ${quality} AND q.audioFormat = ${format})` : sql`q.audioFormat = ${value}`;
+  });
+  return sql`EXISTS (SELECT 1 FROM MediaFile q WHERE q.id = ${qualityFile} AND (${Prisma.join(parts, " OR ")}))`;
+}
+
+async function audioCounts(tx: Tx, ownerId: string, where: Prisma.Sql) {
+  const rows = await tx.$queryRaw<{ audioClass: string; audioFormat: string | null; total: bigint }[]>(Prisma.sql`
+    ${catalogCte(ownerId)} SELECT q.audioClass, q.audioFormat, count(*) AS total
+    FROM Item i JOIN MediaFile q ON q.id = ${qualityFile}
+    WHERE ${where} AND q.audioClass IS NOT NULL GROUP BY q.audioClass, q.audioFormat`);
+  const counts: Record<string, number> = {};
+  for (const row of rows) {
+    counts[row.audioClass] = (counts[row.audioClass] ?? 0) + Number(row.total);
+    if (row.audioFormat) counts[row.audioClass + "." + row.audioFormat] = Number(row.total);
+  }
+  return counts;
+}
 
 // UNION deduplicates a shared work reached through several studios. Materialize the
 // owner's small catalog once per statement, including its transitive parent edges.
@@ -218,6 +255,8 @@ function itemFilter(ownerId: string, search: BrowserLibrarySearch, zone?: string
     clauses.push(sql`i.performance = ${search.performanceFilter}`);
   }
   if (search.needsClassification || search.missingGroup) clauses.push(missingFilter(search.missingGroup));
+  const quality = audioQualityFilter(search.audioQuality);
+  if (quality) clauses.push(quality);
   const source = (condition: Prisma.Sql) => sql`EXISTS (
     SELECT 1 FROM Source s WHERE ${ownedSource} AND ${condition}
   )`;
@@ -254,15 +293,21 @@ function orderBy(sort: BrowserLibrarySearch["sort"]) {
   if (sort === "recent") return Prisma.sql`h.lastStartedAt DESC, i.id ASC`;
   if (sort === "random") return Prisma.sql`i.id ASC`;
   const direction = sort.endsWith("-desc") ? Prisma.sql`DESC` : Prisma.sql`ASC`;
+  if (qualitySort(sort)) return Prisma.sql`${qualityScore} ${direction} NULLS LAST, i.id ASC`;
   return sort.startsWith("duration")
     ? Prisma.sql`i.duration ${direction} NULLS LAST, i.id ASC`
     : Prisma.sql`i.createdAt ${direction}, i.id ASC`;
 }
 
-type SortKey = { id: string; title: string; duration: number | null; createdAt: Date };
+type SortKey = { id: string; title: string; duration: number | null; createdAt: Date; quality?: number | null };
 function compare(a: SortKey, b: SortKey, sort: BrowserLibrarySearch["sort"]) {
   let order;
-  if (sort.startsWith("duration")) {
+  if (qualitySort(sort)) {
+    const left = a.quality ?? null, right = b.quality ?? null;
+    if (left === null || right === null)
+      return Number(left === null) - Number(right === null) || a.id.localeCompare(b.id);
+    order = left - right;
+  } else if (sort.startsWith("duration")) {
     if (a.duration === null || b.duration === null)
       return Number(a.duration === null) - Number(b.duration === null) || a.id.localeCompare(b.id);
     order = a.duration - b.duration;
@@ -299,9 +344,10 @@ async function matchingKeys(tx: Tx, ownerId: string, where: Prisma.Sql, search: 
   const take = 256;
   for (;;) {
     signal?.throwIfAborted();
+    const quality = qualitySort(search.sort) ? qualityScore : Prisma.sql`NULL`;
     const rows = await tx.$queryRaw<(SortKey & { text: string | null; assigned: string | null })[]>(Prisma.sql`
       ${catalogCte(ownerId)}
-      SELECT i.id, i.title, i.duration, i.createdAt, ${fields} FROM Item i
+      SELECT i.id, i.title, i.duration, i.createdAt, ${quality} AS quality, ${fields} FROM Item i
       WHERE ${where} AND i.id > ${after} ORDER BY i.id LIMIT ${take}
     `);
     for (const row of rows) {
@@ -313,7 +359,8 @@ async function matchingKeys(tx: Tx, ownerId: string, where: Prisma.Sql, search: 
           if (!remaining.every(word => assigned.some(id => labels.get(id)?.includes(word)))) continue;
         }
       }
-      keys.push({ id: row.id, title: row.title, duration: row.duration, createdAt: row.createdAt });
+      keys.push({ id: row.id, title: row.title, duration: row.duration, createdAt: row.createdAt,
+        quality: row.quality === null || row.quality === undefined ? null : Number(row.quality) });
     }
     if (rows.length < take) break;
     after = rows.at(-1)!.id;
@@ -360,8 +407,9 @@ export class McpMediaPages {
 
     let after = Prisma.empty;
     if (cursor) {
-      const duration = search.sort.startsWith("duration");
-      const column = duration ? Prisma.sql`i.duration` : Prisma.sql`i.createdAt`;
+      // Duration and quality may be missing; such records come last in both directions.
+      const duration = search.sort.startsWith("duration") || qualitySort(search.sort);
+      const column = qualitySort(search.sort) ? qualityScore : duration ? Prisma.sql`i.duration` : Prisma.sql`i.createdAt`;
       // Preserve the exact stored SQLite timestamp (including its precision).
       const anchor = duration ? column : Prisma.sql`CAST(i.createdAt AS TEXT)`;
       const [row] = await tx.$queryRaw<{value: string | number | null}[]>(Prisma.sql`
@@ -369,18 +417,25 @@ export class McpMediaPages {
       `);
       invariant(row, 400, "cursor", "Курсор не найден");
       const direction = search.sort.endsWith("desc") ? Prisma.sql`<` : Prisma.sql`>`;
-      if (row.value === null) after = Prisma.sql` AND i.duration IS NULL AND i.id > ${cursor}`;
+      if (row.value === null) after = Prisma.sql` AND ${column} IS NULL AND i.id > ${cursor}`;
       else after = Prisma.sql` AND (${column} ${direction} ${row.value}
-        OR (${column} = ${row.value} AND i.id > ${cursor}) ${duration ? Prisma.sql`OR i.duration IS NULL` : Prisma.empty})`;
+        OR (${column} = ${row.value} AND i.id > ${cursor}) ${duration ? Prisma.sql`OR ${column} IS NULL` : Prisma.empty})`;
     }
     return orderedIds(tx, ownerId, Prisma.sql`${where}${after}`, search.sort, Prisma.sql`LIMIT ${limit + 1}`);
   }
 }
 
 export async function itemSummaries(tx: Tx, ownerId: string, ids: string[]) {
-  const rows = await tx.item.findMany({where:{ownerId,id:{in:ids}}, select:{id:true, title:true, kind:true, duration:true}});
-  const byId = new Map(rows.map(row => [row.id, row]));
-  return ids.flatMap(id => byId.get(id) ?? []);
+  if (!ids.length) return [];
+  const rows = await tx.$queryRaw<{ id: string; title: string; kind: string; duration: number | null; quality: string | null }[]>(Prisma.sql`
+    SELECT i.id, i.title, i.kind, i.duration, (SELECT q.quality FROM MediaFile q WHERE q.id = ${qualityFile}) AS quality
+    FROM json_each(${JSON.stringify(ids)}) member CROSS JOIN Item i ON i.id = member.value AND i.ownerId = ${ownerId}
+    ORDER BY member.key`);
+  return rows.map(({ quality, ...row }) => {
+    const stored = parseStoredQuality(quality);
+    const audio = (stored?.origin ?? stored)?.audio;
+    return { ...row, ...(audio && { audioQuality: { label: audio.label, class: audio.class, format: audio.format } }) };
+  });
 }
 
 async function facetRows(tx: Tx, ownerId: string, where: Prisma.Sql) {
@@ -447,8 +502,10 @@ async function selectionIds(
 ) {
   let all = textMatches;
   if (all) {
-    const tags = tagFilter(ownerId, searchTagSets(search));
-    if (tags) {
+    // Text matches cover the facet scope; tags and quality narrow them here.
+    const narrowing = [tagFilter(ownerId, searchTagSets(search)), audioQualityFilter(search.audioQuality)].filter(part => part !== undefined);
+    if (narrowing.length) {
+      const tags = Prisma.join(narrowing, " AND ");
       const tagged = await tx.$queryRaw<{id: string}[]>(Prisma.sql`
         ${catalogCte(ownerId)} SELECT i.id FROM Item i WHERE i.ownerId = ${ownerId} AND ${tags} AND ${idFilter(all)}
       `);
@@ -481,7 +538,7 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
   const selections = new Map<string, string[]>();
   let retainedSelectionIds = 0;
   const tagDirectories = new Map<string, { revision: string; indexes: Map<string, number> }>();
-  const countsCache = new Map<string, Record<string, number>>();
+  const countsCache = new Map<string, FacetCounts>();
   let compactSummary: {token: string; json: string} | undefined;
   let previousText: {scope: string; query: string; ids: string[]} | undefined;
   const snapshots = new LibrarySelections();
@@ -507,7 +564,8 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
     }
 
     const countsKey = facetToken(ownerId, current, search, zone);
-    async function page(ids: string[], total: number, tagCounts?: Record<string, number>) {
+    async function page(ids: string[], total: number, facetCounts?: FacetCounts) {
+      const tagCounts = facetCounts?.tags;
       const end = offset + ids.length;
       const prefix = selectionId ? "s." + selectionId : key + "." + current;
       const nextCursor = end < total ? prefix + "." + end : null;
@@ -521,8 +579,8 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
       const indexed = input.cards && input.indexedCounts && indexes && tagCounts;
       const counts = offset > 0 ? {} : token === input.countsKey
         ? { countsKey: token, countsUnchanged: true }
-        : indexed ? { countsKey: token, countsByIndex: Array.from(indexes.keys(), id => tagCounts[id] ?? 0) }
-        : { countsKey: token, tagCounts };
+        : indexed ? { countsKey: token, countsByIndex: Array.from(indexes.keys(), id => tagCounts[id] ?? 0), audioCounts: facetCounts?.audio }
+        : { countsKey: token, tagCounts, audioCounts: facetCounts?.audio };
       const items = await library.itemWindow(tx, ownerId, ids);
       const pageInfo = { total, ...counts, selectionId, nextCursor };
       if (!input.cards) return { ...pageInfo, items };
@@ -542,20 +600,22 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
     if (selectionId || (frozen && idsOnly)) {
       const selection = snapshots.get(selectionId, key, current);
       if (idsOnly) return { ids: Array.isArray(selection.ids) ? selection.ids : selection.ids.slice() };
-      return page(selection.ids.slice(offset, offset + pageSize), selection.ids.length, offset === 0 ? selection.tagCounts : undefined);
+      return page(selection.ids.slice(offset, offset + pageSize), selection.ids.length,
+        offset === 0 ? { tags: selection.tagCounts, audio: selection.audioCounts ?? {} } : undefined);
     }
 
     const where = itemFilter(ownerId, search, zone, borrowed);
     const cacheKey = key + "." + current;
     const text = Boolean(search.query.trim());
-    const facets = { ...search, tagIds: [], tagMode: undefined, tagSets: undefined, randomSeed: undefined,
+    // Facets leave out the chosen tags and quality: each facet is counted without its own choice.
+    const facets = { ...search, tagIds: [], tagMode: undefined, tagSets: undefined, randomSeed: undefined, audioQuality: [],
       sort: search.sort === "recent" ? "recent" as const : "added-desc" as const };
     const facetKey = countsKey;
     // New recent snapshots must include starts since the previous first page.
-    let tagCounts = !idsOnly && offset === 0 && search.sort !== "recent" ? countsCache.get(facetKey) : undefined;
+    let counts = !idsOnly && offset === 0 && search.sort !== "recent" ? countsCache.get(facetKey) : undefined;
     let all = frozen ? undefined : selections.get(cacheKey);
     let textMatches: string[] | undefined;
-    if (!idsOnly && (!input.picker || frozen) && offset === 0 && !tagCounts && (frozen || countsKey !== input.countsKey)) {
+    if (!idsOnly && (!input.picker || frozen) && offset === 0 && !counts && (frozen || countsKey !== input.countsKey)) {
       let eligible = itemFilter(ownerId, facets, zone, borrowed);
       if (text) {
         // Facets ignore the selected tags. One pass over these broader matches
@@ -566,7 +626,7 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
         // matches. Use the complete untagged result, never one page of visible rows.
         const prior = !frozen && previousText?.scope === scope && query.startsWith(previousText.query)
           ? previousText.ids : undefined;
-        if (all && !search.tagIds.length && !search.tagSets?.length) textMatches = all;
+        if (all && !search.tagIds.length && !search.tagSets?.length && !search.audioQuality.length) textMatches = all;
         else if (prior?.length === 0) textMatches = [];
         else {
           const candidates = prior ? Prisma.sql`${eligible} AND ${idFilter(prior)}` : eligible;
@@ -575,12 +635,18 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
         if (!frozen && textMatches.length <= 4096) previousText = {scope, query, ids: textMatches};
         eligible = Prisma.sql`i.ownerId = ${ownerId} AND ${idFilter(textMatches)}`;
       }
-      tagCounts = search.tagSets?.length
-        ? await groupedFacetCounts(tx, ownerId, eligible, search.tagSets)
-        : await facetCounts(tx, ownerId, eligible);
+      const quality = audioQualityFilter(search.audioQuality);
+      const tagScope = quality ? Prisma.sql`${eligible} AND ${quality}` : eligible;
+      const tags = tagFilter(ownerId, searchTagSets(search));
+      counts = {
+        tags: search.tagSets?.length
+          ? await groupedFacetCounts(tx, ownerId, tagScope, search.tagSets)
+          : await facetCounts(tx, ownerId, tagScope),
+        audio: await audioCounts(tx, ownerId, tags ? Prisma.sql`${eligible} AND ${tags}` : eligible),
+      };
       if (search.sort !== "recent") {
         if (countsCache.size >= 8) countsCache.delete(countsCache.keys().next().value!);
-        countsCache.set(facetKey, tagCounts);
+        countsCache.set(facetKey, counts);
       }
     }
 
@@ -588,7 +654,7 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
       all = await selectionIds(tx, ownerId, where, search, signal, textMatches);
       signal.throwIfAborted();
       if (frozen) {
-        selectionId = snapshots.add({ key, revision: current, ids: all, tagCounts: tagCounts! });
+        selectionId = snapshots.add({ key, revision: current, ids: all, tagCounts: counts!.tags, audioCounts: counts!.audio });
       } else if (all.length <= 100_000) {
         // Short text matches consume very few IDs. Keep recent queries across
         // successive track searches while preserving the original total ID budget.
@@ -604,13 +670,13 @@ export function registerLibraryPages(app: FastifyInstance, db: Db, library: Libr
 
     if (all) {
       if (idsOnly) return { ids: all };
-      return page(all.slice(offset, offset + pageSize), all.length, tagCounts);
+      return page(all.slice(offset, offset + pageSize), all.length, counts);
     }
     const limit = idsOnly ? Prisma.empty : Prisma.sql`LIMIT ${pageSize} OFFSET ${offset}`;
     const ids = await orderedIds(tx, ownerId, where, search.sort, limit);
     if (idsOnly) return { ids };
     const [count] = await tx.$queryRaw<{total: bigint}[]>(Prisma.sql`${catalogCte(ownerId)} SELECT count(*) AS total FROM Item i WHERE ${where}`);
-    return page(ids, Number(count.total), tagCounts);
+    return page(ids, Number(count.total), counts);
   }
 
   app.get<{ Querystring: { playlists?: string; since?: string; format?: string } }>("/api/library/overview", async (request, reply) => {

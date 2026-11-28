@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { itemAudioQuality, parseStoredQuality } from "./media-quality";
 import { Prisma, type ShareLink } from "@prisma/client";
 import type {
   ItemDto, SavedSharedPlaylistDto, ShareKind, ShareLinkDto, ShareStatus,
@@ -83,7 +84,7 @@ const originSelect = {
     select: {
       id: true, ownerId: true, provider: true, externalId: true, status: true, fileId: true,
       file: { select: { ownerId: true, mime: true, kind: true, path: true, id: true, hash: true, bytes: true, hasAudio: true,
-        audioStart: true, tailStart: true, hintsVersion: true, audioViewStart: true, audioViewBytes: true, audioViewVersion: true } },
+        audioStart: true, tailStart: true, hintsVersion: true, audioViewStart: true, audioViewBytes: true, audioViewVersion: true, quality: true } },
     },
   },
 } satisfies Prisma.ItemSelect;
@@ -129,7 +130,8 @@ function projectedSources(item: Origin, ref: SharedMediaRef): SourceDto[] {
     const audio = item.visual.soundFile ?? original;
     if (!source || !original || audio?.ownerId !== item.ownerId || item.visual.visualTrack.ownerId !== item.ownerId) return [];
     const virtual = !item.visual.soundFile && original.kind === "video";
-    return [{id:sourceKey(source.id),provider:"local",shared:true,status:"available",hasAudio:true,
+    const quality = parseStoredQuality(original.quality);
+    return [{id:sourceKey(source.id),provider:"local",shared:true,status:"available",hasAudio:true,...(quality && {quality}),
       streamUrl:mediaBase(ref) + "/sound/" + item.visualRevision, mime:virtual ? "audio/mp4" : audio.mime,
       bytes:Number(virtual ? original.audioViewBytes : audio.bytes),
       ...(virtual && original.audioViewStart != null && {playbackHints:{audioStart:Number(original.audioViewStart)}}),
@@ -149,8 +151,9 @@ function projectedSources(item: Origin, ref: SharedMediaRef): SourceDto[] {
     }
     const base = mediaBase(ref);
     const file = source.file!;
+    const quality = parseStoredQuality(file.quality);
     return [{
-      id, status, provider: "local", shared: true,
+      id, status, provider: "local", shared: true, ...(quality && { quality }),
       mime: file.mime, bytes: Number(file.bytes), hasAudio: file.hasAudio ?? undefined,
       ...playbackFields(file, `${base}/sources/${id}`),
       streamUrl: `${base}/sources/${id}`,
@@ -164,7 +167,9 @@ function projectedItem(slot: Extract<Position, { origin: Origin }>, ref: SharedM
   const { title, duration, preferredSourceId } = origin;
   const sources = projectedSources(origin, ref);
   const sharedPreferred = preferredSourceId ? sourceKey(preferredSourceId) : undefined;
+  const audioQuality = itemAudioQuality(sources, sharedPreferred);
   return {
+    ...(audioQuality && { audioQuality }),
     ...visualFields(origin,mediaBase(ref),origin.visual && sources.length ? sources[0].id : undefined),
     id, title, originalTitle: title, duration,
     kind: origin.kind === "video" ? "video" : "audio",
@@ -447,8 +452,9 @@ export async function decorateSharedItems(
     const { origin, sharedBy } = received;
     const sources = projectedSources(origin, { kind: "item", id: item.id });
     const preferred = origin.preferredSourceId ? sourceKey(origin.preferredSourceId) : undefined;
+    const audioQuality = item.audioQuality ?? itemAudioQuality(sources, preferred);
     return {
-      ...item, ...(!item.sources.length && visualFields(origin,mediaBase({kind:"item",id:item.id}),
+      ...item, ...(audioQuality && { audioQuality }), ...(!item.sources.length && visualFields(origin,mediaBase({kind:"item",id:item.id}),
         origin.visual && sources.length ? sources[0].id : undefined)),
       ...(!item.sources.length && {duration:origin.duration,kind:origin.kind === "video" ? "video" as const : "audio" as const}),
       sources: [...item.sources, ...sources],

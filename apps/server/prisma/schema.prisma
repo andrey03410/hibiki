@@ -120,11 +120,20 @@ model MediaFile {
   audioViewStart BigInt?
   audioViewBytes BigInt?
   audioViewVersion Int @default(0)
+  /// MediaQualityDto JSON; the columns below describe the original of a prepared copy.
+  quality String?
+  audioClass String?
+  audioFormat String?
+  audioScore Int?
+  qualityVersion Int @default(0)
+  /// Original file of a prepared playback copy (no foreign key: the original may be removed).
+  originFileId String?
   createdAt DateTime @default(now())
   sources Source[]
   visualTracks VisualTrack[]
   visualSounds ItemVisual[]
   @@unique([ownerId, hash])
+  @@index([qualityVersion, id])
 }
 
 model Tag {

@@ -169,6 +169,8 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
         ],
         upload: "media_upload_begin → multipart POST на uploadUrl",
         visuals: "media_get возвращает visualRevision (для исходной записи 0). media_set_visual готовит видеопоток своего источника в задании job_get, media_visual_upload_begin принимает отдельный файл без новой карточки. Передайте expectedRevision. Статус загрузки — job_get, снятие — media_clear_visual.",
+        quality:
+          "Источник с локальным файлом содержит quality: container, bitrate (kb/s), audio {codec, format, class, name, label, profile, bitrate, sampleRate, bitDepth (только без потерь), channels} и video {codec, profile, width, height, fps, bitrate}. Подготовленная копия описывает оригинал в quality.origin. audioQuality записи — качество звука, который играет по умолчанию (для копии — оригинала). class: hires (без потерь, >16 бит или >48 кГц), lossless, lossy. media_list: audioQuality=[\"lossy\"|\"flac\"|\"hires.flac\", …] объединяет значения через «или»; sort=quality-desc/quality-asc (без потерь выше, с потерями по битрейту, записи без анализа в конце). Анализ уже загруженных файлов выполняется фоном.",
         youtube:
           "media_import_youtube → job_get; импорт не скачивает файлы автоматически",
         replacement:
@@ -193,7 +195,7 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
   );
   tool(
     "media_list",
-    "Свои медиа с поиском и пагинацией. view=summary возвращает только id, title, kind, duration.",
+    "Свои медиа с поиском и пагинацией. view=summary возвращает id, title, kind, duration и audioQuality {label, class, format}. Качество: фильтр audioQuality, сортировка quality-desc/quality-asc, подробности в capabilities.quality.",
     {
       ...librarySearchSchema.partial().shape,
       tagId: id.optional(),
@@ -219,7 +221,7 @@ export function buildMcp(ownerId: string, s: Services, pages = new McpMediaPages
   );
   tool(
     "media_get",
-    "Свой item, источники и теги",
+    "Свой item, источники с качеством файла (quality), audioQuality и теги",
     { itemId: id },
     async ({itemId}) => {
       await s.sharing.prefetchForViewer(ownerId, [itemId]);

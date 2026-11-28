@@ -7,6 +7,7 @@ import { videoStreams } from "./visual-media";
 import { visualFields, visualSelect } from "./visual-fields";
 import { cleanupPreviousVisual } from "./visuals";
 import { playbackFields } from "./media-playback";
+import { QUALITY_VERSION, itemAudioQuality, parseStoredQuality, qualityData, withOrigin } from "./media-quality";
 import type { Db } from "./db";
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
@@ -18,11 +19,14 @@ import {
   storagePath,
   inspectAudioTrack,
   inspectFile,
+  inspectQuality,
   preparePlayback,
   type MediaInspection,
 } from "./media";
 import type {
   ItemDto,
+  MediaQualityDto,
+  MediaStreamsQualityDto,
   JobDto,
   LibraryDto,
   PlaylistDefinition,
@@ -62,9 +66,15 @@ type IncludedItem = Pick<Prisma.ItemGetPayload<object>,
   "id" | "ownerId" | "title" | "originalTitle" | "kind" | "duration" | "favorite" | "preferredSourceId" |
   "createdAt" | "updatedAt" | "performance" | "voices" | "visualRevision"
 > & { visual?: Prisma.ItemVisualGetPayload<{select: typeof visualSelect}> | null; sources: Array<any>; tags: Array<any> };
+const qualityFileSelect = {
+  id: true, ownerId: true, path: true, bytes: true, quality: true, qualityVersion: true, originFileId: true, createdAt: true,
+} as const;
 export function itemDto(row: IncludedItem): ItemDto {
   const coverVersion = artworkVersion(row.sources);
+  const sources = sourceDtos(row, coverVersion);
+  const audioQuality = itemAudioQuality(sources, row.preferredSourceId, row.visual?.soundSourceId);
   return {
+    ...(audioQuality && { audioQuality }),
     ...visualFields(row, "/api/items/" + row.id, row.sources.find(s => s.id === row.visual?.soundSourceId && s.ownerId === row.ownerId)?.id),
     id: row.id,
     title: row.title,
@@ -78,7 +88,14 @@ export function itemDto(row: IncludedItem): ItemDto {
     tags: row.tags.map(({ tag }) => tagDto(tag)),
     performance: row.performance as Performance,
     voices: JSON.parse(row.voices),
-    sources: row.sources.map((source) => ({
+    sources,
+  };
+}
+function sourceDtos(row: IncludedItem, coverVersion: ReturnType<typeof artworkVersion>): ItemDto["sources"] {
+  return row.sources.map((source) => {
+    const quality = source.provider === "local" ? parseStoredQuality(source.file?.quality) : undefined;
+    return {
+      ...(quality && { quality }),
       id: source.id,
       provider: source.provider,
       externalId: source.externalId ?? undefined,
@@ -100,8 +117,8 @@ export function itemDto(row: IncludedItem): ItemDto {
         audioStreamUrl: "/api/items/" + row.id + "/sound/" + row.visualRevision, audioMime: row.visual.soundFile.mime, audioBytes: Number(row.visual.soundFile.bytes),
       }),
       streamUrl: source.fileId ? `/files/${source.fileId}` : undefined,
-    })),
-  };
+    };
+  });
 }
 // A large playlist repeats the same tag directory on many tracks. Read and
 // decode each owned tag once instead of materializing one joined row per use.
@@ -276,6 +293,74 @@ export class LibraryService {
       after = files.at(-1)?.id;
     }
   }
+  /** Measure stored files that predate the current quality analysis. Media bytes are only read. */
+  async backfillQuality(signal?: AbortSignal) {
+    let updated = 0, skipped = 0;
+    let after: string | undefined;
+    const measured = new Set<string>();
+    for (;;) {
+      signal?.throwIfAborted();
+      const files = await this.db.mediaFile.findMany({
+        where: { qualityVersion: { lt: QUALITY_VERSION }, id: after === undefined ? undefined : { gt: after } },
+        select: qualityFileSelect, orderBy: { id: "asc" }, take: 64,
+      });
+      for (const file of files) {
+        // An original measured together with its prepared copy is already done.
+        if (measured.has(file.id) || await this.measureQuality(file, measured, signal)) updated++;
+        else skipped++;
+      }
+      if (files.length < 64) return { updated, skipped };
+      after = files.at(-1)!.id;
+    }
+  }
+  private async measureQuality(file: Prisma.MediaFileGetPayload<{ select: typeof qualityFileSelect }>, measured: Set<string>, signal?: AbortSignal, nested = false): Promise<boolean> {
+    signal?.throwIfAborted();
+    let quality: MediaStreamsQualityDto | null;
+    try {
+      await ownerAccess(this.db, file.ownerId);
+      const path = storagePath(this.storageRoot, file.path);
+      const info = await stat(path, { bigint: true });
+      if (!info.isFile() || info.size !== file.bytes) return false;
+      try {
+        quality = await inspectQuality(path, signal);
+      } catch (error) {
+        // A readable file without streams is final; timeouts and I/O errors are retried later.
+        if (!(error instanceof HttpError && error.code === "invalid_media")) throw error;
+        quality = null;
+      }
+    } catch {
+      signal?.throwIfAborted();
+      return false;
+    }
+    const originId = file.originFileId ?? (file.qualityVersion === 0 ? await this.legacyOrigin(file) : null);
+    let origin = originId ? await this.db.mediaFile.findFirst({ where: { id: originId, ownerId: file.ownerId }, select: qualityFileSelect }) : null;
+    if (origin && origin.qualityVersion < QUALITY_VERSION && !nested) {
+      await this.measureQuality(origin, measured, signal, true);
+      origin = await this.db.mediaFile.findFirst({ where: { id: origin.id, ownerId: file.ownerId }, select: qualityFileSelect });
+    }
+    signal?.throwIfAborted();
+    const originQuality = parseStoredQuality(origin?.quality) ?? null;
+    const result = await this.db.mediaFile.updateMany({
+      where: { id: file.id, path: file.path, qualityVersion: file.qualityVersion },
+      data: qualityData(quality ? withOrigin(quality, originQuality) : null, origin ? originId : null),
+    });
+    if (result.count) measured.add(file.id);
+    return result.count > 0;
+  }
+  // Prepared copies made before `originFileId` existed: the same import transaction
+  // stored the unsupported original of the same item a moment apart.
+  private async legacyOrigin(file: { id: string; ownerId: string; createdAt: Date }) {
+    const at = file.createdAt.toISOString();
+    const [row] = await this.db.$queryRaw<{ id: string }[]>`
+      SELECT o.fileId AS id FROM Source s
+      JOIN Source o ON o.itemId = s.itemId AND o.ownerId = s.ownerId AND o.provider = 'local'
+        AND o.reason = 'unsupported_codec' AND o.fileId IS NOT NULL AND o.fileId <> s.fileId
+      JOIN MediaFile f ON f.id = o.fileId AND f.ownerId = o.ownerId
+      WHERE s.fileId = ${file.id} AND s.ownerId = ${file.ownerId} AND s.provider = 'local' AND s.status = 'available'
+        AND abs(julianday(f.createdAt) - julianday(${at})) < 10.0 / 1440
+      ORDER BY abs(julianday(f.createdAt) - julianday(${at})) LIMIT 1`;
+    return row?.id ?? null;
+  }
   async snapshot(ownerId: string, browserJobs = false, onInvalidPlaylist?: (id: string) => void, includeShared = true): Promise<LibraryDto> {
     if (!includeShared) return this.snapshotWith(ownerId, this.db, browserJobs, onInvalidPlaylist);
     return this.db.$transaction(async tx => {
@@ -417,8 +502,9 @@ export class LibraryService {
             options.signal?.throwIfAborted();
             await validateAccess?.(tx);
             options.signal?.throwIfAborted();
-            if (original.hasAudio !== media.hasAudio || !original.hintsVersion || !original.audioViewVersion)
-              await tx.mediaFile.update({ where: { id: original.id }, data: { hasAudio: media.hasAudio, ...media.playback } });
+            if (original.hasAudio !== media.hasAudio || !original.hintsVersion || !original.audioViewVersion || original.qualityVersion !== QUALITY_VERSION)
+              await tx.mediaFile.update({ where: { id: original.id }, data: { hasAudio: media.hasAudio, ...media.playback,
+                ...qualityData(media.quality, original.originFileId) } });
             if (options.applyReplacement) {
               invariant(await tx.source.findFirst({
                 where: { id: prior.id, ownerId, itemId: options.itemId, status: "available" },
@@ -487,10 +573,11 @@ export class LibraryService {
         });
         const reused = Boolean(current);
         await checkItems(tx, ownerId, !options.itemId && !current ? 1 : 0, access);
-        const store = async (info: MediaInspection) => {
+        const store = async (info: MediaInspection, origin?: { id: string; quality: MediaQualityDto | null }) => {
           let file = await tx.mediaFile.findUnique({
             where: { ownerId_hash: { ownerId, hash: info.hash } },
           });
+          const measured = qualityData(withOrigin(info.quality, origin?.quality), origin?.id ?? null);
           const copy = staged.get(info.hash);
           if (copy) {
             const path = file && !file.path.startsWith("missing/") ? file.path : copy.path;
@@ -508,6 +595,7 @@ export class LibraryService {
                 duration: info.duration,
                 hasAudio: info.hasAudio,
                 ...info.playback,
+                ...measured,
               },
               update: {
                 path,
@@ -517,12 +605,14 @@ export class LibraryService {
                 duration: info.duration,
                 hasAudio: info.hasAudio,
                 ...info.playback,
+                ...measured,
               },
             });
-          } else if (file && (file.hasAudio !== info.hasAudio || !file.hintsVersion || !file.audioViewVersion)) {
+          } else if (file && (file.hasAudio !== info.hasAudio || !file.hintsVersion || !file.audioViewVersion
+            || file.qualityVersion !== QUALITY_VERSION || (origin && file.originFileId !== origin.id))) {
             file = await tx.mediaFile.update({
               where: { id: file.id },
-              data: { hasAudio: info.hasAudio, ...info.playback },
+              data: { hasAudio: info.hasAudio, ...info.playback, ...measured },
             });
           }
           invariant(file, 409, "file_changed", "Состав хранилища изменился, повторите импорт");
@@ -533,7 +623,7 @@ export class LibraryService {
         options.signal?.throwIfAborted();
         const file = await store(media);
         const playback = prepared
-          ? await store(prepared.media)
+          ? await store(prepared.media, { id: file.id, quality: parseStoredQuality(file.quality) ?? null })
           : undefined;
         if (!options.itemId && !current)
           await tx.item.create({
@@ -985,7 +1075,8 @@ export class LibraryService {
             'hash',f.hash,'kind',f.kind,'bytes',f.bytes,'mime',f.mime,'hasAudio',
             json(CASE f.hasAudio WHEN 0 THEN 'false' WHEN 1 THEN 'true' ELSE 'null' END),
             'audioStart',f.audioStart,'tailStart',f.tailStart,'hintsVersion',f.hintsVersion,
-            'audioViewStart',f.audioViewStart,'audioViewBytes',f.audioViewBytes,'audioViewVersion',f.audioViewVersion) END))
+            'audioViewStart',f.audioViewStart,'audioViewBytes',f.audioViewBytes,'audioViewVersion',f.audioViewVersion,
+            'quality',f.quality) END))
           FROM Source s LEFT JOIN MediaFile f ON f.id = s.fileId AND f.ownerId = i.ownerId
           WHERE s.itemId = i.id AND s.ownerId = i.ownerId AND (s.fileId IS NULL OR f.id IS NOT NULL)) END AS sourcesJson,
         CASE WHEN NOT needsProjection AND ${ids.length >= 24} THEN (SELECT json_group_array(json_object('tag', json_object('id',g.id,'name',g.name,'label',g.label,

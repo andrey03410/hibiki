@@ -7,6 +7,7 @@ interface Selection {
   revision: string;
   ids: string[];
   tagCounts: Record<string, number>;
+  audioCounts?: Record<string, number>;
 }
 
 const blockSize = 100;

@@ -18,6 +18,8 @@ import ffmpeg from "ffmpeg-static";
 import { HttpError, invariant } from "./errors";
 
 import { inspectPlaybackMetadata, type PlaybackMetadata } from "./media-playback";
+import { parseMediaQuality } from "./media-quality";
+import type { MediaStreamsQualityDto } from "@hibiki/contracts";
 export { inspectPlaybackMetadata } from "./media-playback";
 
 const run = promisify(execFile);
@@ -58,6 +60,7 @@ export interface MediaInspection {
   compatibleAudioCodec: boolean;
   audioBits?: number;
   float32Audio?: boolean;
+  quality: MediaStreamsQualityDto;
 }
 export async function hashFile(path: string, signal?: AbortSignal) {
   signal?.throwIfAborted();
@@ -111,6 +114,12 @@ export async function probeMediaStreams(path: string, signal?: AbortSignal, stan
 
 export function mp4CompatibleAudio(codec: string, details: string) {
   return (codec === "aac" && !/LTP|SSR/.test(details)) || codec === "flac" || codec === "opus";
+}
+
+/** Stream quality of a stored file without hashing it. */
+export async function inspectQuality(path: string, signal?: AbortSignal) {
+  const { output } = await probeMediaStreams(path, signal);
+  return parseMediaQuality(output, extname(path).toLowerCase());
 }
 
 export async function inspectAudioTrack(path: string, signal?: AbortSignal) {
@@ -205,6 +214,7 @@ export async function inspectFile(
     compatibleVideoCodec,
     compatibleAudioCodec,
     audioBits, float32Audio,
+    quality: parseMediaQuality(output, ext),
   };
 }
 
