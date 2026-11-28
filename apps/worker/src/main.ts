@@ -63,16 +63,20 @@ if (process.argv.includes("--diagnostics")) {
   });
   // Files stored before the current quality analysis, including ones added by
   // imports that skip it, are measured at start and then every 10 minutes.
+  // The server container applies migrations; a failed pass (for example before
+  // that finishes) is retried after a minute.
   const qualityChecks = (async () => {
     while (!abort.signal.aborted) {
+      let delay = 10 * 60_000;
       try {
         const result = await library.backfillQuality(abort.signal);
         if (result.updated || result.skipped) console.log("Качество медиафайлов:", result);
       } catch (error) {
         if (abort.signal.aborted) break;
+        delay = 60_000;
         console.error("Ошибка анализа качества:", error instanceof Error ? error.message : String(error));
       }
-      await setTimeout(10 * 60_000, undefined, { signal: abort.signal }).catch(() => {});
+      await setTimeout(delay, undefined, { signal: abort.signal }).catch(() => {});
     }
   })();
   const playlistCounts = (async () => {
