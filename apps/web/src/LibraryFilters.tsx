@@ -20,7 +20,7 @@ import { ArtworkImage } from "./ItemArtwork";
 import { api } from "./api";
 
 type Counts = Readonly<Record<string, number>> | undefined;
-type SearchProps = { search: LibrarySearch; onChange: Dispatch<SetStateAction<LibrarySearch>>; catalog: TagCatalog; counts: Counts; audioCounts?: Counts };
+type SearchProps = { search: LibrarySearch; onChange: Dispatch<SetStateAction<LibrarySearch>>; catalog: TagCatalog; counts: Counts; audioCounts?: Counts; libraryAudioCounts?: Counts };
 
 const facetGroups = [
   { group: "artist", label: "Исполнитель", icon: <MicVocal size={14} /> },
@@ -188,7 +188,7 @@ function TagList({ tags, counts, onPick }: { tags: TagDto[]; counts: Counts; onP
 
 /* ---------------- facets ---------------- */
 
-export function FacetBar({ search, onChange, catalog, counts, audioCounts }: SearchProps) {
+export function FacetBar({ search, onChange, catalog, counts, audioCounts, libraryAudioCounts }: SearchProps) {
   const perf = search.performanceFilter ?? "";
   const vocal = perf === "vocal" || perf === "male" || perf === "female";
   const set = <K extends keyof LibrarySearch>(field: K, value: LibrarySearch[K]) => onChange(current => ({ ...current, [field]: value }));
@@ -204,7 +204,7 @@ export function FacetBar({ search, onChange, catalog, counts, audioCounts }: Sea
     ]} />}
     <span className="lib-divider" aria-hidden />
     {facetGroups.map(facet => <Facet key={facet.group} {...facet} search={search} onChange={onChange} catalog={catalog} counts={counts} />)}
-    <QualityFacet search={search} onChange={onChange} counts={audioCounts} />
+    <QualityFacet search={search} onChange={onChange} counts={audioCounts} libraryCounts={libraryAudioCounts} />
     <MoreFilters search={search} onChange={onChange} />
     <span className="lib-grow" />
     <button type="button" className={`ds-facet icon ${search.favoriteOnly ? "on" : ""}`} style={{ "--c": "var(--g-artist)" } as React.CSSProperties}
@@ -275,11 +275,14 @@ function FacetPanel({ group, label, icon, selected, all, onChange, catalog, coun
 }
 
 /** Classes (Hi-Res, lossless, lossy) with their formats; counts ignore the quality choice itself. */
-function QualityFacet({ search, onChange, counts }: Pick<SearchProps, "search" | "onChange"> & { counts: Counts }) {
+function QualityFacet({ search, onChange, counts, libraryCounts }: Pick<SearchProps, "search" | "onChange"> & { counts: Counts; libraryCounts: Counts }) {
   const pop = usePopover();
   const selected = search.audioQuality;
   const groups = qualityFacetGroups(counts, selected);
-  const set = (value: string, group: QualityFacetGroup) => onChange(current => ({ ...current, audioQuality: toggleQuality(current.audioQuality, value, group) }));
+  // Narrowing a chosen class keeps every other format of the library, not only the visible ones.
+  const known = qualityFacetGroups({ ...libraryCounts, ...counts }, selected);
+  const set = (value: string, group: QualityFacetGroup) => onChange(current => ({ ...current,
+    audioQuality: toggleQuality(current.audioQuality, value, known.find(other => other.value === group.value) ?? group) }));
   const option = (value: string, label: string, count: number, group: QualityFacetGroup, nested = false, hint?: string) => {
     const on = qualityChecked(selected, value);
     return <button key={value} type="button" role="menuitemcheckbox" aria-checked={on} title={hint}

@@ -111,6 +111,15 @@ describe("parseMediaQuality on production FFmpeg 7 output", () => {
     expect([hires > cd, cd > mp3, mp3 > aac]).toEqual([true, true, true]);
   });
 
+  it("treats companded telephony PCM as lossy and ignores the container rate next to a cover", () => {
+    expect(parseMediaQuality(output("  Stream #0:0: Audio: pcm_mulaw ([7][0][0][0] / 0x0007), 8000 Hz, 1 channels, s16, 64 kb/s"), ".wav").audio)
+      .toMatchObject({ class: "lossy", format: "pcm", bitrate: 64 });
+    const covered = parseMediaQuality(output("  Stream #0:0: Audio: opus, 48000 Hz, stereo, fltp\n" +
+      "  Stream #0:1: Video: mjpeg (Baseline), yuvj420p(pc), 1000x1000, 90k tbr (attached pic)", 900), ".ogg");
+    expect(covered.audio?.bitrate).toBeUndefined();
+    expect(parseMediaQuality(output("  Stream #0:0: Audio: opus, 48000 Hz, stereo, fltp", 131), ".ogg").audio?.bitrate).toBe(131);
+  });
+
   it("returns no columns without sound", () => {
     expect(qualityColumns(parseMediaQuality(output("  Stream #0:0: Video: h264 (High), yuv420p, 640x360, 25 fps"), ".mp4")))
       .toEqual({ audioClass: null, audioFormat: null, audioScore: null });

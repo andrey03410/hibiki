@@ -66,6 +66,7 @@ type IncludedItem = Pick<Prisma.ItemGetPayload<object>,
   "id" | "ownerId" | "title" | "originalTitle" | "kind" | "duration" | "favorite" | "preferredSourceId" |
   "createdAt" | "updatedAt" | "performance" | "voices" | "visualRevision"
 > & { visual?: Prisma.ItemVisualGetPayload<{select: typeof visualSelect}> | null; sources: Array<any>; tags: Array<any> };
+type QualityWrite = { id: string; path: string; version: number; data: ReturnType<typeof qualityData> };
 const qualityFileSelect = {
   id: true, ownerId: true, path: true, bytes: true, quality: true, qualityVersion: true, originFileId: true, createdAt: true,
 } as const;
@@ -297,23 +298,35 @@ export class LibraryService {
   async backfillQuality(signal?: AbortSignal) {
     let updated = 0, skipped = 0;
     let after: string | undefined;
-    const measured = new Set<string>();
+    // Qualities measured in this run, by file ID, for prepared copies of the same originals.
+    const measured = new Map<string, MediaQualityDto | null>();
     for (;;) {
       signal?.throwIfAborted();
       const files = await this.db.mediaFile.findMany({
         where: { qualityVersion: { lt: QUALITY_VERSION }, id: after === undefined ? undefined : { gt: after } },
         select: qualityFileSelect, orderBy: { id: "asc" }, take: 64,
       });
+      const writes: QualityWrite[] = [];
       for (const file of files) {
-        // An original measured together with its prepared copy is already done.
-        if (measured.has(file.id) || await this.measureQuality(file, measured, signal)) updated++;
-        else skipped++;
+        if (measured.has(file.id)) continue;
+        if (!await this.measureQuality(file, measured, writes, signal)) skipped++;
+      }
+      // One transaction per batch: the MediaFile trigger bumps the library revision,
+      // so open listings see one change per batch instead of one per file.
+      if (writes.length) {
+        signal?.throwIfAborted();
+        const results = await this.db.$transaction(writes.map(write => this.db.mediaFile.updateMany({
+          where: { id: write.id, path: write.path, qualityVersion: write.version }, data: write.data,
+        })));
+        updated += results.reduce((sum, result) => sum + result.count, 0);
       }
       if (files.length < 64) return { updated, skipped };
       after = files.at(-1)!.id;
     }
   }
-  private async measureQuality(file: Prisma.MediaFileGetPayload<{ select: typeof qualityFileSelect }>, measured: Set<string>, signal?: AbortSignal, nested = false): Promise<boolean> {
+  /** Measure one file and queue its write; false leaves it for a later run. */
+  private async measureQuality(file: Prisma.MediaFileGetPayload<{ select: typeof qualityFileSelect }>,
+    measured: Map<string, MediaQualityDto | null>, writes: QualityWrite[], signal?: AbortSignal, nested = false): Promise<boolean> {
     signal?.throwIfAborted();
     let quality: MediaStreamsQualityDto | null;
     try {
@@ -333,19 +346,24 @@ export class LibraryService {
       return false;
     }
     const originId = file.originFileId ?? (file.qualityVersion === 0 ? await this.legacyOrigin(file) : null);
-    let origin = originId ? await this.db.mediaFile.findFirst({ where: { id: originId, ownerId: file.ownerId }, select: qualityFileSelect }) : null;
-    if (origin && origin.qualityVersion < QUALITY_VERSION && !nested) {
-      await this.measureQuality(origin, measured, signal, true);
-      origin = await this.db.mediaFile.findFirst({ where: { id: origin.id, ownerId: file.ownerId }, select: qualityFileSelect });
+    let origin: { id: string; quality: MediaQualityDto | null } | null = null;
+    if (originId && measured.has(originId)) {
+      origin = { id: originId, quality: measured.get(originId)! };
+    } else if (originId) {
+      const row = await this.db.mediaFile.findFirst({ where: { id: originId, ownerId: file.ownerId }, select: qualityFileSelect });
+      if (row && row.qualityVersion >= QUALITY_VERSION) origin = { id: row.id, quality: parseStoredQuality(row.quality) ?? null };
+      else if (row) {
+        // Without its original a copy would pass for its own codec (ADPCM prepared as FLAC
+        // is not lossless), so it waits until the original is measured.
+        if (nested || !await this.measureQuality(row, measured, writes, signal, true)) return false;
+        origin = { id: row.id, quality: measured.get(row.id) ?? null };
+      }
     }
     signal?.throwIfAborted();
-    const originQuality = parseStoredQuality(origin?.quality) ?? null;
-    const result = await this.db.mediaFile.updateMany({
-      where: { id: file.id, path: file.path, qualityVersion: file.qualityVersion },
-      data: qualityData(quality ? withOrigin(quality, originQuality) : null, origin ? originId : null),
-    });
-    if (result.count) measured.add(file.id);
-    return result.count > 0;
+    const stored = quality ? withOrigin(quality, origin?.quality) : null;
+    measured.set(file.id, stored);
+    writes.push({ id: file.id, path: file.path, version: file.qualityVersion, data: qualityData(stored, origin?.id ?? null) });
+    return true;
   }
   // Prepared copies made before `originFileId` existed: the same import transaction
   // stored the unsupported original of the same item a moment apart.

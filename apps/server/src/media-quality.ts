@@ -3,7 +3,8 @@ import type { AudioClass, AudioQualityDto, ItemAudioQualityDto, MediaQualityDto,
 /** Bump to re-analyze every stored file in the background. */
 export const QUALITY_VERSION = 1;
 
-const LOSSLESS = /^(?:flac|alac|pcm_\w+|wavpack|ape|tta|truehd|mlp|wmalossless|s302m)$/;
+// Companded telephony PCM (μ-law, A-law) keeps 8 bits per sample and is lossy.
+const LOSSLESS = /^(?:flac|alac|pcm_(?!mulaw|alaw|vidc)\w+|wavpack|ape|tta|truehd|mlp|wmalossless|s302m)$/;
 const AUDIO_NAMES: Record<string, string> = {
   aac: "AAC", mp3: "MP3", mp2: "MP2", opus: "Opus", vorbis: "Vorbis", flac: "FLAC", alac: "ALAC",
   wavpack: "WavPack", ape: "APE", tta: "TTA", truehd: "TrueHD", mlp: "MLP", ac3: "AC-3", eac3: "E-AC-3",
@@ -109,10 +110,12 @@ export function parseMediaQuality(output: string, ext: string): MediaStreamsQual
   const audioTracks = streams.filter(stream => stream.type === "Audio");
   const audio = audioTracks.find(stream => stream.details.includes("(default)")) ?? audioTracks[0];
   const bitrate = kbps(/Duration:[^\r\n]*bitrate: ([^\r\n]+)/.exec(output)?.[1] ?? "");
+  // The container rate stands for the sound only when nothing else shares the file.
+  const soleSound = !video && audioTracks.length === 1 && streams.length === 1;
   return {
     container: ext.replace(/^\./, "").toUpperCase(),
     ...(bitrate && { bitrate }),
-    ...(audio && { audio: parseAudio(audio.codec, audio.details, ext, video ? undefined : bitrate) }),
+    ...(audio && { audio: parseAudio(audio.codec, audio.details, ext, soleSound ? bitrate : undefined) }),
     ...(video && { video: parseVideo(video.codec, video.details) }),
   };
 }

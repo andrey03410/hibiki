@@ -742,7 +742,7 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   const counts = tagCounts ?? (restrictsFacets ? lastCounts.current : overview.tagCounts);
   const lastAudioCounts = useRef(audioCounts);
   if (audioCounts) lastAudioCounts.current = audioCounts;
-  const searchProps = {search: filters, onChange: setFilters, catalog, counts, audioCounts: audioCounts ?? lastAudioCounts.current ?? overview.audioCounts};
+  const searchProps = {search: filters, onChange: setFilters, catalog, counts, audioCounts: audioCounts ?? lastAudioCounts.current ?? overview.audioCounts, libraryAudioCounts: overview.audioCounts};
   const missing = overview.tags.length ? undefined : null;
   return (
     <div className="library-page">

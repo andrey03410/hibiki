@@ -118,7 +118,7 @@ export function mp4CompatibleAudio(codec: string, details: string) {
 
 /** Stream quality of a stored file without hashing it. */
 export async function inspectQuality(path: string, signal?: AbortSignal) {
-  const { output } = await probeMediaStreams(path, signal);
+  const { output } = await probeMediaStreams(path, signal, true);
   return parseMediaQuality(output, extname(path).toLowerCase());
 }
 

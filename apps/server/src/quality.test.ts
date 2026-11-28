@@ -124,8 +124,21 @@ describe("audio quality of stored media", () => {
 
     // Six stored files, one of them removed from disk.
     expect(await ctx.library.backfillQuality()).toEqual({ updated: 5, skipped: 1 });
+    expect(await ctx.library.backfillQuality()).toEqual({ updated: 0, skipped: 1 });
     expect((await ctx.library.getItem(ctx.userId, hires.id)).audioQuality).toMatchObject({ label: "FLAC 24/96" });
     expect((await ctx.library.getItem(ctx.userId, adpcm.id)).audioQuality).toMatchObject({ format: "adpcm", prepared: true, sourceId: copy.id });
-    expect(await ctx.library.backfillQuality()).toEqual({ updated: 0, skipped: 1 });
+  });
+
+  it("keeps a prepared copy unmeasured while its original cannot be read", async () => {
+    const { adpcm } = await library();
+    const original = adpcm.sources.find(source => source.reason === "unsupported_codec")!;
+    const copy = adpcm.sources.find(source => source.status === "available")!;
+    await ctx.db.mediaFile.updateMany({ data: { quality: null, audioClass: null, audioFormat: null, audioScore: null, qualityVersion: 0, originFileId: null } });
+    const stored = await ctx.db.mediaFile.findUniqueOrThrow({ where: { id: original.fileId! } });
+    await rm(join(ctx.root, stored.path));
+    await ctx.library.backfillQuality();
+    // The FLAC copy of ADPCM must not pass for lossless sound.
+    expect(await ctx.db.mediaFile.findUniqueOrThrow({ where: { id: copy.fileId! } })).toMatchObject({ qualityVersion: 0, audioClass: null });
+    expect((await ctx.library.getItem(ctx.userId, adpcm.id)).audioQuality).toBeUndefined();
   });
 });

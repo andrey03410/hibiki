@@ -70,7 +70,7 @@ if (process.argv.includes("--diagnostics")) {
       let delay = 10 * 60_000;
       try {
         const result = await library.backfillQuality(abort.signal);
-        if (result.updated || result.skipped) console.log("Качество медиафайлов:", result);
+        if (result.updated) console.log("Качество медиафайлов:", result);
       } catch (error) {
         if (abort.signal.aborted) break;
         delay = 60_000;
