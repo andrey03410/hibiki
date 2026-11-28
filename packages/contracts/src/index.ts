@@ -213,6 +213,8 @@ export interface LibraryCardOverviewDto extends Omit<LibraryOverviewDto, "playli
   playlists: PlaylistSummaryDto[];
   overviewToken?: string;
   countsKey?: string;
+  /** Records per quality `class` and `class.format` in the whole library. */
+  audioCounts?: Record<string, number>;
 }
 /** Rows follow the same order as the active tag directory used by compact cards. */
 export type LibraryDirectoryRow = [

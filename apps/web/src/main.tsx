@@ -73,7 +73,8 @@ import type {
 import { api, ApiError, setWorkspaceOwner, formatDuration, humanDuration, mediaWord } from "./api.ts";
 import { ErrorBoundary, lazyView } from "./ErrorBoundary";
 import { ArtworkImage, ItemArtwork } from "./ItemArtwork.tsx";
-import { GenerativeCover } from "./design/primitives";
+import { GenerativeCover, QualityBadge } from "./design/primitives";
+import { qualityRows, qualityTitle } from "./quality";
 import { useCoverTint } from "./design/ambient";
 import { PlaylistCard, PlaylistCover } from "./PlaylistCard";
 import { ScopedPlaylistPage, usePlaylistLibrary } from "./PlaylistLibrary";
@@ -649,7 +650,7 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   const pages = useMemo(() => new LibraryPages((cursor, signal, selectionId) =>
     reader.page(filters, latestOverview.current, cursor, signal, selectionId)), [filters, reader]);
   const previousFilters = useRef<typeof filters>(undefined);
-  const {items, loading, appending, error, nextCursor, total, tagCounts, selectionId} = useSyncExternalStore(pages.subscribe, pages.snapshot);
+  const {items, loading, appending, error, nextCursor, total, tagCounts, audioCounts, selectionId} = useSyncExternalStore(pages.subscribe, pages.snapshot);
   const sentinel = useRef<HTMLDivElement>(null);
   useEffect(() => {
     pages.open(filters, previousFilters.current);
@@ -739,7 +740,9 @@ const LibraryPage = React.memo(function LibraryPage({ userId, search }: { userId
   const lastCounts = useRef(tagCounts);
   if (tagCounts) lastCounts.current = tagCounts;
   const counts = tagCounts ?? (restrictsFacets ? lastCounts.current : overview.tagCounts);
-  const searchProps = {search: filters, onChange: setFilters, catalog, counts};
+  const lastAudioCounts = useRef(audioCounts);
+  if (audioCounts) lastAudioCounts.current = audioCounts;
+  const searchProps = {search: filters, onChange: setFilters, catalog, counts, audioCounts: audioCounts ?? lastAudioCounts.current ?? overview.audioCounts};
   const missing = overview.tags.length ? undefined : null;
   return (
     <div className="library-page">
@@ -1223,6 +1226,7 @@ const ItemRow = React.memo(function ItemRow({ item, index, catalog, checked, las
       </div>
       <ItemTagList tags={item.tags} catalog={catalog} selected={selectedTags} performance={item.performance}
         voices={item.voices} onTag={onTag} onPerformance={onPerformance}/>
+      <div className="entry-quality">{item.audioQuality && <QualityBadge quality={item.audioQuality} title={qualityTitle(item.audioQuality)} />}</div>
       <div className="entry-duration num" title={sourceSummary}>{formatDuration(item.duration)}</div>
       <div className="entry-tools">
         <button type="button" className="icon-button entry-tag-button" title="Разметка" aria-label={`Разметка · ${item.title}`}
@@ -1285,6 +1289,10 @@ function itemPanels(item: ItemDto, refresh: () => Promise<void>, focusSource: bo
             </span>
             {s.reason && <p>{s.reason}</p>}
           </div>
+          {s.quality && <dl className="source-quality">
+            {item.audioQuality?.sourceId === s.id && <div className="playing"><dt>Играет</dt><dd>{item.audioQuality.prepared ? "Подготовленная копия, качество по оригиналу" : "Этот файл"}</dd></div>}
+            {qualityRows(s.quality, s.bytes).map(row => <div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}
+          </dl>}
           {!s.shared && <NoteEditor kind="source" id={s.id} />}
         </div>
       ))}

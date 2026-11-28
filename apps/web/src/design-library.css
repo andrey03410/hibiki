@@ -131,7 +131,7 @@
 .item-collection .collection-results { display: flex; flex-direction: column; }
 .item-collection .collection-results > .collection-entry {
   position: relative; height: 60px; padding: 0 8px; border: 0; border-radius: 12px; column-gap: 14px; row-gap: 0;
-  grid-template: "sel cover main path tags dur tools" 60px / 24px 44px minmax(0, 1.5fr) minmax(0, .9fr) minmax(0, 1.3fr) 48px auto;
+  grid-template: "sel cover main path tags q dur tools" 60px / 24px 44px minmax(0, 1.5fr) minmax(0, .9fr) minmax(0, 1.3fr) 88px 48px auto;
   background: transparent; transition: background var(--t-fast);
 }
 /* Off-screen rows skip style, layout and paint; a row with an open in-row menu stays fully rendered (paint containment would clip it). */
@@ -186,6 +186,7 @@
 .item-collection .entry-tags-more:hover { background: var(--s3); color: var(--text); opacity: 1; }
 .item-collection .entry-performance { flex: none; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 7px; color: var(--g-performance); background: var(--s1); }
 .entry-duration { grid-area: dur; text-align: right; color: var(--text-3); font-size: 12.5px; }
+.entry-quality { grid-area: q; min-width: 0; display: flex; justify-content: flex-end; }
 .item-collection .entry-tools { grid-area: tools; gap: 2px; }
 .item-collection .entry-tools .icon-button, .item-collection .entry-tools .row-menu > summary { width: 32px; height: 32px; min-width: 0; min-height: 0; display: grid; place-items: center; }
 .item-collection .entry-tag-button { opacity: 0; transition: opacity var(--t-fast), background var(--t-fast), color var(--t-fast); }
@@ -204,19 +205,19 @@
 .detail-tag-values small { color: var(--text-4); font-size: 12px; }
 
 @container (width < 980px) {
-  .item-collection.collection-list .collection-results > .collection-entry { grid-template: "sel cover main tags dur tools" 60px / 24px 44px minmax(0, 1.6fr) minmax(0, 1fr) 48px auto; }
+  .item-collection.collection-list .collection-results > .collection-entry { grid-template: "sel cover main tags q dur tools" 60px / 24px 44px minmax(0, 1.6fr) minmax(0, 1fr) 88px 48px auto; }
   .collection-list .entry-source-path { display: none; }
 }
 @container (width < 640px) {
   .item-collection.collection-list .collection-results > .collection-entry { grid-template: "sel cover main dur tools" 60px / 20px 44px minmax(0, 1fr) 44px auto; column-gap: 10px; }
-  .collection-list .entry-tags { display: none; }
+  .collection-list :is(.entry-tags, .entry-quality) { display: none; }
 }
 
 /* ---------- cards ---------- */
 .collection-cards .collection-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 10px; }
 .item-collection.collection-cards .collection-results > .collection-entry {
   height: auto; padding: 12px; column-gap: 12px; row-gap: 8px; border-radius: 16px; background: var(--s1); box-shadow: inset 0 0 0 1px var(--line);
-  grid-template: "cover main tools" auto "cover path path" auto "tags tags dur" auto / 64px minmax(0, 1fr) auto;
+  grid-template: "cover main main tools" auto "cover path path path" auto "tags tags q dur" auto / 64px minmax(0, 1fr) auto auto;
   transition: background var(--t), box-shadow var(--t), transform var(--t) var(--ease-out);
 }
 .item-collection.collection-cards .collection-results > .collection-entry { contain-intrinsic-size: auto 132px; }
@@ -226,7 +227,7 @@
 .item-collection.collection-cards .entry-select { position: absolute; top: 8px; left: 8px; z-index: 2; }
 .item-collection.collection-cards .entry-source-path { grid-area: path; }
 .item-collection.collection-cards .entry-tags { min-height: 24px; }
-.item-collection.collection-cards .entry-duration { align-self: center; }
+.item-collection.collection-cards :is(.entry-duration, .entry-quality) { align-self: center; }
 .item-collection.collection-cards .entry-tools .entry-tag-button { opacity: 1; }
 
 /* ---------- browse ---------- */
@@ -263,3 +264,10 @@
   .lib-tabs { flex-wrap: wrap; }
   .lib-trail-label { margin-left: 4px; }
 }
+
+/* quality facet: a class with its formats indented below */
+.lib-quality-pop { height: auto; max-height: min(520px, 70vh); }
+.lib-quality-pop .ds-pop-body { padding-top: 4px; }
+.lib-quality-pop .lib-quality-class { margin-top: 4px; }
+.lib-quality-pop .lib-quality-format { padding-left: 34px; }
+.lib-quality-pop .lib-quality-class .ds-quality { height: 22px; font-size: 11.5px; }

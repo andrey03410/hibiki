@@ -50,10 +50,11 @@ function facetToken(ownerId: string, revision: string, search: BrowserLibrarySea
 
 async function overview(tx: Tx, ownerId: string, cardsOnly: boolean, current: string, overviewToken: string): Promise<LibraryCardOverviewDto> {
   const where = { ownerId };
-  const [total, tags, counts, playlists, jobs] = await Promise.all([
+  const [total, tags, counts, quality, playlists, jobs] = await Promise.all([
     tx.item.count({ where }),
     listTags(tx, ownerId, true),
     facetCounts(tx, ownerId, Prisma.sql`i.ownerId = ${ownerId}`),
+    audioCounts(tx, ownerId, Prisma.sql`i.ownerId = ${ownerId}`),
     tx.playlist.findMany({ where, select: {
       id: true, title: true, description: true, revision: true, manual: true, trackCount: true,
       coverUrlsJson: cardsOnly, definitionJson: !cardsOnly,
@@ -70,7 +71,7 @@ async function overview(tx: Tx, ownerId: string, cardsOnly: boolean, current: st
       ...(coverUrlsJson ? { coverUrls: publishedCoverUrls(coverUrlsJson) } : {}),
       ...(cardsOnly ? {} : { definition: playlistDefinitionSchema.parse(JSON.parse(definitionJson)) }),
     })), jobs: jobs.map(jobDto), total,
-    tagCounts: counts,
+    tagCounts: counts, audioCounts: quality,
     revision: current, overviewToken, countsKey: facetToken(ownerId, current, browserLibrarySearchSchema.parse({})),
   };
 }

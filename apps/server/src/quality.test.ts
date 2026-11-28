@@ -81,7 +81,11 @@ describe("audio quality of stored media", () => {
     // Lossy sound is ordered by bitrate alone: ADPCM 176 kb/s ranks above AAC 96 kb/s.
     const best = await page({ sort: "quality-desc" });
     expect(ids(best)).toEqual([hires.id, cd.id, mp3.id, adpcm.id, aac.id, youtube.id]);
-    expect(best.audioCounts).toEqual({ hires: 1, "hires.flac": 1, lossless: 1, "lossless.flac": 1, lossy: 3, "lossy.mp3": 1, "lossy.aac": 1, "lossy.adpcm": 1 });
+    const whole = { hires: 1, "hires.flac": 1, lossless: 1, "lossless.flac": 1, lossy: 3, "lossy.mp3": 1, "lossy.aac": 1, "lossy.adpcm": 1 };
+    expect(best.audioCounts).toEqual(whole);
+    // The first unfiltered page reuses the overview counts, so the overview carries quality counts too.
+    const overview = (await app.inject({ url: "/api/library/overview?playlists=summary", headers: { cookie } })).json();
+    expect(overview.audioCounts).toEqual(whole);
     expect(ids(await page({ sort: "quality-asc" })).slice(0, 2)).toEqual([aac.id, adpcm.id]);
     expect(ids(await page({ sort: "quality-asc" })).at(-1)).toBe(youtube.id);
 

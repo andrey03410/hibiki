@@ -14,10 +14,10 @@ export function searchBody({ previousSort, tagAll, ...filters }: LibrarySearch, 
 // The overview supplies the first set of counts. Keep the last filtered set as
 // well, so changing only selected tags can reuse it across search instances.
 export class LibraryCardReader {
-  private last?: { key: string; counts: Record<string, number> };
+  private last?: { key: string; counts: Record<string, number>; audio?: Record<string, number> };
 
   async page(filters: LibrarySearch, overview: LibraryCardOverviewDto, cursor: string | undefined, signal: AbortSignal, selectionId?: string): Promise<LibraryPageDto> {
-    const previous = this.last ?? { key: overview.countsKey, counts: overview.tagCounts };
+    const previous = this.last ?? { key: overview.countsKey, counts: overview.tagCounts, audio: overview.audioCounts };
     const page = await api<LibraryCardPageDto>("/library/page", "POST", {
       ...searchBody(filters, selectionId, new Map(overview.tags.map(tag => [tag.id, tag]))), cursor, cards: true, indexedCounts: true, tagRevision: overview.revision, countsKey: previous.key,
     }, "high", signal);
@@ -30,8 +30,9 @@ export class LibraryCardReader {
     }
     const counts = page.countsUnchanged ? previous.counts : page.countsByIndex
       ? Object.fromEntries(overview.tags.map((tag, i) => [tag.id, page.countsByIndex![i]])) : page.tagCounts;
-    if (counts && page.countsKey) this.last = {key: page.countsKey, counts};
-    return {...page, items, tagCounts: counts};
+    const audio = page.countsUnchanged ? previous.audio : page.audioCounts;
+    if (counts && page.countsKey) this.last = {key: page.countsKey, counts, audio};
+    return {...page, items, tagCounts: counts, audioCounts: counts ? audio : undefined};
   }
 }
 
@@ -154,7 +155,7 @@ export class LibraryPages {
     }
     try {
       let page = await this.fetch(undefined, signal, background ? this.state.selectionId : undefined);
-      const { tagCounts, selectionId } = page;
+      const { tagCounts, audioCounts, selectionId } = page;
       let count = 1;
       let items = page.items;
       // Revalidate visible pages in place so a favorite or tag edit keeps scroll depth.
@@ -165,7 +166,7 @@ export class LibraryPages {
       }
       if (signal.aborted) return;
       this.pageCount = count;
-      this.update({...page, items, tagCounts, selectionId, loading: false, appending: false});
+      this.update({...page, items, tagCounts, audioCounts, selectionId, loading: false, appending: false});
     } catch (error) {
       if (signal.aborted) return;
       if (retryRevision && error instanceof ApiError && error.code === "library_changed" && this.pageCount > 0) return this.restart();

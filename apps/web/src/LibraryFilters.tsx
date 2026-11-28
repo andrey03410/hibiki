@@ -1,10 +1,11 @@
 import React, { useEffect, useId, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import {
-  ArrowDownUp, AudioLines, Check, ChevronDown, ChevronRight, CloudSun, Disc3, FolderTree, GalleryHorizontalEnd, Hash, Heart,
+  ArrowDownUp, AudioLines, AudioWaveform, Check, ChevronDown, ChevronRight, CloudSun, Disc3, FolderTree, GalleryHorizontalEnd, Hash, Heart,
   Layers, LayoutGrid, List, Mic, MicVocal, Search, Shuffle, SlidersHorizontal, Sparkle, X,
 } from "lucide-react";
 import type { TagDto } from "@hibiki/contracts";
-import { GenerativeCover, GroupIcon, Popover, Segmented, TagChip, usePopover } from "./design/primitives";
+import { GenerativeCover, GroupIcon, Popover, QualityBadge, Segmented, TagChip, usePopover } from "./design/primitives";
+import { qualityChecked, qualityClassHints, qualityFacetGroups, toggleQuality, type QualityFacetGroup } from "./quality";
 import { tagColor } from "./design/tag-colors";
 import {
   addTag, clearGroup, currentSource, facetOptions, selectedIn, setGroupMode, sourceChildren, sourceSiblings, sourceTrail,
@@ -19,7 +20,7 @@ import { ArtworkImage } from "./ItemArtwork";
 import { api } from "./api";
 
 type Counts = Readonly<Record<string, number>> | undefined;
-type SearchProps = { search: LibrarySearch; onChange: Dispatch<SetStateAction<LibrarySearch>>; catalog: TagCatalog; counts: Counts };
+type SearchProps = { search: LibrarySearch; onChange: Dispatch<SetStateAction<LibrarySearch>>; catalog: TagCatalog; counts: Counts; audioCounts?: Counts };
 
 const facetGroups = [
   { group: "artist", label: "Исполнитель", icon: <MicVocal size={14} /> },
@@ -187,7 +188,7 @@ function TagList({ tags, counts, onPick }: { tags: TagDto[]; counts: Counts; onP
 
 /* ---------------- facets ---------------- */
 
-export function FacetBar({ search, onChange, catalog, counts }: SearchProps) {
+export function FacetBar({ search, onChange, catalog, counts, audioCounts }: SearchProps) {
   const perf = search.performanceFilter ?? "";
   const vocal = perf === "vocal" || perf === "male" || perf === "female";
   const set = <K extends keyof LibrarySearch>(field: K, value: LibrarySearch[K]) => onChange(current => ({ ...current, [field]: value }));
@@ -203,6 +204,7 @@ export function FacetBar({ search, onChange, catalog, counts }: SearchProps) {
     ]} />}
     <span className="lib-divider" aria-hidden />
     {facetGroups.map(facet => <Facet key={facet.group} {...facet} search={search} onChange={onChange} catalog={catalog} counts={counts} />)}
+    <QualityFacet search={search} onChange={onChange} counts={audioCounts} />
     <MoreFilters search={search} onChange={onChange} />
     <span className="lib-grow" />
     <button type="button" className={`ds-facet icon ${search.favoriteOnly ? "on" : ""}`} style={{ "--c": "var(--g-artist)" } as React.CSSProperties}
@@ -269,6 +271,45 @@ function FacetPanel({ group, label, icon, selected, all, onChange, catalog, coun
       {selected.length > 0 && <button type="button" className="button compact subtle" onClick={() => onChange(current => clearGroup(current, catalog, group))}>Сбросить</button>}
       <button type="button" className="button compact" onClick={close}>Готово</button>
     </div>
+  </>;
+}
+
+/** Classes (Hi-Res, lossless, lossy) with their formats; counts ignore the quality choice itself. */
+function QualityFacet({ search, onChange, counts }: Pick<SearchProps, "search" | "onChange"> & { counts: Counts }) {
+  const pop = usePopover();
+  const selected = search.audioQuality;
+  const groups = qualityFacetGroups(counts, selected);
+  const set = (value: string, group: QualityFacetGroup) => onChange(current => ({ ...current, audioQuality: toggleQuality(current.audioQuality, value, group) }));
+  const option = (value: string, label: string, count: number, group: QualityFacetGroup, nested = false, hint?: string) => {
+    const on = qualityChecked(selected, value);
+    return <button key={value} type="button" role="menuitemcheckbox" aria-checked={on} title={hint}
+      className={`ds-option ${nested ? "lib-quality-format" : "lib-quality-class"} ${count ? "" : "zero"}`} onClick={() => set(value, group)}>
+      <span className={`ds-box ${on ? "on" : ""}`}>{on && <Check size={11} strokeWidth={3} />}</span>
+      {nested ? <span className="label">{label}</span> : <QualityBadge quality={{ class: group.value, label }} />}
+      <span className="n">{counts ? count : ""}</span>
+    </button>;
+  };
+  return <>
+    <button ref={element => { pop.anchorRef.current = element; }} type="button" className={`ds-facet ${selected.length ? "on" : ""}`}
+      aria-expanded={pop.open} aria-haspopup="dialog" onClick={pop.toggle}>
+      <AudioWaveform size={14} />Качество{selected.length > 0 && <span className="b">{selected.length}</span>}<ChevronDown size={14} className="chev" />
+    </button>
+    <Popover control={pop} className="lib-facet-pop lib-quality-pop" label="Качество звука">
+      <div className="ds-pop-head"><span className="lib-facet-title"><AudioWaveform size={14} />Качество звука</span></div>
+      <div className="ds-pop-body" role="menu" aria-label="Качество звука">
+        {groups.map(group => <React.Fragment key={group.value}>
+          {option(group.value, group.label, group.count, group, false, qualityClassHints[group.value])}
+          {group.formats.map(format => option(format.value, format.label, format.count, group, true))}
+        </React.Fragment>)}
+        {!groups.length && <p className="ds-empty">{counts ? "Нет проанализированных локальных файлов" : "Считаем…"}</p>}
+      </div>
+      <div className="ds-pop-foot">
+        <span className="lib-facet-hint">Записи без локального файла не показываются</span>
+        <span className="lib-grow" />
+        {selected.length > 0 && <button type="button" className="button compact subtle" onClick={() => onChange(current => ({ ...current, audioQuality: [] }))}>Сбросить</button>}
+        <button type="button" className="button compact" onClick={pop.hide}>Готово</button>
+      </div>
+    </Popover>
   </>;
 }
 
