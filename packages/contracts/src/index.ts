@@ -19,7 +19,50 @@ export interface TagDto {
   archived?: boolean;
   legacyFlat?: boolean;
 }
+export const audioClasses = ["hires", "lossless", "lossy"] as const;
+export type AudioClass = typeof audioClasses[number];
+/** Audio stream quality. `format` groups codecs for filters; `bitDepth` is set for lossless and PCM only. */
+export interface AudioQualityDto {
+  codec: string;
+  format: string;
+  class: AudioClass;
+  name: string;
+  label: string;
+  profile?: string;
+  bitrate?: number;
+  sampleRate?: number;
+  bitDepth?: number;
+  float?: true;
+  channels?: number;
+  layout?: string;
+}
+export interface VideoQualityDto {
+  codec: string;
+  name: string;
+  label: string;
+  profile?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  bitrate?: number;
+}
+export interface MediaStreamsQualityDto {
+  container: string;
+  bitrate?: number;
+  audio?: AudioQualityDto;
+  video?: VideoQualityDto;
+}
+/** Measured file quality. A prepared playback copy also describes its original in `origin`. */
+export interface MediaQualityDto extends MediaStreamsQualityDto {
+  origin?: MediaStreamsQualityDto;
+}
+/** The quality that represents a recording: its default sound source, or the original of a prepared copy. */
+export interface ItemAudioQualityDto extends AudioQualityDto {
+  sourceId: string;
+  prepared?: true;
+}
 export interface SourceDto {
+  quality?: MediaQualityDto;
   videoStreams?: Array<{index:number;codec:string}>;
   id: string;
   provider: "youtube" | "local";
@@ -42,6 +85,7 @@ export interface SourceDto {
   audioViewStart?: number;
 }
 export interface ItemDto {
+  audioQuality?: ItemAudioQualityDto;
   visualRevision?: number;
   visual?: { available?: boolean; streamUrl: string; duration: number; soundSourceId: string; revision: number };
   id: string;
@@ -169,6 +213,8 @@ export interface LibraryCardOverviewDto extends Omit<LibraryOverviewDto, "playli
   playlists: PlaylistSummaryDto[];
   overviewToken?: string;
   countsKey?: string;
+  /** Records per quality `class` and `class.format` in the whole library. */
+  audioCounts?: Record<string, number>;
 }
 /** Rows follow the same order as the active tag directory used by compact cards. */
 export type LibraryDirectoryRow = [
@@ -183,6 +229,8 @@ export interface LibraryPageDto {
   total: number;
   nextCursor: string | null;
   tagCounts?: Record<string, number>;
+  /** Records per `class` and `class.format`, counted without the quality filter itself. */
+  audioCounts?: Record<string, number>;
   selectionId?: string;
   countsKey?: string;
   countsUnchanged?: boolean;
@@ -199,7 +247,9 @@ export interface LibraryCardPageDto extends Omit<LibraryPageDto, "items"> {
   tags: TagDto[];
 }
 
-const librarySort = z.enum(["title-asc", "title-desc", "duration-asc", "duration-desc", "added-asc", "added-desc"]);
+const librarySort = z.enum(["title-asc", "title-desc", "duration-asc", "duration-desc", "added-asc", "added-desc", "quality-desc", "quality-asc"]);
+/** `hires` | `lossless` | `lossy`, a format (`flac`, `aac`, …) or `class.format`; values are combined with OR. */
+export const audioQualityFilterSchema = z.string().regex(/^(?:(?:hires|lossless|lossy)(?:\.[a-z0-9]{1,24})?|[a-z0-9]{1,24})$/);
 
 export const librarySearchSchema = z.object({
   query: z.string().default(""),
@@ -223,6 +273,7 @@ export const librarySearchSchema = z.object({
   provider: z.enum(["", "youtube", "local", "working-local"]).default(""),
   availability: z.enum(["", "available", "unknown", "unavailable"]).default(""),
   favoriteOnly: z.boolean().default(false),
+  audioQuality: z.array(audioQualityFilterSchema).max(32).default([]),
   sort: librarySort.default("added-desc"),
   timeZone: z.string().max(128).optional(),
 });
@@ -417,8 +468,24 @@ export const tagSchema = z
     legacyFlat: z.boolean().optional(),
   })
   .strict() satisfies z.ZodType<TagDto>;
+const audioQualitySchema = z.object({
+  codec: z.string(), format: z.string(), class: z.enum(audioClasses), name: z.string(), label: z.string(),
+  profile: z.string().optional(), bitrate: z.number().optional(), sampleRate: z.number().optional(),
+  bitDepth: z.number().optional(), float: z.literal(true).optional(), channels: z.number().optional(), layout: z.string().optional(),
+}).strict() satisfies z.ZodType<AudioQualityDto>;
+const streamsQualityShape = {
+  container: z.string(), bitrate: z.number().optional(), audio: audioQualitySchema.optional(),
+  video: z.object({
+    codec: z.string(), name: z.string(), label: z.string(), profile: z.string().optional(), width: z.number().optional(),
+    height: z.number().optional(), fps: z.number().optional(), bitrate: z.number().optional(),
+  }).strict().optional(),
+};
+export const mediaQualitySchema = z.object({
+  ...streamsQualityShape, origin: z.object(streamsQualityShape).strict().optional(),
+}).strict() satisfies z.ZodType<MediaQualityDto>;
 export const sourceSchema = z
   .object({
+    quality: mediaQualitySchema.optional(),
     id: idSchema,
     provider: z.enum(["youtube", "local"]),
     externalId: z.string().optional(),
@@ -454,6 +521,7 @@ export const itemSchema = z
     performance: performanceSchema.optional(),
     voices: z.array(voiceSchema).max(2).optional(),
     preferredSourceId: idSchema.optional(),
+    audioQuality: audioQualitySchema.extend({ sourceId: idSchema, prepared: z.literal(true).optional() }).optional(),
   })
   .strict() satisfies z.ZodType<ItemDto>;
 export const playlistSchema = z

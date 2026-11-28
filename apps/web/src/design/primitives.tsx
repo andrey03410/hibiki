@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { X } from "lucide-react";
-import type { TagDto } from "@hibiki/contracts";
+import type { ItemAudioQualityDto, TagDto } from "@hibiki/contracts";
 import { generativeCover, tagColor, type ColorGroup } from "./tag-colors";
 
 export type ChipState = "plain" | "off" | "on" | "part";
@@ -180,4 +180,9 @@ export function ProgressRing({ done, total, size = 34 }: { done: number; total: 
     </svg>
     <span className="num">{done}/{total}</span>
   </span>;
+}
+
+/** Audio quality of a recording: codec and its main number, colored by class. */
+export function QualityBadge({ quality, title }: { quality: Pick<ItemAudioQualityDto, "class" | "label">; title?: string }) {
+  return <span className={`ds-quality ${quality.class}`} title={title}>{quality.label}</span>;
 }

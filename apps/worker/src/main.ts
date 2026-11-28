@@ -16,6 +16,11 @@ if (process.argv.includes("--diagnostics")) {
 } else if (process.argv.includes("--update-ytdlp")) {
   const updated = await updateYoutubeTool();
   console.log(updated.stdout);
+} else if (process.argv.includes("--backfill-quality")) {
+  const db = createDb(storageRoot);
+  try {
+    console.log(JSON.stringify(await new LibraryService(db, storageRoot).backfillQuality()));
+  } finally { await db.$disconnect(); }
 } else if (process.argv.includes("--backfill-playback")) {
   const db = createDb(storageRoot);
   try {
@@ -56,6 +61,24 @@ if (process.argv.includes("--diagnostics")) {
       error instanceof Error ? error.message : String(error),
     );
   });
+  // Files stored before the current quality analysis, including ones added by
+  // imports that skip it, are measured at start and then every 10 minutes.
+  // The server container applies migrations; a failed pass (for example before
+  // that finishes) is retried after a minute.
+  const qualityChecks = (async () => {
+    while (!abort.signal.aborted) {
+      let delay = 10 * 60_000;
+      try {
+        const result = await library.backfillQuality(abort.signal);
+        if (result.updated) console.log("Качество медиафайлов:", result);
+      } catch (error) {
+        if (abort.signal.aborted) break;
+        delay = 60_000;
+        console.error("Ошибка анализа качества:", error instanceof Error ? error.message : String(error));
+      }
+      await setTimeout(delay, undefined, { signal: abort.signal }).catch(() => {});
+    }
+  })();
   const playlistCounts = (async () => {
     while (!abort.signal.aborted) {
       try {
@@ -101,7 +124,7 @@ if (process.argv.includes("--diagnostics")) {
     }
   } finally {
     abort.abort();
-    await Promise.all([jobs.stop(), syncChecks, audioTracks, playback, artworkCleanup, playlistCounts]);
+    await Promise.all([jobs.stop(), syncChecks, audioTracks, playback, artworkCleanup, playlistCounts, qualityChecks]);
     await db.$disconnect();
   }
 }

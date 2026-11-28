@@ -38,6 +38,13 @@
 .drawer-status.saving { color: var(--accent-2); }
 .drawer-status.error { color: var(--danger); }
 .item-drawer .source-details, .item-drawer .item-source-notes { border: 0; }
+/* Measured file quality under each local source. */
+.source-quality { display: grid; gap: 4px; margin: 0 0 12px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--s1); font-size: 12.5px; }
+.source-quality > div { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 10px; }
+.source-quality dt { color: var(--text-4); }
+.source-quality dd { margin: 0; color: var(--text-2); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.source-quality .playing dd { color: var(--accent-2); }
+.drawer-title p .ds-quality { margin-left: 8px; vertical-align: 1px; }
 
 /* Miller columns */
 .miller-wrap { display: grid; gap: 8px; }

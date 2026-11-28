@@ -1,5 +1,7 @@
 import type { BrowserLibrarySearch, ItemDto, SourceDto, TagDto } from "@hibiki/contracts";
+import { audioQualityFilterSchema } from "@hibiki/contracts";
 import { noteFor, type NotesIndex } from "./note-model";
+import { qualityFilterLabel } from "./quality";
 
 import { filterLabels, groupKeys, missingLabels, type TagGroup } from "./taxonomy";
 
@@ -11,6 +13,7 @@ export const librarySorts = {
   "added-desc": "Сначала новые", "added-asc": "Сначала старые",
   "title-asc": "Название ↑", "title-desc": "Название ↓",
   "duration-asc": "Сначала короткие", "duration-desc": "Сначала длинные",
+  "quality-desc": "Лучшее качество", "quality-asc": "Худшее качество",
   popular: "Чаще слушаю", recent: "Недавно слушал", random: "В случайном порядке",
 } satisfies Record<LibrarySearch["sort"], string>;
 
@@ -35,6 +38,8 @@ export function restoreLibrarySearch(raw: string | null): LibrarySearch {
   if (stored.provider && Object.hasOwn(libraryProviders, stored.provider)) initial.provider = stored.provider;
   if (stored.availability && Object.hasOwn(libraryStatuses, stored.availability)) initial.availability = stored.availability;
   if (stored.sort && Object.hasOwn(librarySorts, stored.sort)) initial.sort = stored.sort;
+  if (Array.isArray(stored.audioQuality))
+    initial.audioQuality = [...new Set(stored.audioQuality.filter(value => audioQualityFilterSchema.safeParse(value).success))].slice(0, 32);
   if (Array.isArray(stored.tagIds)) initial.tagIds = stored.tagIds.filter(id => typeof id === "string" && id.length > 0 && id.length <= 256);
   // The former global AND/OR switch is replaced by per-group modes.
   const tagAll = (stored as { tagAll?: unknown }).tagAll;
@@ -54,7 +59,7 @@ export function restoreLibrarySearch(raw: string | null): LibrarySearch {
 
 export const defaultLibrarySearch: LibrarySearch = {
   query: "", kind: "", tagIds: [], minDuration: "", maxDuration: "",
-  addedFrom: "", addedThrough: "", provider: "", availability: "", favoriteOnly: false,
+  addedFrom: "", addedThrough: "", provider: "", availability: "", favoriteOnly: false, audioQuality: [],
   sort: "added-desc", tagMode: "and", performanceFilter: "", needsClassification: false,
 };
 
@@ -174,6 +179,12 @@ export function libraryFilterConditions(search: LibrarySearch, tags: TagDto[]): 
       label: tags.find((tag) => tag.id === id)?.name ?? "Удалённый тег",
       advanced: false,
       clear: (current) => ({ ...current, tagIds: current.tagIds.filter((tagId) => tagId !== id) }),
+    });
+  }
+  for (const value of search.audioQuality ?? []) {
+    conditions.push({
+      key: `quality:${value}`, label: "Качество · " + qualityFilterLabel(value), advanced: false,
+      clear: current => ({ ...current, audioQuality: current.audioQuality.filter(other => other !== value) }),
     });
   }
   if (search.provider) add("provider", libraryProviders[search.provider], true);

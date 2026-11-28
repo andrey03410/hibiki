@@ -6,7 +6,8 @@ import {
 import type { ItemDto, TagDto } from "@hibiki/contracts";
 import { api, formatDuration } from "./api";
 import { ItemArtwork } from "./ItemArtwork";
-import { Drawer, GroupIcon, ProgressRing, Segmented, TagChip } from "./design/primitives";
+import { Drawer, GroupIcon, ProgressRing, QualityBadge, Segmented, TagChip } from "./design/primitives";
+import { qualityTitle } from "./quality";
 import { useData } from "./WorkspaceUi";
 import { groupOf, groups, missingLabels, normalize, type TagCatalog, type TagGroup } from "./taxonomy";
 import { sourceChildren, sourceTrail } from "./library-filters";
@@ -107,7 +108,8 @@ function DrawerBody({ item, catalog, onClose, onPrev, onNext, onPlay, initialTab
       <span className="drawer-art"><ItemArtwork source={artwork} kind={item.kind} size="cover" /></span>
       <div className="drawer-title">
         <h2 title={item.title}>{title || item.title}</h2>
-        <p>{[item.originalTitle !== item.title ? item.originalTitle : "", item.kind === "video" ? "Видео" : "Аудио", formatDuration(item.duration)].filter(Boolean).join(" · ")}</p>
+        <p>{[item.originalTitle !== item.title ? item.originalTitle : "", item.kind === "video" ? "Видео" : "Аудио", formatDuration(item.duration)].filter(Boolean).join(" · ")}
+          {item.audioQuality && <QualityBadge quality={item.audioQuality} title={qualityTitle(item.audioQuality)} />}</p>
         <div className="drawer-actions">
           {onPlay && <button type="button" className="button compact" onClick={onPlay}><Play size={13} fill="currentColor" />Играть</button>}
           {panels.favorite}

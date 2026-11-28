@@ -254,3 +254,12 @@ it("keeps valid saved criteria when a field from a previous version is unsupport
   }));
   expect(result).toMatchObject({ query: "утро", sort: "title-asc", provider: "", tagIds: ["tag"] });
 });
+
+it("restores valid quality filters and shows each as a removable condition", () => {
+  const search = restoreLibrarySearch(JSON.stringify({ audioQuality: ["lossy", "hires.flac", "kind:audio", "lossy", 7], sort: "quality-asc" }));
+  expect(search).toMatchObject({ audioQuality: ["lossy", "hires.flac"], sort: "quality-asc" });
+  const conditions = libraryFilterConditions(search, []).filter(condition => condition.key.startsWith("quality:"));
+  expect(conditions.map(condition => condition.label)).toEqual(["Качество · С потерями", "Качество · Hi-Res · FLAC"]);
+  expect(conditions[0]!.clear(search).audioQuality).toEqual(["hires.flac"]);
+  expect(restoreLibrarySearch(null).audioQuality).toEqual([]);
+});
